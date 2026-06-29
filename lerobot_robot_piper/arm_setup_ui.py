@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import messagebox, scrolledtext, simpledialog, ttk
 
 from piper_sdk import C_PiperInterface_V2
 
@@ -34,6 +35,7 @@ from .ui import _load_geometry, _save_geometry
 FIND_THRESHOLD_RAW = 45_000
 # Find timeout in seconds
 FIND_TIMEOUT_SEC = 30
+_SUDO_PASSWORD: str | None = None
 
 CONFIGS: dict[str, list[str]] = {
     "1 Leader / 1 Follower": ["leader_1", "follower_1"],
@@ -60,9 +62,16 @@ def slot_to_label(slot: str) -> str:
 
 def _run_cmd(cmd: list[str], sudo: bool = False) -> tuple[int, str, str]:
     if sudo:
-        cmd = ["sudo", "-n"] + cmd
+        if _SUDO_PASSWORD is None:
+            cmd = ["sudo", "-n"] + cmd
+            input_text = None
+        else:
+            cmd = ["sudo", "-S", "-p", ""] + cmd
+            input_text = _SUDO_PASSWORD + "\n"
+    else:
+        input_text = None
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+        r = subprocess.run(cmd, input=input_text, capture_output=True, text=True, timeout=8)
         return r.returncode, r.stdout.strip(), r.stderr.strip()
     except Exception as exc:
         return -1, "", str(exc)
@@ -79,21 +88,40 @@ def detect_can_interfaces() -> list[dict]:
         if len(parts) < 2:
             continue
         iface, state = parts[0], parts[1]
-        bus_info = "—"
-        rc2, out2, _ = _run_cmd(["ethtool", "-i", iface], sudo=True)
-        if rc2 == 0:
-            for ln in out2.splitlines():
-                if ln.strip().startswith("bus-info:"):
-                    bus_info = ln.split(":", 1)[1].strip()
-                    break
+        bus_info = get_can_bus_info(iface)
         result.append({"iface": iface, "bus_info": bus_info, "state": state})
     return result
 
 
+def get_can_bus_info(iface: str) -> str:
+    """Return USB bus-info for a CAN interface without requiring sudo."""
+    rc, out, _ = _run_cmd(["ethtool", "-i", iface])
+    if rc == 0:
+        for ln in out.splitlines():
+            if ln.strip().startswith("bus-info:"):
+                bus_info = ln.split(":", 1)[1].strip()
+                if bus_info:
+                    return bus_info
+
+    try:
+        real_path = os.path.realpath(f"/sys/class/net/{iface}")
+    except OSError:
+        return "—"
+
+    for part in reversed(real_path.split(os.sep)):
+        if re.fullmatch(r"\d+(?:-\d+(?:\.\d+)*)?:\d+\.\d+", part):
+            return part
+    return "—"
+
+
 def init_can_interface(iface: str, bitrate: int) -> tuple[bool, str]:
     """Initialize a CAN interface at the given bitrate and bring it UP."""
-    _run_cmd(["modprobe", "gs_usb"], sudo=True)
-    _run_cmd(["ip", "link", "set", iface, "down"], sudo=True)
+    rc, _, err = _run_cmd(["modprobe", "gs_usb"], sudo=True)
+    if rc != 0:
+        return False, f"load gs_usb failed: {err}"
+    rc, _, err = _run_cmd(["ip", "link", "set", iface, "down"], sudo=True)
+    if rc != 0:
+        return False, f"bring-down failed: {err}"
     rc, _, err = _run_cmd(
         ["ip", "link", "set", iface, "type", "can", "bitrate", str(bitrate)], sudo=True
     )
@@ -117,6 +145,123 @@ def rename_can_interface(old_name: str, new_name: str) -> tuple[bool, str]:
     return True, "OK"
 
 
+def rename_can_interfaces(assignments: list[tuple[str, str]]) -> tuple[bool, list[str]]:
+    """Rename CAN interfaces as a batch, including swaps like can0 <-> can1."""
+    messages: list[str] = []
+    pending = [(old, new) for old, new in assignments if old != new]
+    unchanged = [(old, new) for old, new in assignments if old == new]
+
+    targets = [new for _, new in pending]
+    if len(targets) != len(set(targets)):
+        return False, ["duplicate target CAN names requested"]
+
+    old_names = {old for old, _ in pending}
+    for _, new_name in pending:
+        rc, _, _ = _run_cmd(["ip", "link", "show", new_name])
+        if rc == 0 and new_name not in old_names:
+            return False, [f"target CAN name already exists and is not part of this rename: {new_name}"]
+
+    temporary: list[tuple[str, str, str]] = []
+    for idx, (old_name, new_name) in enumerate(pending):
+        tmp_name = f"piper_tmp{idx}"
+        rc, _, _ = _run_cmd(["ip", "link", "show", tmp_name])
+        if rc == 0:
+            return False, [f"temporary CAN name already exists: {tmp_name}"]
+        temporary.append((old_name, tmp_name, new_name))
+
+    for old_name, tmp_name, _ in temporary:
+        _run_cmd(["ip", "link", "set", old_name, "down"], sudo=True)
+        rc, _, err = _run_cmd(["ip", "link", "set", old_name, "name", tmp_name], sudo=True)
+        if rc != 0:
+            return False, [*messages, f"{old_name} -> {tmp_name} failed: {err}"]
+        messages.append(f"{old_name} -> {tmp_name}")
+
+    for _, tmp_name, new_name in temporary:
+        _run_cmd(["ip", "link", "set", tmp_name, "down"], sudo=True)
+        rc, _, err = _run_cmd(["ip", "link", "set", tmp_name, "name", new_name], sudo=True)
+        if rc != 0:
+            return False, [*messages, f"{tmp_name} -> {new_name} failed: {err}"]
+        rc, _, err = _run_cmd(["ip", "link", "set", new_name, "up"], sudo=True)
+        if rc != 0:
+            return False, [*messages, f"{new_name} bring-up failed: {err}"]
+        messages.append(f"{tmp_name} -> {new_name}")
+
+    for _, new_name in unchanged:
+        rc, _, err = _run_cmd(["ip", "link", "set", new_name, "up"], sudo=True)
+        if rc != 0:
+            return False, [*messages, f"{new_name} bring-up failed: {err}"]
+        messages.append(f"{new_name} unchanged")
+
+    return True, messages
+
+
+def restore_saved_can_config(config_path: str, bitrate: int) -> tuple[bool, list[str]]:
+    """Restore CAN names from ~/piper_config.json using saved USB bus-info."""
+    try:
+        with open(config_path) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return False, [f"saved config not found: {config_path}"]
+    except Exception as exc:
+        return False, [f"failed to read saved config: {exc}"]
+
+    expected = {
+        arm["bus_info"]: arm["can_name"]
+        for arm in data.get("arms", [])
+        if arm.get("bus_info") and arm.get("can_name")
+    }
+    if not expected:
+        return False, ["saved config has no CAN bus-info mappings"]
+
+    interfaces = detect_can_interfaces()
+    current_by_bus = {d["bus_info"]: d["iface"] for d in interfaces}
+    assignments: list[tuple[str, str]] = []
+    missing: list[str] = []
+    for bus_info, target_name in expected.items():
+        iface = current_by_bus.get(bus_info)
+        if iface is None:
+            missing.append(f"{bus_info} -> {target_name}")
+        else:
+            assignments.append((iface, target_name))
+
+    if missing:
+        return False, ["missing saved CAN devices: " + ", ".join(missing)]
+
+    ok, messages = rename_can_interfaces(assignments)
+    if not ok:
+        return False, messages
+
+    for _, target_name in assignments:
+        ok_init, msg = init_can_interface(target_name, bitrate)
+        messages.append(f"{target_name}: {'OK' if ok_init else 'FAIL'} {msg}")
+        if not ok_init:
+            return False, messages
+
+    return True, messages
+
+
+def reset_can_interfaces(bitrate: int) -> tuple[bool, list[str]]:
+    """Reset all CAN interfaces to sequential can0, can1, ... names and bring them UP."""
+    interfaces = detect_can_interfaces()
+    if not interfaces:
+        return False, ["no CAN interfaces found"]
+
+    sorted_ifaces = sorted(interfaces, key=lambda d: (d["bus_info"], d["iface"]))
+    assignments = [(d["iface"], f"can{i}") for i, d in enumerate(sorted_ifaces)]
+
+    ok, messages = rename_can_interfaces(assignments)
+    if not ok:
+        return False, messages
+
+    for _, target_name in assignments:
+        ok_init, msg = init_can_interface(target_name, bitrate)
+        messages.append(f"{target_name}: {'OK' if ok_init else 'FAIL'} {msg}")
+        if not ok_init:
+            return False, messages
+
+    return True, messages
+
+
 # ─────────────────────────────── data model ───────────────────────────────
 
 
@@ -132,6 +277,7 @@ class DiscoveredArm:
         self.role = "unknown"       # determined by assigned slot, not by ctrl_mode
         self.slot: str | None = None       # assigned slot (e.g. "leader_1")
         self.new_name: str | None = None   # new CAN name (e.g. "can_leader1")
+        self.last_error = ""
         self._lock = threading.Lock()
 
     def connect_and_verify(self, bitrate: int) -> bool:
@@ -139,8 +285,9 @@ class DiscoveredArm:
         Initialize the CAN port and connect via SDK.
         Verify this is a Piper arm and detect leader/follower mode.
         """
-        ok, _ = init_can_interface(self.iface, bitrate)
+        ok, msg = init_can_interface(self.iface, bitrate)
         if not ok:
+            self.last_error = msg
             return False
 
         try:
@@ -202,7 +349,8 @@ class DiscoveredArm:
                 self.role = "follower"
 
             return True
-        except Exception:
+        except Exception as exc:
+            self.last_error = str(exc)
             return False
 
     def read_joints_raw(self) -> list[int] | None:
@@ -310,6 +458,18 @@ class ArmSetupUI:
         ttk.Entry(toolbar, textvariable=self._bitrate_var, width=10).pack(side="left", padx=4)
         self._scan_btn = ttk.Button(toolbar, text="Scan & Connect", command=self._on_scan)
         self._scan_btn.pack(side="left", padx=4)
+        self._restore_btn = ttk.Button(
+            toolbar,
+            text="Restore Saved CAN",
+            command=self._on_restore_saved_can,
+        )
+        self._restore_btn.pack(side="left", padx=4)
+        self._reset_btn = ttk.Button(
+            toolbar,
+            text="Reset CAN Names",
+            command=self._on_reset_can,
+        )
+        self._reset_btn.pack(side="left", padx=4)
         self._scan_status_var = tk.StringVar(value="")
         ttk.Label(toolbar, textvariable=self._scan_status_var,
                   foreground="#555555").pack(side="left", padx=8)
@@ -525,6 +685,10 @@ class ArmSetupUI:
     # ── Step 1 ────────────────────────────────────────────────────────────
 
     def _on_scan(self) -> None:
+        if not self._ensure_sudo():
+            self._scan_status_var.set("sudo authentication failed")
+            return
+
         self._scan_btn.config(state="disabled")
         self._apply_config_btn.config(state="disabled")
         self._scan_status_var.set("Scanning...")
@@ -565,7 +729,8 @@ class ArmSetupUI:
                              tags=("piper",)))
                 self._arms.append(arm)
             else:
-                self._log(f"  {iface}: no Piper or no response", level="warn")
+                detail = f" ({arm.last_error})" if arm.last_error else ""
+                self._log(f"  {iface}: no Piper or no response{detail}", level="warn")
                 self._ui(lambda i=iface, b=bus_info:
                          self._scan_tree.insert("", "end",
                              values=(i, b, "-", "none"),
@@ -579,6 +744,73 @@ class ArmSetupUI:
             self._log(f"Scan complete — {n} Piper arm(s). Select a configuration in Step 2.")
         else:
             self._log("No Piper arms found.", level="warn")
+
+    def _on_restore_saved_can(self) -> None:
+        if not self._ensure_sudo():
+            self._scan_status_var.set("sudo authentication failed")
+            return
+
+        self._restore_btn.config(state="disabled")
+        self._reset_btn.config(state="disabled")
+        self._scan_btn.config(state="disabled")
+        self._scan_status_var.set("Restoring saved CAN names...")
+        bitrate = self._parse_bitrate()
+        threading.Thread(target=self._restore_saved_can_worker, args=(bitrate,), daemon=True).start()
+
+    def _restore_saved_can_worker(self, bitrate: int) -> None:
+        config_path = os.path.expanduser("~/piper_config.json")
+        self._log(f"Restoring CAN names from {config_path}...")
+        ok, messages = restore_saved_can_config(config_path, bitrate)
+        for msg in messages:
+            self._log(f"  {'+' if ok else 'x'} {msg}", level="info" if ok else "error")
+
+        if ok:
+            self._ui(lambda: self._scan_status_var.set("CAN restored. Scan again."))
+            self._log("CAN restore complete. Click 'Scan & Connect' again.")
+        else:
+            self._ui(lambda: self._scan_status_var.set("CAN restore failed"))
+            self._log("CAN restore failed. Check sudo authentication and USB-CAN connections.", level="error")
+
+        self._ui(lambda: self._restore_btn.config(state="normal"))
+        self._ui(lambda: self._reset_btn.config(state="normal"))
+        self._ui(lambda: self._scan_btn.config(state="normal"))
+
+    def _on_reset_can(self) -> None:
+        if not messagebox.askyesno(
+            "Reset CAN names",
+            "This will rename all detected CAN interfaces to can0, can1, can2, ... "
+            "by USB bus order and bring them UP.\n\n"
+            "Saved leader/follower assignments will not be used. Continue?",
+        ):
+            return
+
+        if not self._ensure_sudo():
+            self._scan_status_var.set("sudo authentication failed")
+            return
+
+        self._restore_btn.config(state="disabled")
+        self._reset_btn.config(state="disabled")
+        self._scan_btn.config(state="disabled")
+        self._scan_status_var.set("Resetting CAN names...")
+        bitrate = self._parse_bitrate()
+        threading.Thread(target=self._reset_can_worker, args=(bitrate,), daemon=True).start()
+
+    def _reset_can_worker(self, bitrate: int) -> None:
+        self._log("Resetting CAN names to can0, can1, can2, ...")
+        ok, messages = reset_can_interfaces(bitrate)
+        for msg in messages:
+            self._log(f"  {'+' if ok else 'x'} {msg}", level="info" if ok else "error")
+
+        if ok:
+            self._ui(lambda: self._scan_status_var.set("CAN reset. Scan again."))
+            self._log("CAN reset complete. Click 'Scan & Connect' again.")
+        else:
+            self._ui(lambda: self._scan_status_var.set("CAN reset failed"))
+            self._log("CAN reset failed. Check sudo authentication and USB-CAN connections.", level="error")
+
+        self._ui(lambda: self._restore_btn.config(state="normal"))
+        self._ui(lambda: self._reset_btn.config(state="normal"))
+        self._ui(lambda: self._scan_btn.config(state="normal"))
 
     # ── Step 2 ────────────────────────────────────────────────────────────
 
@@ -755,6 +987,10 @@ class ArmSetupUI:
     # ── Step 4 ────────────────────────────────────────────────────────────
 
     def _on_finalize(self) -> None:
+        if not self._ensure_sudo():
+            self._finalize_status_var.set("sudo authentication failed")
+            return
+
         assigned = [(a.iface, a.new_name) for a in self._arms
                     if a.slot and a.new_name]
         if not assigned:
@@ -795,15 +1031,12 @@ class ArmSetupUI:
             arm.disconnect()
         self._log("All connections closed.")
 
-        success_all = True
         for old_name, new_name in assignments:
-            self._log(f"  {old_name}  ->  {new_name}  renaming...")
-            ok, msg = rename_can_interface(old_name, new_name)
-            if ok:
-                self._log(f"  + {old_name}  ->  {new_name}  done")
-            else:
-                self._log(f"  x {old_name} rename failed: {msg}", level="error")
-                success_all = False
+            self._log(f"  {old_name}  ->  {new_name}  queued")
+
+        success_all, rename_messages = rename_can_interfaces(assignments)
+        for msg in rename_messages:
+            self._log(f"  {'+' if success_all else 'x'} {msg}", level=None if success_all else "error")
 
         if success_all:
             save_path = self._save_config()
@@ -847,6 +1080,33 @@ class ArmSetupUI:
     def _ui(self, fn) -> None:
         """Thread-safe UI update from a background thread."""
         self.root.after(0, fn)
+
+    def _ensure_sudo(self) -> bool:
+        global _SUDO_PASSWORD
+
+        rc, _, _ = _run_cmd(["true"], sudo=True)
+        if rc == 0:
+            return True
+
+        password = simpledialog.askstring(
+            "sudo password",
+            "CAN setup requires sudo permission.\nEnter your sudo password:",
+            show="*",
+            parent=self.root,
+        )
+        if not password:
+            self._log("sudo authentication cancelled", level="warn")
+            return False
+
+        _SUDO_PASSWORD = password
+        rc, _, err = _run_cmd(["-v"], sudo=True)
+        if rc == 0:
+            self._log("sudo authentication OK")
+            return True
+
+        _SUDO_PASSWORD = None
+        self._log(f"sudo authentication failed: {err}", level="error")
+        return False
 
     def _log(self, msg: str, level: str = "info") -> None:
         ts = time.strftime("%H:%M:%S")
