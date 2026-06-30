@@ -37,6 +37,20 @@ FIND_THRESHOLD_RAW = 45_000
 FIND_TIMEOUT_SEC = 30
 _SUDO_PASSWORD: str | None = None
 
+
+def _looks_like_permission_error(text: str) -> bool:
+    text = text.lower()
+    return any(
+        needle in text
+        for needle in (
+            "operation not permitted",
+            "permission denied",
+            "authentication required",
+            "a password is required",
+            "sudo",
+        )
+    )
+
 CONFIGS: dict[str, list[str]] = {
     "1 Leader / 1 Follower": ["leader_1", "follower_1"],
     "2 Followers":           ["follower_1", "follower_2"],
@@ -60,16 +74,22 @@ def slot_to_label(slot: str) -> str:
 # ─────────────────────────────── helpers ──────────────────────────────────
 
 
-def _run_cmd(cmd: list[str], sudo: bool = False) -> tuple[int, str, str]:
-    if sudo:
+def _run_cmd(cmd: list[str], sudo: bool = False, force_sudo: bool = False) -> tuple[int, str, str]:
+    input_text = None
+    if sudo and not force_sudo:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+            if r.returncode == 0 or not _looks_like_permission_error(r.stderr):
+                return r.returncode, r.stdout.strip(), r.stderr.strip()
+        except Exception as exc:
+            return -1, "", str(exc)
+
+    if sudo and os.geteuid() != 0:
         if _SUDO_PASSWORD is None:
             cmd = ["sudo", "-n"] + cmd
-            input_text = None
         else:
             cmd = ["sudo", "-S", "-p", ""] + cmd
             input_text = _SUDO_PASSWORD + "\n"
-    else:
-        input_text = None
     try:
         r = subprocess.run(cmd, input=input_text, capture_output=True, text=True, timeout=8)
         return r.returncode, r.stdout.strip(), r.stderr.strip()
@@ -114,8 +134,18 @@ def get_can_bus_info(iface: str) -> str:
     return "—"
 
 
+def is_can_interface_ready(iface: str, bitrate: int) -> bool:
+    rc, out, _ = _run_cmd(["ip", "-details", "link", "show", iface])
+    if rc != 0:
+        return False
+    return "state UP" in out and f"bitrate {bitrate}" in out
+
+
 def init_can_interface(iface: str, bitrate: int) -> tuple[bool, str]:
     """Initialize a CAN interface at the given bitrate and bring it UP."""
+    if is_can_interface_ready(iface, bitrate):
+        return True, "already UP"
+
     rc, _, err = _run_cmd(["modprobe", "gs_usb"], sudo=True)
     if rc != 0:
         return False, f"load gs_usb failed: {err}"
@@ -685,10 +715,6 @@ class ArmSetupUI:
     # ── Step 1 ────────────────────────────────────────────────────────────
 
     def _on_scan(self) -> None:
-        if not self._ensure_sudo():
-            self._scan_status_var.set("sudo authentication failed")
-            return
-
         self._scan_btn.config(state="disabled")
         self._apply_config_btn.config(state="disabled")
         self._scan_status_var.set("Scanning...")
@@ -701,10 +727,10 @@ class ArmSetupUI:
             self._scan_tree.delete(item)
 
         bitrate = self._parse_bitrate()
-        threading.Thread(target=self._scan_worker, args=(bitrate,),
+        threading.Thread(target=self._scan_worker, args=(bitrate, False),
                          daemon=True).start()
 
-    def _scan_worker(self, bitrate: int) -> None:
+    def _scan_worker(self, bitrate: int, retried_with_sudo: bool) -> None:
         interfaces = detect_can_interfaces()
         if not interfaces:
             self._log("No CAN ports found. Check that USB-CAN adapters are connected.",
@@ -715,6 +741,7 @@ class ArmSetupUI:
 
         self._log(f"Found {len(interfaces)} CAN port(s). Checking each for Piper...")
 
+        permission_errors: list[str] = []
         for d in interfaces:
             iface, bus_info = d["iface"], d["bus_info"]
             self._log(f"  {iface}: initializing and connecting...")
@@ -731,10 +758,20 @@ class ArmSetupUI:
             else:
                 detail = f" ({arm.last_error})" if arm.last_error else ""
                 self._log(f"  {iface}: no Piper or no response{detail}", level="warn")
+                if _looks_like_permission_error(arm.last_error):
+                    permission_errors.append(f"{iface}: {arm.last_error}")
                 self._ui(lambda i=iface, b=bus_info:
                          self._scan_tree.insert("", "end",
                              values=(i, b, "-", "none"),
                              tags=("none",)))
+
+        if not self._arms and permission_errors and not retried_with_sudo:
+            self._log("CAN setup hit a permission error; requesting sudo and retrying once.", level="warn")
+            if self._ensure_sudo_threadsafe():
+                self._ui(lambda: self._scan_status_var.set("Retrying with sudo..."))
+                self._ui(lambda: [self._scan_tree.delete(item) for item in self._scan_tree.get_children()])
+                self._scan_worker(bitrate, True)
+                return
 
         n = len(self._arms)
         self._ui(lambda: self._scan_status_var.set(f"{n} Piper arm(s) found"))
@@ -746,21 +783,23 @@ class ArmSetupUI:
             self._log("No Piper arms found.", level="warn")
 
     def _on_restore_saved_can(self) -> None:
-        if not self._ensure_sudo():
-            self._scan_status_var.set("sudo authentication failed")
-            return
-
         self._restore_btn.config(state="disabled")
         self._reset_btn.config(state="disabled")
         self._scan_btn.config(state="disabled")
         self._scan_status_var.set("Restoring saved CAN names...")
         bitrate = self._parse_bitrate()
-        threading.Thread(target=self._restore_saved_can_worker, args=(bitrate,), daemon=True).start()
+        threading.Thread(target=self._restore_saved_can_worker, args=(bitrate, False), daemon=True).start()
 
-    def _restore_saved_can_worker(self, bitrate: int) -> None:
+    def _restore_saved_can_worker(self, bitrate: int, retried_with_sudo: bool) -> None:
         config_path = os.path.expanduser("~/piper_config.json")
         self._log(f"Restoring CAN names from {config_path}...")
         ok, messages = restore_saved_can_config(config_path, bitrate)
+        if not ok and not retried_with_sudo and any(_looks_like_permission_error(msg) for msg in messages):
+            self._log("CAN restore hit a permission error; requesting sudo and retrying once.", level="warn")
+            if self._ensure_sudo_threadsafe():
+                self._restore_saved_can_worker(bitrate, True)
+                return
+
         for msg in messages:
             self._log(f"  {'+' if ok else 'x'} {msg}", level="info" if ok else "error")
 
@@ -769,7 +808,7 @@ class ArmSetupUI:
             self._log("CAN restore complete. Click 'Scan & Connect' again.")
         else:
             self._ui(lambda: self._scan_status_var.set("CAN restore failed"))
-            self._log("CAN restore failed. Check sudo authentication and USB-CAN connections.", level="error")
+            self._log("CAN restore failed. Check permissions and USB-CAN connections.", level="error")
 
         self._ui(lambda: self._restore_btn.config(state="normal"))
         self._ui(lambda: self._reset_btn.config(state="normal"))
@@ -784,20 +823,22 @@ class ArmSetupUI:
         ):
             return
 
-        if not self._ensure_sudo():
-            self._scan_status_var.set("sudo authentication failed")
-            return
-
         self._restore_btn.config(state="disabled")
         self._reset_btn.config(state="disabled")
         self._scan_btn.config(state="disabled")
         self._scan_status_var.set("Resetting CAN names...")
         bitrate = self._parse_bitrate()
-        threading.Thread(target=self._reset_can_worker, args=(bitrate,), daemon=True).start()
+        threading.Thread(target=self._reset_can_worker, args=(bitrate, False), daemon=True).start()
 
-    def _reset_can_worker(self, bitrate: int) -> None:
+    def _reset_can_worker(self, bitrate: int, retried_with_sudo: bool) -> None:
         self._log("Resetting CAN names to can0, can1, can2, ...")
         ok, messages = reset_can_interfaces(bitrate)
+        if not ok and not retried_with_sudo and any(_looks_like_permission_error(msg) for msg in messages):
+            self._log("CAN reset hit a permission error; requesting sudo and retrying once.", level="warn")
+            if self._ensure_sudo_threadsafe():
+                self._reset_can_worker(bitrate, True)
+                return
+
         for msg in messages:
             self._log(f"  {'+' if ok else 'x'} {msg}", level="info" if ok else "error")
 
@@ -806,7 +847,7 @@ class ArmSetupUI:
             self._log("CAN reset complete. Click 'Scan & Connect' again.")
         else:
             self._ui(lambda: self._scan_status_var.set("CAN reset failed"))
-            self._log("CAN reset failed. Check sudo authentication and USB-CAN connections.", level="error")
+            self._log("CAN reset failed. Check permissions and USB-CAN connections.", level="error")
 
         self._ui(lambda: self._restore_btn.config(state="normal"))
         self._ui(lambda: self._reset_btn.config(state="normal"))
@@ -987,10 +1028,6 @@ class ArmSetupUI:
     # ── Step 4 ────────────────────────────────────────────────────────────
 
     def _on_finalize(self) -> None:
-        if not self._ensure_sudo():
-            self._finalize_status_var.set("sudo authentication failed")
-            return
-
         assigned = [(a.iface, a.new_name) for a in self._arms
                     if a.slot and a.new_name]
         if not assigned:
@@ -1004,10 +1041,10 @@ class ArmSetupUI:
             return
 
         self._finalize_btn.config(state="disabled")
-        threading.Thread(target=self._finalize_worker, args=(assigned,),
+        threading.Thread(target=self._finalize_worker, args=(assigned, False),
                          daemon=True).start()
 
-    def _finalize_worker(self, assignments: list[tuple[str, str]]) -> None:
+    def _finalize_worker(self, assignments: list[tuple[str, str]], retried_with_sudo: bool) -> None:
         # Apply MasterSlaveConfig before disconnecting (while SDK connections are live)
         for arm in self._arms:
             if arm.slot is None:
@@ -1035,6 +1072,16 @@ class ArmSetupUI:
             self._log(f"  {old_name}  ->  {new_name}  queued")
 
         success_all, rename_messages = rename_can_interfaces(assignments)
+        if (
+            not success_all
+            and not retried_with_sudo
+            and any(_looks_like_permission_error(msg) for msg in rename_messages)
+        ):
+            self._log("CAN rename hit a permission error; requesting sudo and retrying once.", level="warn")
+            if self._ensure_sudo_threadsafe():
+                self._finalize_worker(assignments, True)
+                return
+
         for msg in rename_messages:
             self._log(f"  {'+' if success_all else 'x'} {msg}", level=None if success_all else "error")
 
@@ -1084,7 +1131,10 @@ class ArmSetupUI:
     def _ensure_sudo(self) -> bool:
         global _SUDO_PASSWORD
 
-        rc, _, _ = _run_cmd(["true"], sudo=True)
+        if os.geteuid() == 0:
+            return True
+
+        rc, _, _ = _run_cmd(["true"], sudo=True, force_sudo=True)
         if rc == 0:
             return True
 
@@ -1099,7 +1149,7 @@ class ArmSetupUI:
             return False
 
         _SUDO_PASSWORD = password
-        rc, _, err = _run_cmd(["-v"], sudo=True)
+        rc, _, err = _run_cmd(["-v"], sudo=True, force_sudo=True)
         if rc == 0:
             self._log("sudo authentication OK")
             return True
@@ -1107,6 +1157,23 @@ class ArmSetupUI:
         _SUDO_PASSWORD = None
         self._log(f"sudo authentication failed: {err}", level="error")
         return False
+
+    def _ensure_sudo_threadsafe(self) -> bool:
+        if threading.current_thread() is threading.main_thread():
+            return self._ensure_sudo()
+
+        done = threading.Event()
+        result = {"ok": False}
+
+        def _ask() -> None:
+            try:
+                result["ok"] = self._ensure_sudo()
+            finally:
+                done.set()
+
+        self.root.after(0, _ask)
+        done.wait()
+        return result["ok"]
 
     def _log(self, msg: str, level: str = "info") -> None:
         ts = time.strftime("%H:%M:%S")
