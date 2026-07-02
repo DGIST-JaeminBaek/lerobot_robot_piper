@@ -56,17 +56,58 @@ def env_int(values: dict[str, str], key: str, default: int) -> int:
     return int(env_value(values, key, str(default)))
 
 
+def _camera_entry(
+    name: str,
+    camera_type: str,
+    camera_value: str,
+    width: str,
+    height: str,
+    fps: str,
+    use_depth: str,
+) -> str:
+    """LeRobot CLI용 단일 camera config 문자열 생성"""
+    camera_type = camera_type.lower()
+    if camera_type == "opencv":
+        return (
+            f"{name}: "
+            f"{{type: opencv, index_or_path: {camera_value}, width: {width}, height: {height}, fps: {fps}}}"
+        )
+
+    if camera_type in {"intelrealsense", "realsense"}:
+        return (
+            f"{name}: "
+            "{"
+            f'type: intelrealsense, serial_number_or_name: "{camera_value}", '
+            f"width: {width}, height: {height}, fps: {fps}, use_depth: {use_depth}"
+            "}"
+        )
+
+    raise ValueError(f"Unsupported camera type '{camera_type}'. Use opencv or intelrealsense.")
+
+
 def camera_config(values: dict[str, str]) -> str:
-    """LeRobot CLI용 top/wrist OpenCV camera config 문자열 생성"""
+    """LeRobot CLI용 top/wrist camera config 문자열 생성"""
+    camera_type = env_value(values, "CAMERA_TYPE", "opencv").lower()
+    top_cam_type = env_value(values, "TOP_CAM_TYPE", camera_type).lower()
+    wrist_cam_type = env_value(values, "WRIST_CAM_TYPE", camera_type).lower()
     top_cam = env_value(values, "TOP_CAM", "0")
     wrist_cam = env_value(values, "WRIST_CAM", "1")
     width = env_value(values, "CAM_WIDTH", "640")
     height = env_value(values, "CAM_HEIGHT", "480")
     fps = env_value(values, "FPS", "30")
+    realsense_use_depth = env_value(values, "REALSENSE_USE_DEPTH", "false")
+    top_realsense_use_depth = env_value(values, "TOP_REALSENSE_USE_DEPTH", realsense_use_depth)
+    wrist_realsense_use_depth = env_value(values, "WRIST_REALSENSE_USE_DEPTH", realsense_use_depth)
+
+    top_config = _camera_entry("top", top_cam_type, top_cam, width, height, fps, top_realsense_use_depth)
+    wrist_config = _camera_entry(
+        "wrist", wrist_cam_type, wrist_cam, width, height, fps, wrist_realsense_use_depth
+    )
+
     return (
         "{ "
-        f"top: {{type: opencv, index_or_path: {top_cam}, width: {width}, height: {height}, fps: {fps}}}, "
-        f"wrist: {{type: opencv, index_or_path: {wrist_cam}, width: {width}, height: {height}, fps: {fps}}}"
+        f"{top_config}, "
+        f"{wrist_config}"
         "}"
     )
 

@@ -30,8 +30,9 @@ cp configs/recording.env.example configs/recording.env
 
 - `LEADER_PORT`: leader arm CAN 포트
 - `FOLLOWER_PORT`: follower arm CAN 포트
-- `TOP_CAM`: 상방 카메라 index
-- `WRIST_CAM`: 팔목 카메라 index
+- `CAMERA_TYPE`: `opencv` 또는 `intelrealsense`
+- `TOP_CAM`: 상방 카메라 index 또는 RealSense serial/name
+- `WRIST_CAM`: 팔목 카메라 index 또는 RealSense serial/name
 - `HF_USER` 또는 `DATASET_REPO_ID`: 저장할 dataset 이름
 
 Linux 서버에서 CAN 초기화:
@@ -46,10 +47,25 @@ bash scripts/1__init_can.sh
 bash scripts/2__find_camera.sh
 ```
 
+RealSense만 확인하려면:
+
+```bash
+bash scripts/2__find_camera.sh realsense
+```
+
 확인한 카메라 번호 저장:
 
 ```bash
 bash scripts/3__set_camera.sh 6 0
+```
+
+Intel RealSense를 LeRobot RealSense backend로 쓰려면 `configs/recording.env`에서:
+
+```bash
+CAMERA_TYPE=intelrealsense
+TOP_CAM=327122074262
+WRIST_CAM=243322071626
+REALSENSE_USE_DEPTH=false
 ```
 
 텔레옵 점검:

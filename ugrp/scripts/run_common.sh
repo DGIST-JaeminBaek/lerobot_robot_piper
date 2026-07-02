@@ -38,13 +38,41 @@ bool_default() {
 camera_config_arg() {
   local top_cam="${TOP_CAM:-0}"
   local wrist_cam="${WRIST_CAM:-1}"
+  local camera_type="${CAMERA_TYPE:-opencv}"
+  local top_cam_type="${TOP_CAM_TYPE:-${camera_type}}"
+  local wrist_cam_type="${WRIST_CAM_TYPE:-${camera_type}}"
   local width="${CAM_WIDTH:-640}"
   local height="${CAM_HEIGHT:-480}"
   local fps="${FPS:-30}"
+  local realsense_use_depth="${REALSENSE_USE_DEPTH:-false}"
 
-  printf '{ top: {type: opencv, index_or_path: %s, width: %s, height: %s, fps: %s}, wrist: {type: opencv, index_or_path: %s, width: %s, height: %s, fps: %s} }' \
-    "${top_cam}" "${width}" "${height}" "${fps}" \
-    "${wrist_cam}" "${width}" "${height}" "${fps}"
+  camera_config_entry() {
+    local name="$1"
+    local type="${2,,}"
+    local value="$3"
+    local depth="$4"
+
+    case "${type}" in
+      opencv)
+        printf '%s: {type: opencv, index_or_path: %s, width: %s, height: %s, fps: %s}' \
+          "${name}" "${value}" "${width}" "${height}" "${fps}"
+        ;;
+      intelrealsense|realsense)
+        printf '%s: {type: intelrealsense, serial_number_or_name: "%s", width: %s, height: %s, fps: %s, use_depth: %s}' \
+          "${name}" "${value}" "${width}" "${height}" "${fps}" "${depth}"
+        ;;
+      *)
+        echo "[ERROR] Unsupported camera type '${type}'. Use opencv or intelrealsense." >&2
+        return 1
+        ;;
+    esac
+  }
+
+  printf '{ '
+  camera_config_entry top "${top_cam_type}" "${top_cam}" "${TOP_REALSENSE_USE_DEPTH:-${realsense_use_depth}}"
+  printf ', '
+  camera_config_entry wrist "${wrist_cam_type}" "${wrist_cam}" "${WRIST_REALSENSE_USE_DEPTH:-${realsense_use_depth}}"
+  printf ' }'
 }
 
 print_command() {
