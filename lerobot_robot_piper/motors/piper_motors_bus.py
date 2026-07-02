@@ -6,7 +6,7 @@ from piper_sdk import C_PiperInterface_V2
 from wego_piper.port_handler import PortHandler
 
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
-from lerobot.motors.motors_bus import MotorsBusBase
+from lerobot.motors.motors_bus import MotorsBus
 
 from .tables import (
     INITIALIZE_POSITION,
@@ -16,7 +16,7 @@ from .tables import (
 logger = logging.getLogger(__name__)
 
 
-class PiperMotorsBus(MotorsBusBase):
+class PiperMotorsBus(MotorsBus):
 
     apply_drive_mode = False
 
@@ -35,7 +35,7 @@ class PiperMotorsBus(MotorsBusBase):
         self.piper = C_PiperInterface_V2(port)
         logger.info(f"{id} : {port} is selected.")
 
-    # ---- MotorsBusBase abstract implementations ----
+    # ---- MotorsBus abstract implementations ----
 
     @property
     def is_connected(self) -> bool:
