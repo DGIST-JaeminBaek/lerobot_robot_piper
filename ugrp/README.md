@@ -162,10 +162,6 @@ python3 scripts/wego_dataset_check.py --dataset-repo-id your_hf_name/piper_write
 
 ## 안전 기본값
 
-기본 `MAX_RELATIVE_TARGET`은 `5`입니다. leader와 follower 초기 자세가 잘 맞지 않으면 follower가 갑자기 움직일 수 있으므로 더 낮은 값으로 시작합니다.
-
-```bash
-MAX_RELATIVE_TARGET=2 bash scripts/4__teleoperate.sh
-```
+`piper_follower` 플러그인은 follower 한 timestep action 변화량을 기본 `5.0`으로 제한합니다.
 
 초기 자세가 계속 어긋나면 `piper-calibrate`로 zero-point를 먼저 맞춥니다.

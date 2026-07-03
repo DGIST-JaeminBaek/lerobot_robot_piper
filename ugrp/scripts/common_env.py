@@ -56,60 +56,58 @@ def env_int(values: dict[str, str], key: str, default: int) -> int:
     return int(env_value(values, key, str(default)))
 
 
-def _camera_entry(
-    name: str,
-    camera_type: str,
-    camera_value: str,
-    width: str,
-    height: str,
-    fps: str,
-    use_depth: str,
-) -> str:
-    """LeRobot CLI용 단일 camera config 문자열 생성"""
-    camera_type = camera_type.lower()
-    if camera_type == "opencv":
-        return (
-            f"{name}: "
-            f"{{type: opencv, index_or_path: {camera_value}, width: {width}, height: {height}, fps: {fps}}}"
-        )
-
-    if camera_type in {"intelrealsense", "realsense"}:
-        return (
-            f"{name}: "
-            "{"
-            f'type: intelrealsense, serial_number_or_name: "{camera_value}", '
-            f"width: {width}, height: {height}, fps: {fps}, use_depth: {use_depth}"
-            "}"
-        )
-
-    raise ValueError(f"Unsupported camera type '{camera_type}'. Use opencv or intelrealsense.")
-
-
-def camera_config(values: dict[str, str]) -> str:
-    """LeRobot CLI용 top/wrist camera config 문자열 생성"""
+def camera_args(values: dict[str, str]) -> list[str]:
+    """Piper follower 카메라 CLI 인자 생성"""
     camera_type = env_value(values, "CAMERA_TYPE", "opencv").lower()
     top_cam_type = env_value(values, "TOP_CAM_TYPE", camera_type).lower()
     wrist_cam_type = env_value(values, "WRIST_CAM_TYPE", camera_type).lower()
-    top_cam = env_value(values, "TOP_CAM", "0")
-    wrist_cam = env_value(values, "WRIST_CAM", "1")
+    # 빈 값은 카메라 비활성화로 유지
+    top_cam = values.get("TOP_CAM", "0")
+    wrist_cam = values.get("WRIST_CAM", "1")
     width = env_value(values, "CAM_WIDTH", "640")
     height = env_value(values, "CAM_HEIGHT", "480")
     fps = env_value(values, "FPS", "30")
     realsense_use_depth = env_value(values, "REALSENSE_USE_DEPTH", "false")
+    realsense_warmup_s = env_value(values, "REALSENSE_WARMUP_S", "5.0")
+    camera_connect_warmup = env_value(values, "CAMERA_CONNECT_WARMUP", "false")
+    camera_post_connect_wait_s = env_value(values, "CAMERA_POST_CONNECT_WAIT_S", "2.0")
     top_realsense_use_depth = env_value(values, "TOP_REALSENSE_USE_DEPTH", realsense_use_depth)
     wrist_realsense_use_depth = env_value(values, "WRIST_REALSENSE_USE_DEPTH", realsense_use_depth)
 
-    top_config = _camera_entry("top", top_cam_type, top_cam, width, height, fps, top_realsense_use_depth)
-    wrist_config = _camera_entry(
-        "wrist", wrist_cam_type, wrist_cam, width, height, fps, wrist_realsense_use_depth
-    )
+    return [
+        f"--robot.camera_type={camera_type}",
+        f"--robot.top_cam_type={top_cam_type}",
+        f"--robot.wrist_cam_type={wrist_cam_type}",
+        f"--robot.top_cam={top_cam}",
+        f"--robot.wrist_cam={wrist_cam}",
+        f"--robot.cam_width={width}",
+        f"--robot.cam_height={height}",
+        f"--robot.camera_fps={fps}",
+        f"--robot.realsense_use_depth={realsense_use_depth}",
+        f"--robot.realsense_warmup_s={realsense_warmup_s}",
+        f"--robot.camera_connect_warmup={camera_connect_warmup}",
+        f"--robot.camera_post_connect_wait_s={camera_post_connect_wait_s}",
+        f"--robot.top_realsense_use_depth={top_realsense_use_depth}",
+        f"--robot.wrist_realsense_use_depth={wrist_realsense_use_depth}",
+    ]
 
-    return (
-        "{ "
-        f"{top_config}, "
-        f"{wrist_config}"
-        "}"
-    )
+
+def action_offset_args(values: dict[str, str]) -> list[str]:
+    """Piper follower 시작 자세 보정 CLI 인자 생성"""
+    # shell 스크립트와 동일한 기본값 유지
+    return [
+        f"--robot.park_on_connect={str(env_bool(values, 'PARK_ON_CONNECT', False)).lower()}",
+        f"--robot.use_action_offset={str(env_bool(values, 'USE_ACTION_OFFSET', True)).lower()}",
+        f"--robot.use_manual_action_offset={str(env_bool(values, 'USE_MANUAL_ACTION_OFFSET', False)).lower()}",
+        f"--robot.action_offset_report_threshold={env_value(values, 'ACTION_OFFSET_REPORT_THRESHOLD', '3.0')}",
+        f"--robot.action_offset_joint1={env_value(values, 'ACTION_OFFSET_JOINT1', '0.0')}",
+        f"--robot.action_offset_joint2={env_value(values, 'ACTION_OFFSET_JOINT2', '0.0')}",
+        f"--robot.action_offset_joint3={env_value(values, 'ACTION_OFFSET_JOINT3', '0.0')}",
+        f"--robot.action_offset_joint4={env_value(values, 'ACTION_OFFSET_JOINT4', '0.0')}",
+        f"--robot.action_offset_joint5={env_value(values, 'ACTION_OFFSET_JOINT5', '0.0')}",
+        f"--robot.action_offset_joint6={env_value(values, 'ACTION_OFFSET_JOINT6', '0.0')}",
+        f"--robot.action_offset_gripper={env_value(values, 'ACTION_OFFSET_GRIPPER', '0.0')}",
+    ]
 
 
 def print_command(command: list[str]) -> None:

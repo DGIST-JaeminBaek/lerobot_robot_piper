@@ -14,7 +14,6 @@ if [[ "${DRY_RUN:-false}" != "true" ]] && ! python -c "import grpc" >/dev/null 2
 fi
 
 FOLLOWER_PORT="${FOLLOWER_PORT:-can_follower1}"
-ROBOT_ID="${ROBOT_ID:-piper_follower1}"
 SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
 SERVER_PORT="${SERVER_PORT:-8088}"
 PRETRAINED_NAME_OR_PATH="${PRETRAINED_NAME_OR_PATH:-}"
@@ -32,14 +31,14 @@ if [[ -z "${PRETRAINED_NAME_OR_PATH}" && "${DRY_RUN:-false}" != "true" ]]; then
   exit 1
 fi
 PRETRAINED_NAME_OR_PATH="${PRETRAINED_NAME_OR_PATH:-your_hf_or_local_policy_path}"
+mapfile -t CAMERA_ARGS < <(robot_camera_args)
 
 cmd=(
   python -m lerobot.async_inference.robot_client
   "--server_address=${SERVER_HOST}:${SERVER_PORT}"
   "--robot.type=piper_follower"
   "--robot.port=${FOLLOWER_PORT}"
-  "--robot.id=${ROBOT_ID}"
-  "--robot.cameras=$(camera_config_arg)"
+  "${CAMERA_ARGS[@]}"
   "--robot.discover_packages_path=lerobot_robot_piper"
   "--pretrained_name_or_path=${PRETRAINED_NAME_OR_PATH}"
   "--policy_type=${POLICY_TYPE}"

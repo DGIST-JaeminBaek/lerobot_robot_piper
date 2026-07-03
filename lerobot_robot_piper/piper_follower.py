@@ -52,6 +52,8 @@ class PiperFollower(Robot):
             },
         )
         self.cameras = make_cameras_from_configs(config.cameras)
+        self._action_offset: dict[str, float] | None = None
+        self._action_offset_reported = False
         self._camera_executor: ThreadPoolExecutor | None = None
         if self.cameras:
             self._camera_executor = ThreadPoolExecutor(
@@ -92,12 +94,19 @@ class PiperFollower(Robot):
         logger.info(f"{self} connected.")
         self.bus.enable_torque()
         logger.info(f"{self} torque on.")
-        if calibrate:
+
+        # 재시작 시 현재 자세 유지
+        if calibrate and self.config.park_on_connect:
             logger.info(f"{self} go to origin.")
             self.bus.parking()
 
         for cam in self.cameras.values():
-            cam.connect()
+            # 모든 camera pipeline 먼저 시작
+            cam.connect(warmup=self.config.camera_connect_warmup)
+
+        if self.cameras and not self.config.camera_connect_warmup:
+            # 동시 RealSense stream 안정화 대기
+            time.sleep(self.config.camera_post_connect_wait_s)
 
     @property
     def is_calibrated(self) -> bool:
@@ -156,6 +165,22 @@ class PiperFollower(Robot):
             else:
                 goal_pos[key] = val
 
+        if self.config.use_action_offset:
+            present_pos = self.bus.sync_read("Present_Position")
+            if self._action_offset is None:
+                if self.config.use_manual_action_offset:
+                    # recording.env 기준 수동 offset
+                    self._action_offset = self._manual_action_offset(goal_pos)
+                    logger.info(f"{self} manual action offset applied: {self._action_offset}")
+                else:
+                    # 첫 leader action과 follower 현재 자세 차이
+                    self._action_offset = {key: present_pos[key] - val for key, val in goal_pos.items()}
+                    logger.info(f"{self} action offset initialized: {self._action_offset}")
+                self._report_action_offset(goal_pos, present_pos, self._action_offset)
+
+            # follower 현재 자세 기준 상대 추종
+            goal_pos = {key: val + self._action_offset.get(key, 0.0) for key, val in goal_pos.items()}
+
         # Cap goal position when too far away from present position.
         if self.config.max_relative_target is not None:
             present_pos = self.bus.sync_read("Present_Position")
@@ -164,6 +189,34 @@ class PiperFollower(Robot):
 
         self.bus.set_action(goal_pos, is_conv=True)
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
+
+    def _manual_action_offset(self, goal_pos: dict[str, float]) -> dict[str, float]:
+        return {
+            key: getattr(self.config, f"action_offset_{key}", 0.0)
+            for key in goal_pos
+        }
+
+    def _report_action_offset(
+        self,
+        goal_pos: dict[str, float],
+        present_pos: dict[str, float],
+        action_offset: dict[str, float],
+    ) -> None:
+        # 시작 자세 차이 1회 출력
+        if self._action_offset_reported:
+            return
+
+        threshold = self.config.action_offset_report_threshold
+        lines = [f"{self} action offset report"]
+        for key in sorted(action_offset):
+            diff = action_offset[key]
+            mark = " CHECK" if abs(diff) >= threshold else ""
+            lines.append(
+                f"  {key}: leader={goal_pos[key]:.3f}, follower={present_pos[key]:.3f}, offset={diff:.3f}{mark}"
+            )
+        lines.append("  set USE_MANUAL_ACTION_OFFSET=true and ACTION_OFFSET_* in recording.env to fix values")
+        logger.info("\n".join(lines))
+        self._action_offset_reported = True
 
     def parking(self):
         self.bus.parking()

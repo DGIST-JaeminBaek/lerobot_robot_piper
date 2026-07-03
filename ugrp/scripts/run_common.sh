@@ -35,44 +35,52 @@ bool_default() {
   fi
 }
 
-camera_config_arg() {
-  local top_cam="${TOP_CAM:-0}"
-  local wrist_cam="${WRIST_CAM:-1}"
+robot_camera_args() {
+  # LeRobot 0.4.4 dict 파서 우회용 카메라 인자
   local camera_type="${CAMERA_TYPE:-opencv}"
   local top_cam_type="${TOP_CAM_TYPE:-${camera_type}}"
   local wrist_cam_type="${WRIST_CAM_TYPE:-${camera_type}}"
+  local top_cam="${TOP_CAM-0}"
+  local wrist_cam="${WRIST_CAM-1}"
   local width="${CAM_WIDTH:-640}"
   local height="${CAM_HEIGHT:-480}"
   local fps="${FPS:-30}"
   local realsense_use_depth="${REALSENSE_USE_DEPTH:-false}"
+  local realsense_warmup_s="${REALSENSE_WARMUP_S:-5.0}"
+  local camera_connect_warmup="${CAMERA_CONNECT_WARMUP:-false}"
+  local camera_post_connect_wait_s="${CAMERA_POST_CONNECT_WAIT_S:-2.0}"
 
-  camera_config_entry() {
-    local name="$1"
-    local type="${2,,}"
-    local value="$3"
-    local depth="$4"
+  printf '%s\n' \
+    "--robot.camera_type=${camera_type}" \
+    "--robot.top_cam_type=${top_cam_type}" \
+    "--robot.wrist_cam_type=${wrist_cam_type}" \
+    "--robot.top_cam=${top_cam}" \
+    "--robot.wrist_cam=${wrist_cam}" \
+    "--robot.cam_width=${width}" \
+    "--robot.cam_height=${height}" \
+    "--robot.camera_fps=${fps}" \
+    "--robot.realsense_use_depth=${realsense_use_depth}" \
+    "--robot.realsense_warmup_s=${realsense_warmup_s}" \
+    "--robot.camera_connect_warmup=${camera_connect_warmup}" \
+    "--robot.camera_post_connect_wait_s=${camera_post_connect_wait_s}" \
+    "--robot.top_realsense_use_depth=${TOP_REALSENSE_USE_DEPTH:-${realsense_use_depth}}" \
+    "--robot.wrist_realsense_use_depth=${WRIST_REALSENSE_USE_DEPTH:-${realsense_use_depth}}"
+}
 
-    case "${type}" in
-      opencv)
-        printf '%s: {type: opencv, index_or_path: %s, width: %s, height: %s, fps: %s}' \
-          "${name}" "${value}" "${width}" "${height}" "${fps}"
-        ;;
-      intelrealsense|realsense)
-        printf '%s: {type: intelrealsense, serial_number_or_name: "%s", width: %s, height: %s, fps: %s, use_depth: %s}' \
-          "${name}" "${value}" "${width}" "${height}" "${fps}" "${depth}"
-        ;;
-      *)
-        echo "[ERROR] Unsupported camera type '${type}'. Use opencv or intelrealsense." >&2
-        return 1
-        ;;
-    esac
-  }
-
-  printf '{ '
-  camera_config_entry top "${top_cam_type}" "${top_cam}" "${TOP_REALSENSE_USE_DEPTH:-${realsense_use_depth}}"
-  printf ', '
-  camera_config_entry wrist "${wrist_cam_type}" "${wrist_cam}" "${WRIST_REALSENSE_USE_DEPTH:-${realsense_use_depth}}"
-  printf ' }'
+robot_action_offset_args() {
+  # leader/follower 시작 자세 차이 보정 인자
+  printf '%s\n' \
+    "--robot.park_on_connect=$(bool_default "${PARK_ON_CONNECT:-}" false)" \
+    "--robot.use_action_offset=$(bool_default "${USE_ACTION_OFFSET:-}" true)" \
+    "--robot.use_manual_action_offset=$(bool_default "${USE_MANUAL_ACTION_OFFSET:-}" false)" \
+    "--robot.action_offset_report_threshold=${ACTION_OFFSET_REPORT_THRESHOLD:-3.0}" \
+    "--robot.action_offset_joint1=${ACTION_OFFSET_JOINT1:-0.0}" \
+    "--robot.action_offset_joint2=${ACTION_OFFSET_JOINT2:-0.0}" \
+    "--robot.action_offset_joint3=${ACTION_OFFSET_JOINT3:-0.0}" \
+    "--robot.action_offset_joint4=${ACTION_OFFSET_JOINT4:-0.0}" \
+    "--robot.action_offset_joint5=${ACTION_OFFSET_JOINT5:-0.0}" \
+    "--robot.action_offset_joint6=${ACTION_OFFSET_JOINT6:-0.0}" \
+    "--robot.action_offset_gripper=${ACTION_OFFSET_GRIPPER:-0.0}"
 }
 
 print_command() {

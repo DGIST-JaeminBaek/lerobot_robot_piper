@@ -10,6 +10,9 @@ from lerobot.motors.motors_bus import MotorsBus
 
 from .tables import (
     INITIALIZE_POSITION,
+    MODEL_BAUDRATE_TABLE,
+    MODEL_ENCODING_TABLE,
+    MODEL_NUMBER_TABLE,
     MODEL_RESOLUTION_TABLE,
 )
 
@@ -19,6 +22,15 @@ logger = logging.getLogger(__name__)
 class PiperMotorsBus(MotorsBus):
 
     apply_drive_mode = False
+    available_baudrates = [1000000]
+    default_baudrate = 1000000
+    default_timeout = 1000
+    model_baudrate_table = {model: [1000000] for model in MODEL_BAUDRATE_TABLE}
+    model_ctrl_table = {model: {} for model in MODEL_NUMBER_TABLE}
+    model_encoding_table = MODEL_ENCODING_TABLE
+    model_number_table = MODEL_NUMBER_TABLE
+    model_resolution_table = MODEL_RESOLUTION_TABLE
+    normalized_data = ["Present_Position", "Goal_Position"]
 
     def __init__(
         self,
@@ -93,6 +105,38 @@ class PiperMotorsBus(MotorsBus):
 
     def write_calibration(self, calibration_dict: dict[str, MotorCalibration], cache: bool = True) -> None:
         self.calibration = calibration_dict
+
+    # ---- MotorsBus serial-protocol compatibility ----
+
+    def _assert_protocol_is_compatible(self, instruction_name: str) -> None:
+        pass
+
+    def _handshake(self) -> None:
+        pass
+
+    def _find_single_motor(self, motor: str, initial_baudrate: int | None = None) -> tuple[int, int]:
+        raise NotImplementedError("Piper CAN bus does not support single motor discovery.")
+
+    def configure_motors(self) -> None:
+        pass
+
+    def _disable_torque(self, motor: int, model: str, num_retry: int = 0) -> None:
+        self.disable_torque(num_retry=num_retry)
+
+    def _get_half_turn_homings(self, positions: dict[str | int, int | float]) -> dict[str | int, int | float]:
+        raise NotImplementedError("Piper CAN bus uses static calibration ranges.")
+
+    def _encode_sign(self, data_name: str, ids_values: dict[int, int]) -> dict[int, int]:
+        return ids_values
+
+    def _decode_sign(self, data_name: str, ids_values: dict[int, int]) -> dict[int, int]:
+        return ids_values
+
+    def _split_into_byte_chunks(self, value: int, length: int) -> list[int]:
+        return [(value >> (8 * idx)) & 0xFF for idx in range(length)]
+
+    def broadcast_ping(self, num_retry: int = 0, raise_on_error: bool = False) -> dict[int, int] | None:
+        return {motor.id: motor.id for motor in self.motors.values()}
 
     # ---- Piper-specific methods ----
 

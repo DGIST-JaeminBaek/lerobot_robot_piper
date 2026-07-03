@@ -40,8 +40,4 @@ python /path/to/lerobot_robot_piper/camera_check.py
 
 두 팔이 같은 물리 자세에서 다른 값을 보이면 녹화 전 `piper-calibrate` 실행.
 
-초기 자세가 불확실하면 `MAX_RELATIVE_TARGET`을 낮춰서 텔레옵 점검.
-
-```bash
-MAX_RELATIVE_TARGET=2 bash scripts/teleop_smoke_test.sh
-```
+초기 자세가 불확실하면 먼저 매우 짧게 `scripts/4__teleoperate.sh`로 반응만 확인.
