@@ -55,11 +55,7 @@ class PiperFollower(Robot):
         self._action_offset: dict[str, float] | None = None
         self._action_offset_reported = False
         self._camera_executor: ThreadPoolExecutor | None = None
-        if self.cameras:
-            self._camera_executor = ThreadPoolExecutor(
-                max_workers=len(self.cameras),
-                thread_name_prefix="cam_read",
-            )
+        self._ensure_camera_executor()
 
     def __str__(self) -> str:
         return f"{self.id} {self.__class__.__name__}"
@@ -107,6 +103,7 @@ class PiperFollower(Robot):
         if self.cameras and not self.config.camera_connect_warmup:
             # 동시 RealSense stream 안정화 대기
             time.sleep(self.config.camera_post_connect_wait_s)
+        self._ensure_camera_executor()
 
     @property
     def is_calibrated(self) -> bool:
@@ -221,8 +218,28 @@ class PiperFollower(Robot):
     def parking(self):
         self.bus.parking()
 
-    def disconnect(self, disable_torque: bool = False) -> None:
+    def _ensure_camera_executor(self) -> None:
+        if self.cameras and self._camera_executor is None:
+            self._camera_executor = ThreadPoolExecutor(
+                max_workers=len(self.cameras),
+                thread_name_prefix="cam_read",
+            )
+
+    def _disconnect_cameras(self) -> None:
         if self._camera_executor is not None:
-            self._camera_executor.shutdown(wait=False)
+            self._camera_executor.shutdown(wait=True, cancel_futures=True)
             self._camera_executor = None
+
+        for cam_name, cam in self.cameras.items():
+            if not cam.is_connected:
+                continue
+            try:
+                cam.disconnect()
+            except Exception as exc:
+                logger.warning(f"{self} failed to disconnect camera '{cam_name}': {exc}")
+
+    def disconnect(self, disable_torque: bool | None = None) -> None:
+        if disable_torque is None:
+            disable_torque = self.config.disable_torque_on_disconnect
+        self._disconnect_cameras()
         self.bus.disconnect(disable_torque)

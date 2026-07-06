@@ -100,4 +100,4 @@ class PiperLeader(Teleoperator):
 
     def disconnect(self) -> None:
         self.bus.disable_torque()
-        self.bus.disconnect()
+        self.bus.disconnect(disable_torque=False)

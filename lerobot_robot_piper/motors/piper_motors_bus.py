@@ -87,15 +87,15 @@ class PiperMotorsBus(MotorsBus):
         self.set_action(values, is_conv=True)
 
     def enable_torque(self, motors: str | list[str] | None = None, num_retry: int = 0) -> None:
-        retry = 50  # 5 seconds max
+        retry = num_retry if num_retry > 0 else 50  # 5 seconds max by default
         while not self.piper.EnablePiper() and retry:
             retry -= 1
             time.sleep(0.1)
-        logger.info(f"{self.piper.GetArmEnableStatus()}")
         if not retry:
-            logger.warning(f"{self.id} enable_torque timed out, continuing anyway")
-        else:
-            logger.info(f"{self.id} torque on.")
+            enable_status = self.piper.GetArmEnableStatus()
+            raise ConnectionError(f"{self.id} enable_torque timed out: {enable_status}")
+        logger.info(f"{self.piper.GetArmEnableStatus()}")
+        logger.info(f"{self.id} torque on.")
 
     def disable_torque(self, motors: str | list[str] | None = None, num_retry: int = 0) -> None:
         self.piper.DisablePiper()

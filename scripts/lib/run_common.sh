@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="1000 4 24 27 30 46 122 135 136 1000cd "/../.." && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${ENV_FILE:-${REPO_DIR}/configs/recording.env}"
 
 load_recording_env() {
