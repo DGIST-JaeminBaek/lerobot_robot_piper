@@ -161,6 +161,14 @@ def init_can_interface(iface: str, target_name: str, bitrate: int) -> tuple[bool
     return True, "; ".join(msgs)
 
 
+def bring_can_down(iface: str) -> tuple[bool, str]:
+    """비상정지용 — piper_session.py의 step_can_down과 동일하게 CAN 인터페이스를 즉시 내림."""
+    rc, _, err = _run_cmd(["ip", "link", "set", iface, "down"], sudo=True)
+    if rc != 0:
+        return False, f"Failed to bring down {iface}: {err}"
+    return True, f"{iface} DOWN"
+
+
 # --------------------------------------------------------- CAN Read-Only Monitor
 class CANMonitor:
     """Read-only CAN bus monitor. Connects to CAN and reads joint/status without sending commands."""
@@ -439,9 +447,32 @@ class PiperMonitorUI:
         self.can_status_var = tk.StringVar(value="Click 'Detect' to scan")
         ttk.Label(btn_row, textvariable=self.can_status_var).pack(side="left", padx=12)
 
+        # 비상정지 — 항상 오른쪽에 보이게 둠. Script Launcher의 Leader/Follower 포트
+        # 입력값을 그대로 씀 (piper_session.py --step can_down과 동일한 동작).
+        self.btn_estop = tk.Button(
+            btn_row, text="E-STOP", command=self._on_estop,
+            bg="#c0392b", fg="white", activebackground="#e74c3c", activeforeground="white",
+            font=("", 10, "bold"), padx=12,
+        )
+        self.btn_estop.pack(side="right", padx=4)
+
         self.can_rows_frame = ttk.Frame(can_frame)
         self.can_rows_frame.pack(fill="x", pady=(4, 0))
         self.can_row_widgets: list[dict] = []
+
+    def _on_estop(self):
+        follower_port = self.follower_port_var.get().strip()
+        leader_port = self.leader_port_var.get().strip()
+
+        # 비상정지 시나리오 — 순서 상관없이 둘 다 최대한 빨리 내림 (하나 실패해도 나머지 계속 시도)
+        follower_ok, follower_msg = bring_can_down(follower_port)
+        leader_ok, leader_msg = bring_can_down(leader_port)
+
+        self.can_status_var.set(f"E-STOP: {follower_msg} | {leader_msg}")
+        if follower_ok and leader_ok:
+            self.bottom_var.set("E-STOP: follower/leader CAN 모두 차단됨 — 로봇 정지됨")
+        else:
+            self.bottom_var.set("E-STOP: 일부 CAN 차단 실패 — 전원 차단 권고")
 
     # ---------------------------------------------------------- Dataset Browser
     def _build_dataset_browser_frame(self):
