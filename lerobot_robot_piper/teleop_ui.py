@@ -41,8 +41,9 @@ JOINTS = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"]
 # 동안 비활성화해서 바로 재시작하지 못하게 막음. 실제 하드웨어에서 적정값 조정 필요.
 CAMERA_RELEASE_WAIT_S = 1.5
 
-# configs/recording.env — repo root의 설정 파일 (teleop_ui.py 기준 두 단계 위)
-RECORDING_ENV_PATH = pathlib.Path(__file__).resolve().parent.parent / "configs" / "recording.env"
+# repo root (teleop_ui.py 기준 두 단계 위) / configs/recording.env
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+RECORDING_ENV_PATH = REPO_ROOT / "configs" / "recording.env"
 
 
 def load_recording_env(path: pathlib.Path = RECORDING_ENV_PATH) -> dict[str, str]:
@@ -67,6 +68,37 @@ def load_recording_env(path: pathlib.Path = RECORDING_ENV_PATH) -> dict[str, str
         if key:
             env[key] = value
     return env
+
+
+def dataset_scan_root(recording_env: dict[str, str]) -> pathlib.Path:
+    """recording.env의 DATASET_ROOT 부모 폴더(보통 records/)를 스캔 기준으로 씀.
+    DATASET_ROOT가 없으면 REPO_ROOT/records로 fallback."""
+    dataset_root = recording_env.get("DATASET_ROOT", "")
+    if dataset_root:
+        p = pathlib.Path(dataset_root)
+        if not p.is_absolute():
+            p = REPO_ROOT / p
+        return p.parent
+    return REPO_ROOT / "records"
+
+
+def discover_datasets(scan_root: pathlib.Path) -> list[pathlib.Path]:
+    """scan_root 아래에서 meta/info.json이 있는 LeRobotDataset 루트를 전부 찾음
+    (repo_id가 local/piper_xxx처럼 중첩 폴더라 재귀적으로 찾아야 함)."""
+    if not scan_root.exists():
+        return []
+    return sorted(p.parent.parent for p in scan_root.rglob("meta/info.json"))
+
+
+def read_episode_count(dataset_root: pathlib.Path) -> int:
+    """meta/info.json의 total_episodes 필드를 읽음. 없거나 파싱 실패하면 0."""
+    info_path = dataset_root / "meta" / "info.json"
+    try:
+        with open(info_path) as f:
+            info = json.load(f)
+        return int(info.get("total_episodes", 0))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return 0
 
 
 # ---------------------------------------------------------------- CAN helpers
@@ -314,9 +346,12 @@ class PiperMonitorUI:
         cmd_entry = ttk.Entry(script_frame, textvariable=self.cmd_var)
         cmd_entry.grid(row=4, column=1, columnspan=2, padx=4, sticky="ew", pady=(4, 0))
 
+        # -- Dataset Browser (records/ 밑의 기존 dataset/episode 탐색 — 향후 Replay 프리셋이 사용)
+        self._build_dataset_browser_frame()
+
         # -- Monitor Controls
         mon_ctrl = ttk.LabelFrame(self.root, text="CAN Monitor", padding=8)
-        mon_ctrl.grid(row=2, column=0, sticky="ew", padx=8, pady=4)
+        mon_ctrl.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
 
         self.btn_mon_start = ttk.Button(mon_ctrl, text="Start Monitor", command=self._on_mon_start)
         self.btn_mon_start.pack(side="left", padx=4)
@@ -331,8 +366,8 @@ class PiperMonitorUI:
 
         # -- Joint Monitor
         joint_frame = ttk.LabelFrame(self.root, text="Joint Positions (raw)", padding=8)
-        joint_frame.grid(row=3, column=0, sticky="nsew", padx=8, pady=4)
-        self.root.rowconfigure(3, weight=1)
+        joint_frame.grid(row=4, column=0, sticky="nsew", padx=8, pady=4)
+        self.root.rowconfigure(4, weight=1)
         joint_frame.columnconfigure(2, weight=1)
         joint_frame.columnconfigure(5, weight=1)
 
@@ -369,7 +404,7 @@ class PiperMonitorUI:
 
         # -- Arm Status
         status_frame = ttk.LabelFrame(self.root, text="Follower Arm Status", padding=8)
-        status_frame.grid(row=4, column=0, sticky="ew", padx=8, pady=4)
+        status_frame.grid(row=5, column=0, sticky="ew", padx=8, pady=4)
         status_frame.columnconfigure(0, weight=1)
 
         self.status_text_var = tk.StringVar(value="--")
@@ -398,6 +433,83 @@ class PiperMonitorUI:
         self.can_rows_frame = ttk.Frame(can_frame)
         self.can_rows_frame.pack(fill="x", pady=(4, 0))
         self.can_row_widgets: list[dict] = []
+
+    # ---------------------------------------------------------- Dataset Browser
+    def _build_dataset_browser_frame(self):
+        """records/ 밑의 기존 dataset/episode를 탐색해서 Dataset/Episode 콤보박스로
+        선택하게 함. 여기서 고른 값(self.replay_dataset_root_var/replay_episode_var)은
+        추후 Replay 프리셋이 그대로 씀."""
+        frame = ttk.LabelFrame(self.root, text="Dataset Browser", padding=8)
+        frame.grid(row=2, column=0, sticky="ew", padx=8, pady=4)
+
+        ttk.Button(frame, text="Refresh", command=self._on_dataset_browser_refresh).pack(side="left", padx=4)
+
+        ttk.Label(frame, text="Dataset:").pack(side="left", padx=(12, 4))
+        self.dataset_label_var = tk.StringVar(value="")
+        self.dataset_combo = ttk.Combobox(
+            frame, textvariable=self.dataset_label_var, state="readonly", width=36
+        )
+        self.dataset_combo.pack(side="left", padx=2)
+        self.dataset_combo.bind("<<ComboboxSelected>>", self._on_dataset_selected)
+
+        ttk.Label(frame, text="Episode:").pack(side="left", padx=(12, 4))
+        self.replay_episode_var = tk.StringVar(value="")
+        self.episode_combo = ttk.Combobox(
+            frame, textvariable=self.replay_episode_var, state="readonly", width=6
+        )
+        self.episode_combo.pack(side="left", padx=2)
+
+        self.dataset_status_var = tk.StringVar(value="Click 'Refresh' to scan")
+        ttk.Label(frame, textvariable=self.dataset_status_var).pack(side="left", padx=12)
+
+        # label(콤보박스 표시용 상대경로) -> 실제 dataset root 절대경로
+        self._dataset_paths: dict[str, pathlib.Path] = {}
+        # 선택된 dataset의 절대경로 문자열 — 추후 Replay 프리셋이 --dataset_root로 씀
+        self.replay_dataset_root_var = tk.StringVar(value="")
+
+        self._on_dataset_browser_refresh()
+
+    def _on_dataset_browser_refresh(self):
+        scan_root = dataset_scan_root(self.recording_env)
+        datasets = discover_datasets(scan_root)
+
+        self._dataset_paths = {}
+        labels = []
+        for d in datasets:
+            try:
+                label = str(d.relative_to(scan_root))
+            except ValueError:
+                label = str(d)
+            self._dataset_paths[label] = d
+            labels.append(label)
+
+        self.dataset_combo["values"] = labels
+        if labels:
+            self.dataset_status_var.set(f"{len(labels)}개 dataset 발견 ({scan_root})")
+            if self.dataset_label_var.get() not in labels:
+                self.dataset_label_var.set(labels[0])
+            self._on_dataset_selected(None)
+        else:
+            self.dataset_status_var.set(f"dataset 없음 ({scan_root})")
+            self.dataset_label_var.set("")
+            self.replay_dataset_root_var.set("")
+            self.episode_combo["values"] = []
+            self.replay_episode_var.set("")
+
+    def _on_dataset_selected(self, _event):
+        label = self.dataset_label_var.get()
+        dataset_root = self._dataset_paths.get(label)
+        if dataset_root is None:
+            self.replay_dataset_root_var.set("")
+            self.episode_combo["values"] = []
+            self.replay_episode_var.set("")
+            return
+
+        self.replay_dataset_root_var.set(str(dataset_root))
+        n = read_episode_count(dataset_root)
+        episodes = [str(i) for i in range(n)]
+        self.episode_combo["values"] = episodes
+        self.replay_episode_var.set(episodes[0] if episodes else "")
 
     def _on_can_detect(self):
         for w in self.can_rows_frame.winfo_children():
