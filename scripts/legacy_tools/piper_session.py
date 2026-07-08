@@ -71,20 +71,24 @@ CFG = {
     # 데이터셋
     "dataset_root":     "/home/ugrp308/Group43/datasets/piper-smolvla",
     "dataset_repo_id":  "local/piper-smolvla",
-    # EEF 안전 범위 (raw SDK 정수) — calc_range/rviz_preview/replay 단계에서만 사용.
-    # 새 레포는 joint-space(-100~100, gripper 0~100)로 넘어갔으므로 이 값도
-    # 재설계가 필요하지만, RViz 시각화 방식 변경 여부를 먼저 확인받아야 해서
-    # 이번 턴에서는 손대지 않음 (step_joint_check/can_up/can_down/teleop_check만 반영).
+    # joint-space 안전 범위 (정규화 단위) — data_check/calc_range/rviz_preview에서 사용.
+    # action/observation.state 컬럼 순서(joint1.pos~joint6.pos, gripper.pos)와
+    # 정확히 일치해야 함 — lerobot_robot_piper/piper_follower.py에서 확인된 순서.
+    # 이 값들은 SDK가 이미 calibration range로 clamp한 뒤 정규화해서 내보내므로
+    # 정상 동작이면 항상 이 범위 안에 있음 (piper_replay_viz.py의 range_check와 동일한 성격).
     "safe_range": {
-        "x":        (100_000,  400_000),
-        "y":       (-200_000,  200_000),
-        "z":         (50_000,  350_000),
-        "rx":      (-180_000,  180_000),
-        "ry":      (-180_000,  180_000),
-        "rz":      (-180_000,  180_000),
-        "gripper":       (0,    70_000),
+        "joint1": (-100, 100),
+        "joint2": (-100, 100),
+        "joint3": (-100, 100),
+        "joint4": (-100, 100),
+        "joint5": (-100, 100),
+        "joint6": (-100, 100),
+        "gripper": (0, 100),
     },
-    "max_delta_per_step": 30_000,
+    # 한 스텝 최대 이동량 (정규화 단위). 구버전 30_000은 EEF raw(mm 단위) 기준이라
+    # joint 각도 단위로 그대로 환산할 수 없음(축마다 raw→물리 변환 비율이 다름) —
+    # 임시로 전체 범위(200 또는 100)의 10%로 잡아둠. 실제 녹화 데이터로 재보정 필요.
+    "max_delta_per_step": 20,
 }
 
 # ───────────────────────────────────────────────
@@ -551,6 +555,9 @@ def step_rviz(args):
 # ═══════════════════════════════════════════════
 def step_data_check(args):
     step_hdr("데이터셋 유효성 검사")
+    # action/observation.state는 joint-space 정규화값(-100~100, gripper 0~100).
+    # CFG["safe_range"]도 같은 단위 — piper_follower.py의 motor 순서(joint1~6, gripper)와
+    # 컬럼 순서가 일치한다는 전제로 axis별 인덱스 매칭함.
     try:
         import pandas as pd
         import numpy as np
@@ -698,10 +705,42 @@ def step_infer_dry(args):
 
 
 # ═══════════════════════════════════════════════
-# STEP: rviz_preview — 궤적 RViz 시각화 + 안전검사
+# joint-space calibration — piper_replay_viz.py / piper_infer_preview.py와 동일한
+# 표를 그대로 복사 (PiperMotorsBus는 생성자가 CAN 연결을 즉시 시도해서 하드웨어
+# 없이 못 쓰므로, lerobot_robot_piper/piper_follower.py의 MotorCalibration 값만
+# 순수 변환 함수로 옮겨옴). 세 파일에 중복되지만, 각 파일이 독립 실행 스크립트라
+# 공용 모듈로 묶으면 오히려 배포/실행이 번거로워짐 — 값이 바뀌면 세 곳 다 갱신 필요.
+_RVIZ_JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+_RVIZ_GRIPPER_NAME = "gripper"
+_RVIZ_CALIBRATION_RAW = {
+    "joint1": (-150_000, 150_000),
+    "joint2": (0, 180_000),
+    "joint3": (-170_000, 0),
+    "joint4": (-100_000, 100_000),
+    "joint5": (-65_000, 65_000),
+    "joint6": (-100_000, 130_000),
+    "gripper": (0, 68_000),
+}
+
+
+def _rviz_unnormalize_to_physical(motor: str, normalized_val: float) -> float:
+    """정규화값(-100~100, gripper 0~100) -> 물리 단위 (joint: 라디안, gripper: 미터)."""
+    min_, max_ = _RVIZ_CALIBRATION_RAW[motor]
+    if motor == _RVIZ_GRIPPER_NAME:
+        bounded = min(100.0, max(0.0, normalized_val))
+        raw = (bounded / 100.0) * (max_ - min_) + min_
+        return (raw / 1000.0) / 1000.0  # meters
+    bounded = min(100.0, max(-100.0, normalized_val))
+    raw = ((bounded + 100) / 200) * (max_ - min_) + min_
+    import math
+    return math.radians(raw / 1000.0)
+
+
+# ═══════════════════════════════════════════════
+# STEP: rviz_preview — 궤적 RViz 시각화(joint_states 기반, 실제 로봇 모델이 움직임) + 안전검사
 # ═══════════════════════════════════════════════
 def step_rviz_preview(args):
-    step_hdr("RViz 궤적 시각화 + 안전검사")
+    step_hdr("RViz 궤적 시각화(joint_states) + 안전검사")
 
     af = pathlib.Path(args.actions_file)
     if not af.exists():
@@ -723,19 +762,20 @@ def step_rviz_preview(args):
     safe = CFG["safe_range"]
     max_delta = CFG["max_delta_per_step"]
 
-    # ── 안전 검사 ──
+    # ── 안전 검사 (joint-space 정규화 단위, piper_replay_viz.py의 range_check와 동일한 성격:
+    #     SDK가 이미 calibration range로 clamp해서 내보내므로 정상 동작이면 항상 범위 안에 있음) ──
     info(f"총 {len(actions)} steps 안전검사")
     safety_ok = True
 
-    print(f"\n  {'축':>8}  {'최솟값':>12}  {'최댓값':>12}  {'안전범위':>25}  결과")
-    print(f"  {'─'*75}")
+    print(f"\n  {'축':>8}  {'최솟값':>10}  {'최댓값':>10}  {'안전범위':>14}  결과")
+    print(f"  {'─'*60}")
     for i, (ax, (lo, hi)) in enumerate(safe.items()):
         if i >= acts.shape[1]: break
         col = acts[:, i]
         vmin, vmax = col.min(), col.max()
         fail = ((col < lo) | (col > hi)).sum()
         result = f"{C.GREEN}OK{C.RESET}" if fail == 0 else f"{C.RED}FAIL({fail}행){C.RESET}"
-        print(f"  {ax:>8}  {vmin:>12.0f}  {vmax:>12.0f}  [{lo:>10}, {hi:>10}]  {result}")
+        print(f"  {ax:>8}  {vmin:>10.2f}  {vmax:>10.2f}  [{lo:>5}, {hi:>5}]  {result}")
         if fail: safety_ok = False
 
     print()
@@ -746,81 +786,56 @@ def step_rviz_preview(args):
             ok(f"모든 step delta < {max_delta}")
         else:
             for s in bad_steps:
-                warn(f"step {s}→{s+1}: delta={deltas[s]:.0f}")
+                warn(f"step {s}→{s+1}: delta={deltas[s]:.2f}")
             safety_ok = False
 
     print()
     if safety_ok:
-        ok("사전 안전검사 통과 — RViz에 초록 선으로 표시")
+        ok("사전 안전검사 통과")
     else:
-        err("사전 안전검사 실패 — RViz에 빨간 선으로 표시 / 실제 arm 연결 금지")
+        err("사전 안전검사 실패 — 실제 arm 연결 금지")
 
-    # ── RViz 퍼블리시 ──
+    # ── RViz 퍼블리시 (joint_states — robot_state_publisher가 TF 계산, 실제 로봇 메시가 움직임) ──
     try:
         import rclpy
         from rclpy.node import Node
-        from visualization_msgs.msg import Marker, MarkerArray
-        from geometry_msgs.msg import Point
-        from std_msgs.msg import ColorRGBA
+        from sensor_msgs.msg import JointState
     except ImportError:
-        err("rclpy 없음 — source /opt/ros/humble/setup.bash 후 재실행")
+        err("rclpy/sensor_msgs 없음 — source /opt/ros/humble/setup.bash 후 재실행")
         return False
+
+    joint_msg_names = _RVIZ_JOINT_NAMES + [_RVIZ_GRIPPER_NAME]
+    topic = args.joint_state_topic
 
     class PreviewNode(Node):
         def __init__(self):
             super().__init__("piper_preview")
-            self.pub  = self.create_publisher(Marker,      "/preview_trajectory", 10)
-            self.pubm = self.create_publisher(MarkerArray, "/preview_waypoints",  10)
+            self.pub = self.create_publisher(JointState, topic, 10)
 
-        def publish(self, acts, safe_flag):
-            m = Marker()
-            m.header.frame_id = "base_link"
-            m.header.stamp    = self.get_clock().now().to_msg()
-            m.ns = "traj"; m.id = 0
-            m.type = Marker.LINE_STRIP; m.action = Marker.ADD
-            m.scale.x = 0.005
-            m.color = ColorRGBA(
-                r=0.1 if safe_flag else 1.0,
-                g=1.0 if safe_flag else 0.1,
-                b=0.1, a=1.0)
-            for a in acts:
-                p = Point()
-                p.x = float(a[0]) / 1_000_000.0
-                p.y = float(a[1]) / 1_000_000.0
-                p.z = float(a[2]) / 1_000_000.0
-                m.points.append(p)
-            self.pub.publish(m)
-
-            # 시작/끝 구체
-            ma = MarkerArray()
-            for idx, (label, color, act) in enumerate([
-                ("start", ColorRGBA(r=0.0,g=0.5,b=1.0,a=1.0), acts[0]),
-                ("end",   ColorRGBA(r=1.0,g=0.5,b=0.0,a=1.0), acts[-1]),
-            ]):
-                sm = Marker()
-                sm.header.frame_id = "base_link"
-                sm.header.stamp = self.get_clock().now().to_msg()
-                sm.ns = label; sm.id = idx
-                sm.type = Marker.SPHERE; sm.action = Marker.ADD
-                sm.pose.position.x = float(act[0]) / 1_000_000.0
-                sm.pose.position.y = float(act[1]) / 1_000_000.0
-                sm.pose.position.z = float(act[2]) / 1_000_000.0
-                sm.scale.x = sm.scale.y = sm.scale.z = 0.025
-                sm.color = color
-                ma.markers.append(sm)
-            self.pubm.publish(ma)
+        def publish_frame(self, normalized_frame):
+            msg = JointState()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.name = joint_msg_names
+            msg.position = [
+                _rviz_unnormalize_to_physical(name, float(val))
+                for name, val in zip(joint_msg_names, normalized_frame)
+            ]
+            self.pub.publish(msg)
 
     rclpy.init()
     node = PreviewNode()
-    color_hint = "초록 선 = 안전" if safety_ok else "빨간 선 = 위험"
-    info(f"RViz에서 /preview_trajectory 토픽 Add — {color_hint}")
-    info("파란 구체=시작, 주황 구체=끝  |  Ctrl+C로 종료\n")
+    color_hint = "안전 범위 내" if safety_ok else "범위 초과 — 실제 arm 연결 금지"
+    info(f"토픽: {topic} (JointState) — {color_hint}")
+    info(f"{len(acts)} frame을 1초 간격으로 반복 재생 — Ctrl+C로 종료\n")
 
     try:
         while rclpy.ok():
-            node.publish(actions, safety_ok)
-            rclpy.spin_once(node, timeout_sec=1.0)
-            time.sleep(1.0)
+            for frame in acts:
+                if not rclpy.ok():
+                    break
+                node.publish_frame(frame)
+                rclpy.spin_once(node, timeout_sec=0.0)
+                time.sleep(1.0)
     except KeyboardInterrupt:
         info("RViz 퍼블리시 종료")
     finally:
@@ -1049,6 +1064,8 @@ def parse_args():
     p.add_argument("--pretrained_path", default="", help="모델 체크포인트")
     p.add_argument("--range_output",    default="action_range.json")
     p.add_argument("--actions_file",    default="predicted_actions.json")
+    p.add_argument("--joint_state_topic", default="/joint_states",
+        help="rviz_preview가 publish할 JointState 토픽 (robot_state_publisher가 구독하는 토픽과 일치해야 함)")
 
     # 태스크/스텝
     p.add_argument("--task",        default="pick the pan")
