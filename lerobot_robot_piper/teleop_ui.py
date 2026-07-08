@@ -207,6 +207,7 @@ _DISCOVERY_ARGS = (
 PRESET_BUILDERS: dict[str, str] = {
     "Teleoperate": "_build_teleoperate_command",
     "Record": "_build_record_command",
+    "Infer": "_build_infer_command",
 }
 PRESET_NAMES = list(PRESET_BUILDERS.keys())
 
@@ -281,28 +282,37 @@ class PiperMonitorUI:
         self.num_episodes_var = tk.StringVar(value=self.recording_env.get("NUM_EPISODES") or "5")
         ttk.Entry(task_row, textvariable=self.num_episodes_var, width=6).pack(side="left", padx=2)
 
+        # Policy Path — Infer 프리셋의 --policy.path로 반영 (체크포인트 로컬 경로 또는 HF repo id).
+        # Teleoperate/Record에서는 안 쓰이지만 항상 보이게 둠 (프리셋 전환 시 값 유지).
+        policy_row = ttk.Frame(script_frame)
+        policy_row.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        ttk.Label(policy_row, text="Policy Path:").pack(side="left", padx=4)
+        self.policy_path_var = tk.StringVar(value=self.recording_env.get("POLICY_PRETRAINED_PATH") or "")
+        ttk.Entry(policy_row, textvariable=self.policy_path_var, width=40).pack(side="left", padx=2)
+
         # Preset + custom command
-        ttk.Label(script_frame, text="Preset:").grid(row=2, column=0, padx=4, sticky="e")
+        ttk.Label(script_frame, text="Preset:").grid(row=3, column=0, padx=4, sticky="e")
         self.preset_var = tk.StringVar(value="Teleoperate")
         preset_combo = ttk.Combobox(
             script_frame, textvariable=self.preset_var,
             values=PRESET_NAMES, state="readonly", width=14,
         )
-        preset_combo.grid(row=2, column=1, padx=4, sticky="w")
+        preset_combo.grid(row=3, column=1, padx=4, sticky="w")
         preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
 
         btn_row2 = ttk.Frame(script_frame)
-        btn_row2.grid(row=2, column=2, sticky="e")
+        btn_row2.grid(row=3, column=2, sticky="e")
         self.btn_launch = ttk.Button(btn_row2, text="Launch", command=self._on_launch)
         self.btn_launch.pack(side="left", padx=4)
         self.btn_kill = ttk.Button(btn_row2, text="Stop", command=self._on_kill, state="disabled")
         self.btn_kill.pack(side="left", padx=4)
 
-        ttk.Label(script_frame, text="Command:").grid(row=3, column=0, padx=4, sticky="e")
+        ttk.Label(script_frame, text="Command:").grid(row=4, column=0, padx=4, sticky="e")
         self.cmd_var = tk.StringVar()
         self._on_preset_selected(None)  # fill initial command
         cmd_entry = ttk.Entry(script_frame, textvariable=self.cmd_var)
-        cmd_entry.grid(row=3, column=1, columnspan=2, padx=4, sticky="ew", pady=(4, 0))
+        cmd_entry.grid(row=4, column=1, columnspan=2, padx=4, sticky="ew", pady=(4, 0))
 
         # -- Monitor Controls
         mon_ctrl = ttk.LabelFrame(self.root, text="CAN Monitor", padding=8)
@@ -467,91 +477,119 @@ class PiperMonitorUI:
             + _DISCOVERY_ARGS
         )
 
-    def _build_record_command(self) -> str:
-        """scripts/5__record.sh(lib/run_common.sh)와 동등한 lerobot-record 커맨드 조립.
-        카메라/offset/dataset 값은 configs/recording.env를 우선 쓰고, 없으면
-        5__record.sh와 동일한 fallback 기본값을 씀. Task/Num Episodes만 UI 입력값 사용."""
+    # -- lerobot-record 커맨드 조립 공용 헬퍼 (Record/Infer가 공유) -----------
+    def _camera_args(self) -> list[str]:
+        """robot_camera_args()(run_common.sh)와 동일한 fallback. depth 설정
+        (REALSENSE_USE_DEPTH 등)도 여기서 그대로 반영돼서 Record/Infer 둘 다 씀."""
         env = self.recording_env
-
-        follower_port = self.follower_port_var.get().strip()
-        leader_port = self.leader_port_var.get().strip()
-        task = self.task_var.get().strip()
-        num_episodes = self.num_episodes_var.get().strip()
-
-        # -- 카메라 (robot_camera_args()와 동일한 fallback)
         camera_type = env.get("CAMERA_TYPE") or "opencv"
         top_cam_type = env.get("TOP_CAM_TYPE") or camera_type
         wrist_cam_type = env.get("WRIST_CAM_TYPE") or camera_type
-        top_cam = env.get("TOP_CAM") or "0"
-        wrist_cam = env.get("WRIST_CAM") or "1"
-        cam_width = env.get("CAM_WIDTH") or "640"
-        cam_height = env.get("CAM_HEIGHT") or "480"
-        fps = env.get("FPS") or "30"
         realsense_use_depth = env.get("REALSENSE_USE_DEPTH") or "false"
-        realsense_warmup_s = env.get("REALSENSE_WARMUP_S") or "5.0"
-        camera_connect_warmup = env.get("CAMERA_CONNECT_WARMUP") or "false"
-        camera_post_connect_wait_s = env.get("CAMERA_POST_CONNECT_WAIT_S") or "2.0"
-        top_realsense_use_depth = env.get("TOP_REALSENSE_USE_DEPTH") or realsense_use_depth
-        wrist_realsense_use_depth = env.get("WRIST_REALSENSE_USE_DEPTH") or realsense_use_depth
-
-        # -- action offset (robot_action_offset_args()와 동일한 fallback)
-        park_on_connect = env.get("PARK_ON_CONNECT") or "false"
-        use_action_offset = env.get("USE_ACTION_OFFSET") or "true"
-        use_manual_action_offset = env.get("USE_MANUAL_ACTION_OFFSET") or "false"
-        action_offset_report_threshold = env.get("ACTION_OFFSET_REPORT_THRESHOLD") or "3.0"
-        offset_joints = [env.get(f"ACTION_OFFSET_JOINT{n}") or "0.0" for n in range(1, 7)]
-        offset_gripper = env.get("ACTION_OFFSET_GRIPPER") or "0.0"
-
-        # -- dataset (5__record.sh와 동일한 fallback)
-        dataset_repo_id = env.get("DATASET_REPO_ID") or "local/piper_write_light"
-        dataset_root = env.get("DATASET_ROOT") or f"records/{dataset_repo_id}"
-        episode_time_s = env.get("EPISODE_TIME_S") or "60"
-        reset_time_s = env.get("RESET_TIME_S") or "60"
-        push_to_hub = env.get("PUSH_TO_HUB") or "false"
-        display_data = env.get("DISPLAY_DATA") or "true"
-        resume = env.get("RESUME") or "false"
-
-        args = [
-            "lerobot-record",
-            "--robot.type=piper_follower",
-            f"--robot.port={follower_port}",
+        return [
             f"--robot.camera_type={camera_type}",
             f"--robot.top_cam_type={top_cam_type}",
             f"--robot.wrist_cam_type={wrist_cam_type}",
-            f"--robot.top_cam={top_cam}",
-            f"--robot.wrist_cam={wrist_cam}",
-            f"--robot.cam_width={cam_width}",
-            f"--robot.cam_height={cam_height}",
-            f"--robot.camera_fps={fps}",
+            f"--robot.top_cam={env.get('TOP_CAM') or '0'}",
+            f"--robot.wrist_cam={env.get('WRIST_CAM') or '1'}",
+            f"--robot.cam_width={env.get('CAM_WIDTH') or '640'}",
+            f"--robot.cam_height={env.get('CAM_HEIGHT') or '480'}",
+            f"--robot.camera_fps={env.get('FPS') or '30'}",
             f"--robot.realsense_use_depth={realsense_use_depth}",
-            f"--robot.realsense_warmup_s={realsense_warmup_s}",
-            f"--robot.camera_connect_warmup={camera_connect_warmup}",
-            f"--robot.camera_post_connect_wait_s={camera_post_connect_wait_s}",
-            f"--robot.top_realsense_use_depth={top_realsense_use_depth}",
-            f"--robot.wrist_realsense_use_depth={wrist_realsense_use_depth}",
-            f"--robot.park_on_connect={park_on_connect}",
-            f"--robot.use_action_offset={use_action_offset}",
-            f"--robot.use_manual_action_offset={use_manual_action_offset}",
-            f"--robot.action_offset_report_threshold={action_offset_report_threshold}",
+            f"--robot.realsense_warmup_s={env.get('REALSENSE_WARMUP_S') or '5.0'}",
+            f"--robot.camera_connect_warmup={env.get('CAMERA_CONNECT_WARMUP') or 'false'}",
+            f"--robot.camera_post_connect_wait_s={env.get('CAMERA_POST_CONNECT_WAIT_S') or '2.0'}",
+            f"--robot.top_realsense_use_depth={env.get('TOP_REALSENSE_USE_DEPTH') or realsense_use_depth}",
+            f"--robot.wrist_realsense_use_depth={env.get('WRIST_REALSENSE_USE_DEPTH') or realsense_use_depth}",
+        ]
+
+    def _action_offset_args(self) -> list[str]:
+        """robot_action_offset_args()(run_common.sh)와 동일한 fallback."""
+        env = self.recording_env
+        offset_joints = [env.get(f"ACTION_OFFSET_JOINT{n}") or "0.0" for n in range(1, 7)]
+        return [
+            f"--robot.park_on_connect={env.get('PARK_ON_CONNECT') or 'false'}",
+            f"--robot.use_action_offset={env.get('USE_ACTION_OFFSET') or 'true'}",
+            f"--robot.use_manual_action_offset={env.get('USE_MANUAL_ACTION_OFFSET') or 'false'}",
+            f"--robot.action_offset_report_threshold={env.get('ACTION_OFFSET_REPORT_THRESHOLD') or '3.0'}",
             f"--robot.action_offset_joint1={offset_joints[0]}",
             f"--robot.action_offset_joint2={offset_joints[1]}",
             f"--robot.action_offset_joint3={offset_joints[2]}",
             f"--robot.action_offset_joint4={offset_joints[3]}",
             f"--robot.action_offset_joint5={offset_joints[4]}",
             f"--robot.action_offset_joint6={offset_joints[5]}",
-            f"--robot.action_offset_gripper={offset_gripper}",
-            "--teleop.type=piper_leader",
-            f"--teleop.port={leader_port}",
-            f"--display_data={display_data}",
+            f"--robot.action_offset_gripper={env.get('ACTION_OFFSET_GRIPPER') or '0.0'}",
+        ]
+
+    def _dataset_args(self, fps: str) -> list[str]:
+        """5__record.sh의 dataset.* 인자와 동일한 fallback. Task/Num Episodes만 UI 입력값 사용."""
+        env = self.recording_env
+        task = self.task_var.get().strip()
+        num_episodes = self.num_episodes_var.get().strip()
+        dataset_repo_id = env.get("DATASET_REPO_ID") or "local/piper_write_light"
+        dataset_root = env.get("DATASET_ROOT") or f"records/{dataset_repo_id}"
+        return [
             f"--dataset.repo_id={dataset_repo_id}",
             f"--dataset.root={dataset_root}",
             f"--dataset.fps={fps}",
             f"--dataset.num_episodes={num_episodes}",
-            f"--dataset.episode_time_s={episode_time_s}",
-            f"--dataset.reset_time_s={reset_time_s}",
+            f"--dataset.episode_time_s={env.get('EPISODE_TIME_S') or '60'}",
+            f"--dataset.reset_time_s={env.get('RESET_TIME_S') or '60'}",
             f"--dataset.single_task={shlex.quote(task)}",
-            f"--dataset.push_to_hub={push_to_hub}",
-            f"--resume={resume}",
+            f"--dataset.push_to_hub={env.get('PUSH_TO_HUB') or 'false'}",
+            f"--resume={env.get('RESUME') or 'false'}",
+        ]
+
+    def _build_record_command(self) -> str:
+        """scripts/5__record.sh(lib/run_common.sh)와 동등한 lerobot-record 커맨드 조립."""
+        env = self.recording_env
+        follower_port = self.follower_port_var.get().strip()
+        leader_port = self.leader_port_var.get().strip()
+        fps = env.get("FPS") or "30"
+
+        args = [
+            "lerobot-record",
+            "--robot.type=piper_follower",
+            f"--robot.port={follower_port}",
+            *self._camera_args(),
+            *self._action_offset_args(),
+            "--teleop.type=piper_leader",
+            f"--teleop.port={leader_port}",
+            f"--display_data={env.get('DISPLAY_DATA') or 'true'}",
+            *self._dataset_args(fps),
+            "--robot.discover_packages_path=lerobot_robot_piper",
+            "--teleop.discover_packages_path=lerobot_robot_piper",
+        ]
+        return " ".join(args)
+
+    def _build_infer_command(self) -> str:
+        """lerobot-record --policy.path=... 로 정책(SmolVLA 등) 추론 실행.
+        구 UGRP의 별도 smolvla-inference CLI는 새 레포에 없음 — lerobot 자체가
+        lerobot-record에 --policy.path를 지원해서 policy가 action을 생성하고
+        teleop은 episode 사이 리셋용으로 병행할 수 있음
+        (lerobot/scripts/lerobot_record.py 상단 docstring, RecordConfig 참고).
+        카메라 인자를 Record와 공유하므로 depth 설정(REALSENSE_USE_DEPTH 등)도
+        recording.env에 넣어두면 그대로 반영됨.
+        주의: 새 lerobot-record CLI에는 구 UGRP infer_dry 같은
+        --use_devices=false dry-run 옵션이 없음 — Launch 누르면 바로 실제
+        로봇에 정책 action이 전송됨."""
+        env = self.recording_env
+        follower_port = self.follower_port_var.get().strip()
+        leader_port = self.leader_port_var.get().strip()
+        policy_path = self.policy_path_var.get().strip()
+        fps = env.get("FPS") or "30"
+
+        args = [
+            "lerobot-record",
+            "--robot.type=piper_follower",
+            f"--robot.port={follower_port}",
+            *self._camera_args(),
+            *self._action_offset_args(),
+            "--teleop.type=piper_leader",
+            f"--teleop.port={leader_port}",
+            f"--policy.path={policy_path}",
+            f"--display_data={env.get('DISPLAY_DATA') or 'true'}",
+            *self._dataset_args(fps),
             "--robot.discover_packages_path=lerobot_robot_piper",
             "--teleop.discover_packages_path=lerobot_robot_piper",
         ]
