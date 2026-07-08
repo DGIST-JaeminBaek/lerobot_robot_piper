@@ -10,7 +10,7 @@ piper_session.py — UGRP PiPER 실험실 세션 자동화 CLI
     rviz            : agx_arm_urdf 세팅 후 RViz 실행
     can_up          : CAN 인터페이스만 올리기
     can_down        : 비상 CAN 차단
-    eef_check       : EEF non-zero 확인
+    joint_check     : 관절값 non-zero + range 확인 (follower, --check_leader로 leader 포함)
     teleop_check    : send_action no-op 검증
     cam_check       : RealSense 시리얼 및 OpenCV 인덱스 확인
     data_check      : 데이터셋 parquet 유효성 검사
@@ -53,8 +53,12 @@ CFG = {
     "venv_activate":    "/home/ugrp308/Group43/.venv/bin/activate",
     "lerobot_dir":      "/home/ugrp308/Group43/lerobot",
     "ugrp_dir":         "/home/ugrp308/Group43/UGRP",
-    # CAN
-    "can_interface":    "can0",
+    # CAN — lerobot_robot_piper는 leader/follower가 물리적으로 분리된
+    # 두 개의 CAN 인터페이스를 씀. 이름은 configs/recording.env의
+    # LEADER_PORT/FOLLOWER_PORT 컨벤션을 그대로 따름.
+    "can_interface":    "can0",  # deprecated: 단일 CAN 시절 값. can_up/can_down/joint_check는 아래 두 값 사용
+    "follower_can_interface": "can_follower1",
+    "leader_can_interface":   "can_leader1",
     "can_bitrate":      1000000,
     # 카메라
     "top_serial":       "327122074262",
@@ -67,7 +71,10 @@ CFG = {
     # 데이터셋
     "dataset_root":     "/home/ugrp308/Group43/datasets/piper-smolvla",
     "dataset_repo_id":  "local/piper-smolvla",
-    # EEF 안전 범위 (raw SDK 정수)
+    # EEF 안전 범위 (raw SDK 정수) — calc_range/rviz_preview/replay 단계에서만 사용.
+    # 새 레포는 joint-space(-100~100, gripper 0~100)로 넘어갔으므로 이 값도
+    # 재설계가 필요하지만, RViz 시각화 방식 변경 여부를 먼저 확인받아야 해서
+    # 이번 턴에서는 손대지 않음 (step_joint_check/can_up/can_down/teleop_check만 반영).
     "safe_range": {
         "x":        (100_000,  400_000),
         "y":       (-200_000,  200_000),
@@ -139,13 +146,9 @@ def bash(cmd_str, check=True):
 
 
 # ═══════════════════════════════════════════════
-# STEP: can_up — CAN 인터페이스 올리기
+# STEP: can_up — CAN 인터페이스 올리기 (follower + leader)
 # ═══════════════════════════════════════════════
-def step_can_up(args):
-    step_hdr("CAN 인터페이스 활성화")
-    iface   = args.can_interface or CFG["can_interface"]
-    bitrate = CFG["can_bitrate"]
-
+def _can_up_single(iface: str, bitrate: int) -> bool:
     # 이미 UP인지 확인
     r = run(["ip", "link", "show", iface], capture=True)
     if r and "UP" in r.stdout:
@@ -168,116 +171,260 @@ def step_can_up(args):
         return False
 
 
+def step_can_up(args):
+    step_hdr("CAN 인터페이스 활성화 (follower + leader)")
+    follower_iface = args.follower_can_interface or CFG["follower_can_interface"]
+    leader_iface   = args.leader_can_interface   or CFG["leader_can_interface"]
+    bitrate        = CFG["can_bitrate"]
+
+    # 하나가 실패해도 나머지는 계속 시도 — 둘 다 결과를 보고함
+    info(f"follower: {follower_iface}")
+    follower_ok = _can_up_single(follower_iface, bitrate)
+
+    info(f"leader:   {leader_iface}")
+    leader_ok = _can_up_single(leader_iface, bitrate)
+
+    print(f"\n{C.BOLD}{'─'*40}{C.RESET}")
+    info("CAN 활성화 결과:")
+    print(f"  {'✓' if follower_ok else '✗'} follower ({follower_iface})")
+    print(f"  {'✓' if leader_ok   else '✗'} leader   ({leader_iface})")
+
+    return follower_ok and leader_ok
+
+
 # ═══════════════════════════════════════════════
-# STEP: can_down — 비상 CAN 차단
+# STEP: can_down — 비상 CAN 차단 (follower + leader)
 # ═══════════════════════════════════════════════
-def step_can_down(args):
-    step_hdr("비상 CAN 차단")
-    iface = args.can_interface or CFG["can_interface"]
+def _can_down_single(iface: str) -> bool:
     warn(f"sudo ip link set {iface} down 실행")
     ok_ = run_sudo(f"sudo ip link set {iface} down")
     if ok_:
-        ok(f"{iface} 차단 완료 — 로봇 정지됨")
+        ok(f"{iface} 차단 완료")
     else:
-        err("CAN 차단 실패 — 전원 차단 권고")
+        err(f"{iface} 차단 실패")
     return ok_
 
 
-# ═══════════════════════════════════════════════
-# STEP: eef_check — EEF non-zero 확인
-# ═══════════════════════════════════════════════
-def step_eef_check(args):
-    step_hdr("EEF non-zero 확인")
-    iface = args.can_interface or CFG["can_interface"]
+def step_can_down(args):
+    step_hdr("비상 CAN 차단 (follower + leader)")
+    follower_iface = args.follower_can_interface or CFG["follower_can_interface"]
+    leader_iface   = args.leader_can_interface   or CFG["leader_can_interface"]
 
-    script = f"""
-import sys, time
-from lerobot_robot_piper.piper_sdk_interface import PiperSDKInterface
-import logging; logging.basicConfig(level=logging.WARNING)
+    # 비상정지 시나리오 — 하나가 실패해도 나머지를 최대한 빨리 내림 (순서 상관없이 둘 다 시도)
+    follower_ok = _can_down_single(follower_iface)
+    leader_ok = _can_down_single(leader_iface)
 
-iface = PiperSDKInterface(port='{iface}', skip_enable=False)
-time.sleep(0.5)
-data = iface.get_end_pose_raw()
-print("EEF:", data)
-if any(v != 0 for v in data.values()):
+    if follower_ok and leader_ok:
+        ok("follower/leader CAN 모두 차단 완료 — 로봇 정지됨")
+    else:
+        err("일부 CAN 차단 실패 — 전원 차단 권고")
+
+    return follower_ok and leader_ok
+
+
+# ═══════════════════════════════════════════════
+# STEP: joint_check — 관절값 non-zero + range 확인 (구 eef_check)
+# ═══════════════════════════════════════════════
+# lerobot_robot_piper는 EEF가 아니라 joint-space(-100~100, gripper 0~100)만 씀.
+# PiperFollower.get_observation() / PiperLeader.get_action()이 반환하는 dict의
+# key는 f"{motor}.pos" 형태 (joint1.pos ~ joint6.pos, gripper.pos) — 소스에서 확인됨.
+JOINT_POS_KEYS = ["joint1.pos", "joint2.pos", "joint3.pos", "joint4.pos", "joint5.pos", "joint6.pos"]
+GRIPPER_POS_KEY = "gripper.pos"
+
+_JOINT_CHECK_SCRIPT_TEMPLATE = """
+import sys
+{import_line}
+
+arm = {ctor_line}
+arm.connect()
+try:
+    vals = arm.{read_call}
+finally:
+    arm.disconnect()
+
+joint_keys = {joint_keys!r}
+gripper_key = {gripper_key!r}
+sub = {{k: vals.get(k) for k in joint_keys + [gripper_key]}}
+print("vals:", sub)
+
+all_zero = all(v == 0 for v in sub.values())
+
+# get_observation()/get_action()은 PiperMotorsBus._normalize()에서 calibration
+# range로 clamp된 뒤 정규화되므로, 정상 동작 중에는 이 범위를 벗어나는 게
+# 구조적으로 불가능함. 그래도 라이브러리 변경/NaN/타입 오류 등을 잡기 위한
+# 방어적 체크로 남겨둠 — 물리적 캘리브레이션 초과는 이 체크로 못 잡음(그냥 clamp됨).
+range_ok = all(-100 <= sub[k] <= 100 for k in joint_keys) and (0 <= sub[gripper_key] <= 100)
+
+if all_zero:
+    print("RESULT:ALL_ZERO")
+    sys.exit(1)
+elif not range_ok:
+    print("RESULT:OUT_OF_RANGE")
+    sys.exit(1)
+else:
+    print("RESULT:OK")
+    sys.exit(0)
+"""
+
+
+def _run_joint_check(role: str, port: str) -> bool:
+    """role: 'follower' 또는 'leader'. connect() 후 관절값 non-zero/range를 확인."""
+    if role == "follower":
+        script = _JOINT_CHECK_SCRIPT_TEMPLATE.format(
+            import_line="from lerobot_robot_piper import PiperFollowerConfig, PiperFollower",
+            ctor_line=f"PiperFollower(PiperFollowerConfig(port={port!r}))",
+            read_call="get_observation()",
+            joint_keys=JOINT_POS_KEYS,
+            gripper_key=GRIPPER_POS_KEY,
+        )
+    else:
+        script = _JOINT_CHECK_SCRIPT_TEMPLATE.format(
+            import_line="from lerobot_robot_piper import PiperLeaderConfig, PiperLeader",
+            ctor_line=f"PiperLeader(PiperLeaderConfig(port={port!r}))",
+            read_call="get_action()",
+            joint_keys=JOINT_POS_KEYS,
+            gripper_key=GRIPPER_POS_KEY,
+        )
+
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(script)
+        script_path = f.name
+
+    try:
+        info(f"{role} 관절값 읽는 중... (port={port})")
+        result = subprocess.run(
+            ["bash", "-c", source_prefix() + f"python3 {script_path}"],
+            capture_output=True, text=True,
+        )
+        print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+
+        if "RESULT:OK" in result.stdout:
+            ok(f"{role} 관절값 정상 (non-zero, 범위 내)")
+            return True
+        elif "RESULT:ALL_ZERO" in result.stdout:
+            err(f"{role} 관절값 all-zero — CAN 수신 문제. 로봇 전원/연결 확인")
+            return False
+        elif "RESULT:OUT_OF_RANGE" in result.stdout:
+            err(f"{role} 관절값이 정규화 범위(-100~100 / gripper 0~100)를 벗어남 — 라이브러리/캘리브레이션 이상")
+            return False
+        else:
+            err(f"{role} 관절값 읽기 실패 (연결 오류 등) — returncode={result.returncode}")
+            return False
+    finally:
+        os.unlink(script_path)
+
+
+def step_joint_check(args):
+    step_hdr("관절값 non-zero / range 확인 (follower" + (" + leader" if args.check_leader else "") + ")")
+    follower_iface = args.follower_can_interface or CFG["follower_can_interface"]
+
+    follower_ok = _run_joint_check("follower", follower_iface)
+
+    if not args.check_leader:
+        return follower_ok
+
+    leader_iface = args.leader_can_interface or CFG["leader_can_interface"]
+    leader_ok = _run_joint_check("leader", leader_iface)
+
+    return follower_ok and leader_ok
+
+
+# ═══════════════════════════════════════════════
+# STEP: teleop_check — leader/follower get_action()/get_observation() dry 점검
+# ═══════════════════════════════════════════════
+# 주의: 이 스텝은 connect() + get_action()/get_observation()의 반환값
+# shape/range만 확인함. follower.send_action(action)으로 실제 arm을
+# 움직이는 호출은 여기 넣지 않음 (이 컴퓨터엔 하드웨어 없음 + 안전 제약).
+# send_action() no-op/추종 동작 테스트는 하드웨어가 연결된 환경에서
+# 수동으로 실행할 것 (예: 위 joint_check로 각 arm 연결 확인 후,
+# lerobot-teleoperate를 직접 실행해 leader→follower 추종을 눈으로 확인).
+_TELEOP_DRY_CHECK_SCRIPT_TEMPLATE = """
+import sys
+from lerobot_robot_piper import PiperFollowerConfig, PiperFollower, PiperLeaderConfig, PiperLeader
+
+follower = PiperFollower(PiperFollowerConfig(port={follower_port!r}))
+leader = PiperLeader(PiperLeaderConfig(port={leader_port!r}))
+
+follower.connect()
+leader.connect()
+try:
+    obs = follower.get_observation()
+    action = leader.get_action()
+finally:
+    follower.disconnect()
+    leader.disconnect()
+
+joint_keys = {joint_keys!r}
+gripper_key = {gripper_key!r}
+expected_keys = set(joint_keys + [gripper_key])
+
+obs_ok = isinstance(obs, dict) and expected_keys.issubset(obs.keys())
+action_ok = isinstance(action, dict) and expected_keys.issubset(action.keys())
+
+print("follower.get_observation() keys ok:", obs_ok)
+print("leader.get_action() keys ok:", action_ok)
+
+if obs_ok:
+    obs_sub = {{k: obs[k] for k in expected_keys}}
+    obs_range_ok = all(-100 <= obs_sub[k] <= 100 for k in joint_keys) and (0 <= obs_sub[gripper_key] <= 100)
+    print("follower obs:", obs_sub, "range_ok:", obs_range_ok)
+else:
+    obs_range_ok = False
+
+if action_ok:
+    action_sub = {{k: action[k] for k in expected_keys}}
+    action_range_ok = all(-100 <= action_sub[k] <= 100 for k in joint_keys) and (0 <= action_sub[gripper_key] <= 100)
+    print("leader action:", action_sub, "range_ok:", action_range_ok)
+else:
+    action_range_ok = False
+
+if obs_ok and action_ok and obs_range_ok and action_range_ok:
     print("RESULT:OK")
     sys.exit(0)
 else:
-    print("RESULT:ZERO")
+    print("RESULT:FAIL")
     sys.exit(1)
 """
-    info("EEF 상태 읽는 중...")
-    r = run(["bash", "-c", source_prefix() + f'python3 -c "{script}"'],
-            capture=True)
-    # capture_output이 있으면 r은 CompletedProcess
-    if hasattr(r, 'returncode'):
-        output = (r.stdout or "") + (r.stderr or "")
-        if "RESULT:OK" in output:
-            ok("EEF non-zero 확인")
-            return True
-        elif "RESULT:ZERO" in output:
-            err("EEF all-zero — CAN 수신 문제. 로봇 전원/연결 확인")
-            return False
-
-    # subprocess 직접 실행 fallback
-    result = subprocess.run(
-        ["bash", "-c",
-         source_prefix() +
-         "python3 -c \"\n"
-         "import sys, time\n"
-         "from lerobot_robot_piper.piper_sdk_interface import PiperSDKInterface\n"
-         f"iface = PiperSDKInterface(port='{iface}', skip_enable=False)\n"
-         "time.sleep(0.5)\n"
-         "data = iface.get_end_pose_raw()\n"
-         "print(data)\n"
-         "ok = any(v != 0 for v in data.values())\n"
-         "sys.exit(0 if ok else 1)\n"
-         "\""],
-        capture_output=False
-    )
-    if result.returncode == 0:
-        ok("EEF non-zero 확인")
-        return True
-    else:
-        err("EEF all-zero 또는 연결 실패")
-        return False
 
 
-# ═══════════════════════════════════════════════
-# STEP: teleop_check — send_action no-op 검증
-# ═══════════════════════════════════════════════
 def step_teleop_check(args):
-    step_hdr("teleop send_action no-op 검증")
-    iface = args.can_interface or CFG["can_interface"]
+    step_hdr("teleop dry 점검 (get_action/get_observation shape/range만 확인, send_action 호출 없음)")
+    follower_iface = args.follower_can_interface or CFG["follower_can_interface"]
+    leader_iface = args.leader_can_interface or CFG["leader_can_interface"]
 
-    cmd = (
-        source_prefix() +
-        "python3 -c \"\n"
-        "from lerobot_robot_piper.config_piper import PiperConfig\n"
-        "from lerobot_robot_piper.piper import Piper\n"
-        "from lerobot_robot_piper.piper_slave_only import PiperSlaveOnly, PiperSlaveOnlyConfig\n"
-        f"robot = Piper(PiperConfig(can_interface='{iface}', control_mode='teleop'))\n"
-        "robot.connect()\n"
-        "teleop = PiperSlaveOnly(PiperSlaveOnlyConfig())\n"
-        "obs    = robot.get_observation()\n"
-        "action = teleop.get_action()\n"
-        "ret    = robot.send_action(action)\n"
-        "eef_keys = [k for k in obs if 'pos' in k]\n"
-        "match = all(obs[k] == action[k] for k in eef_keys)\n"
-        "print('send_action returned:', ret == action)\n"
-        "print('obs == action        :', match)\n"
-        "robot.disconnect()\n"
-        "import sys; sys.exit(0 if match else 1)\n"
-        "\""
+    script = _TELEOP_DRY_CHECK_SCRIPT_TEMPLATE.format(
+        follower_port=follower_iface,
+        leader_port=leader_iface,
+        joint_keys=JOINT_POS_KEYS,
+        gripper_key=GRIPPER_POS_KEY,
     )
 
-    result = subprocess.run(["bash", "-c", cmd])
-    if result.returncode == 0:
-        ok("send_action no-op 확인 — 녹화 중 arm에 명령 안 보냄")
-        return True
-    else:
-        err("send_action no-op 실패 — 코드 확인 필요")
-        return False
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(script)
+        script_path = f.name
+
+    try:
+        info(f"follower={follower_iface}, leader={leader_iface}")
+        result = subprocess.run(
+            ["bash", "-c", source_prefix() + f"python3 {script_path}"],
+            capture_output=True, text=True,
+        )
+        print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+
+        if "RESULT:OK" in result.stdout:
+            ok("follower/leader get_observation()/get_action() shape·range 정상 (dry-check)")
+            return True
+        else:
+            err("teleop dry 점검 실패 — 위 출력 확인, returncode=" + str(result.returncode))
+            return False
+    finally:
+        os.unlink(script_path)
 
 
 # ═══════════════════════════════════════════════
@@ -818,14 +965,14 @@ def step_session(args):
         err("CAN 활성화 실패 — 이후 단계 중단")
         return
 
-    # 3. EEF non-zero
-    results["eef_check"] = step_eef_check(args)
+    # 3. 관절값 non-zero 확인
+    results["joint_check"] = step_joint_check(args)
 
     # 4. 카메라 확인
     results["cam_check"] = step_cam_check(args)
 
-    # 5. teleop no-op (EEF OK일 때만)
-    if results.get("eef_check"):
+    # 5. teleop dry 점검 (joint_check 통과했을 때만)
+    if results.get("joint_check"):
         results["teleop_check"] = step_teleop_check(args)
 
     # ── 결과 요약 ──
@@ -890,7 +1037,7 @@ def parse_args():
         epilog=__doc__,
     )
     p.add_argument("--step", required=True,
-        choices=["env_setup","rviz","can_up","can_down","eef_check",
+        choices=["env_setup","rviz","can_up","can_down","joint_check",
                  "teleop_check","cam_check","data_check","calc_range",
                  "infer_dry","rviz_preview","replay_dry","replay_real",
                  "infer_real","session","full_validate"],
@@ -911,7 +1058,14 @@ def parse_args():
     p.add_argument("--replay_fps",  type=int, default=5)
 
     # 하드웨어
-    p.add_argument("--can_interface", default="")
+    p.add_argument("--can_interface", default="",
+        help="deprecated: 단일 CAN 시절 인자. replay_real/infer_real(구 UGRP CLI)에서만 아직 사용")
+    p.add_argument("--follower_can_interface", default="",
+        help="follower CAN 인터페이스 (기본: configs/recording.env의 FOLLOWER_PORT 컨벤션, can_follower1)")
+    p.add_argument("--leader_can_interface", default="",
+        help="leader CAN 인터페이스 (기본: configs/recording.env의 LEADER_PORT 컨벤션, can_leader1)")
+    p.add_argument("--check_leader", action="store_true",
+        help="joint_check에서 follower뿐 아니라 leader도 확인")
     p.add_argument("--top_serial",    default="")
     p.add_argument("--wrist_serial",  default="")
 
@@ -926,7 +1080,7 @@ def main():
         "rviz":          step_rviz,
         "can_up":        step_can_up,
         "can_down":      step_can_down,
-        "eef_check":     step_eef_check,
+        "joint_check":   step_joint_check,
         "teleop_check":  step_teleop_check,
         "cam_check":     step_cam_check,
         "data_check":    step_data_check,
