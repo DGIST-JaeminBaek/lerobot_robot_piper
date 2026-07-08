@@ -26,6 +26,7 @@ import tkinter as tk
 from tkinter import ttk
 
 import cv2
+import pandas as pd
 
 from .ui import _load_geometry, _save_geometry
 
@@ -99,6 +100,43 @@ def read_episode_count(dataset_root: pathlib.Path) -> int:
         return int(info.get("total_episodes", 0))
     except (OSError, ValueError, json.JSONDecodeError):
         return 0
+
+
+def read_dataset_summary(dataset_root: pathlib.Path) -> dict:
+    """Recording History용 요약. meta/info.json(total_episodes/total_frames/fps)과
+    meta/tasks.parquet(task 이름 — LeRobotDataset은 task를 컬럼이 아니라 index로 저장함)
+    을 읽음. LeRobotDataset에 녹화 시각 필드가 없어서, meta/info.json 파일의 수정
+    시각(mtime)을 '녹화 시각'의 근사값으로 씀 — 실제 녹화 시각이 아니라 파일시스템
+    타임스탬프라는 점 주의 (예: 나중에 dataset을 복사/이동하면 값이 바뀜)."""
+    info_path = dataset_root / "meta" / "info.json"
+    info: dict = {}
+    try:
+        with open(info_path) as f:
+            info = json.load(f)
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+
+    try:
+        mtime = info_path.stat().st_mtime
+        recorded_at = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+    except OSError:
+        mtime = 0.0
+        recorded_at = "?"
+
+    try:
+        tasks_df = pd.read_parquet(dataset_root / "meta" / "tasks.parquet")
+        task = ", ".join(str(t) for t in tasks_df.index.tolist())
+    except Exception:
+        task = "?"
+
+    return {
+        "task": task,
+        "total_episodes": info.get("total_episodes", "?"),
+        "total_frames": info.get("total_frames", "?"),
+        "fps": info.get("fps", "?"),
+        "recorded_at": recorded_at,
+        "mtime": mtime,
+    }
 
 
 # ---------------------------------------------------------------- CAN helpers
@@ -363,12 +401,15 @@ class PiperMonitorUI:
         ):
             var.trace_add("write", self._refresh_command)
 
-        # -- Dataset Browser (records/ 밑의 기존 dataset/episode 탐색 — 향후 Replay 프리셋이 사용)
+        # -- Dataset Browser (records/ 밑의 기존 dataset/episode 탐색 — Replay 프리셋이 사용)
         self._build_dataset_browser_frame()
+
+        # -- Recording History (records/ 밑 기존 dataset들의 task/episode/시각 요약)
+        self._build_history_frame()
 
         # -- Monitor Controls
         mon_ctrl = ttk.LabelFrame(self.root, text="CAN Monitor", padding=8)
-        mon_ctrl.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
+        mon_ctrl.grid(row=4, column=0, sticky="ew", padx=8, pady=4)
 
         self.btn_mon_start = ttk.Button(mon_ctrl, text="Start Monitor", command=self._on_mon_start)
         self.btn_mon_start.pack(side="left", padx=4)
@@ -383,8 +424,8 @@ class PiperMonitorUI:
 
         # -- Joint Monitor
         joint_frame = ttk.LabelFrame(self.root, text="Joint Positions (raw)", padding=8)
-        joint_frame.grid(row=4, column=0, sticky="nsew", padx=8, pady=4)
-        self.root.rowconfigure(4, weight=1)
+        joint_frame.grid(row=5, column=0, sticky="nsew", padx=8, pady=4)
+        self.root.rowconfigure(5, weight=1)
         joint_frame.columnconfigure(2, weight=1)
         joint_frame.columnconfigure(5, weight=1)
 
@@ -421,7 +462,7 @@ class PiperMonitorUI:
 
         # -- Arm Status
         status_frame = ttk.LabelFrame(self.root, text="Follower Arm Status", padding=8)
-        status_frame.grid(row=5, column=0, sticky="ew", padx=8, pady=4)
+        status_frame.grid(row=6, column=0, sticky="ew", padx=8, pady=4)
         status_frame.columnconfigure(0, weight=1)
 
         self.status_text_var = tk.StringVar(value="--")
@@ -554,6 +595,54 @@ class PiperMonitorUI:
         episodes = [str(i) for i in range(n)]
         self.episode_combo["values"] = episodes
         self.replay_episode_var.set(episodes[0] if episodes else "")
+
+    # ---------------------------------------------------------- Recording History
+    def _build_history_frame(self):
+        """Dataset Browser와 같은 scan_root를 기준으로, 지금까지 녹화된
+        dataset들을 task/episode/frame/시각 요약 표로 보여줌."""
+        frame = ttk.LabelFrame(self.root, text="Recording History", padding=8)
+        frame.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
+
+        ttk.Button(frame, text="Refresh", command=self._on_history_refresh).pack(anchor="w", pady=(0, 4))
+
+        columns = ("dataset", "task", "episodes", "frames", "fps", "recorded_at")
+        headings = {
+            "dataset": "Dataset", "task": "Task", "episodes": "Episodes",
+            "frames": "Frames", "fps": "FPS", "recorded_at": "Recorded At (mtime)",
+        }
+        widths = {"dataset": 240, "task": 160, "episodes": 60, "frames": 70, "fps": 50, "recorded_at": 150}
+
+        self.history_tree = ttk.Treeview(frame, columns=columns, show="headings", height=5)
+        for col in columns:
+            self.history_tree.heading(col, text=headings[col])
+            self.history_tree.column(col, width=widths[col], anchor="w")
+        self.history_tree.pack(fill="x")
+
+        self._on_history_refresh()
+
+    def _on_history_refresh(self):
+        for row in self.history_tree.get_children():
+            self.history_tree.delete(row)
+
+        scan_root = dataset_scan_root(self.recording_env)
+        datasets = discover_datasets(scan_root)
+
+        rows = []
+        for d in datasets:
+            try:
+                label = str(d.relative_to(scan_root))
+            except ValueError:
+                label = str(d)
+            summary = read_dataset_summary(d)
+            rows.append((label, summary))
+
+        rows.sort(key=lambda r: r[1]["mtime"], reverse=True)  # 최신 녹화(mtime 기준) 먼저
+
+        for label, s in rows:
+            self.history_tree.insert(
+                "", "end",
+                values=(label, s["task"], s["total_episodes"], s["total_frames"], s["fps"], s["recorded_at"]),
+            )
 
     def _on_can_detect(self):
         for w in self.can_rows_frame.winfo_children():
