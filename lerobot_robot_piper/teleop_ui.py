@@ -240,6 +240,7 @@ PRESET_BUILDERS: dict[str, str] = {
     "Teleoperate": "_build_teleoperate_command",
     "Record": "_build_record_command",
     "Infer": "_build_infer_command",
+    "Replay (RViz)": "_build_replay_command",
 }
 PRESET_NAMES = list(PRESET_BUILDERS.keys())
 
@@ -704,6 +705,24 @@ class PiperMonitorUI:
             *self._dataset_args(fps),
             "--robot.discover_packages_path=lerobot_robot_piper",
             "--teleop.discover_packages_path=lerobot_robot_piper",
+        ]
+        return " ".join(args)
+
+    def _build_replay_command(self) -> str:
+        """Dataset Browser에서 고른 dataset/episode를 scripts/legacy_tools/
+        piper_replay_viz.py(joint_states 기반 RViz 재생, --robot 하드웨어 연결
+        없이 동작)로 넘김. 실행 전에 별도 터미널에서 RViz + robot_state_publisher
+        (agx_arm_urdf의 display 계열 launch)가 떠 있어야 함 — 스크립트 자체는
+        launch를 대신 띄워주지 않음. ROS2 환경(source /opt/ros/humble/setup.bash)도
+        이 UI를 실행한 셸에 이미 sourced 되어 있어야 함."""
+        script_path = REPO_ROOT / "scripts" / "legacy_tools" / "piper_replay_viz.py"
+        dataset_root = self.replay_dataset_root_var.get().strip()
+        episode = self.replay_episode_var.get().strip()
+
+        args = [
+            "python3", str(script_path),
+            f"--dataset_root={dataset_root}",
+            f"--episode={episode}",
         ]
         return " ".join(args)
 
