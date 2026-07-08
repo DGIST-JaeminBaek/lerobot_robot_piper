@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """
+[은퇴됨 — 참고용으로만 보관, 실행하지 말 것]
+
 piper_validate.py — UGRP PiPER 검증 파이프라인 통합 CLI
+
+piper_session.py가 이 파일의 모든 단계(data_check/calc_range/infer_dry/
+rviz_preview/replay_dry/replay_real/infer_real/full)를 정제된 형태로
+그대로 포함하고, CAN/joint 점검 단계(can_up/can_down/joint_check/
+teleop_check/cam_check/session)까지 추가로 가지고 있어 상위호환.
+새 작업은 scripts/legacy_tools/piper_session.py를 기준으로 할 것.
 
 사용법:
     python piper_validate.py --step <단계> [옵션]

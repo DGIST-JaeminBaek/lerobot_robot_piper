@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 """
+[은퇴됨 — 참고용으로만 보관, 실행하지 말 것]
+
 piper_tui.py — UGRP PiPER 실험 대시보드 (Textual TUI)
+
+이 파일의 "녹화 시작" 기능은 lerobot_robot_piper/lerobot_robot_piper/teleop_ui.py
+(piper-teleop, Record 프리셋)로 대체됨. 검증/재생/추론 단계 버튼은
+scripts/legacy_tools/piper_session.py의 각 step으로 대체됨.
+
+CFG["can_interface"] 단일 CAN, EEF raw SDK 안전 범위, `robot.type=piper`
+(구 CLI 파라다임) 전제로 짜여 있어 새 lerobot_robot_piper(joint-space,
+leader/follower 이중 CAN)와 호환 안 됨. 새 코드 작성 시 이 파일의 로직을
+참고하지 말 것 — teleop_ui.py를 참고할 것.
 
 실행:
     pip install textual

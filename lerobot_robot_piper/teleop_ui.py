@@ -194,27 +194,21 @@ class CANMonitor:
 # piper_follower/piper_leader가 RobotConfig/TeleoperatorConfig registry에
 # 등록되지 않음 (config_piper.py / config_piper_leader.py의
 # register_subclass 데코레이터는 import 시점에만 실행됨) — 그래서
-# Teleoperate 프리셋에도 discovery 인자를 반드시 포함해야 함.
+# Teleoperate/Record 프리셋 모두 discovery 인자를 반드시 포함해야 함.
 _DISCOVERY_ARGS = (
     " --robot.discover_packages_path=lerobot_robot_piper"
     " --teleop.discover_packages_path=lerobot_robot_piper"
 )
 
-SCRIPT_PRESETS = {
-    "Teleoperate": (
-        "lerobot-teleoperate"
-        " --robot.type=piper_follower --robot.port={follower_port}"
-        " --teleop.type=piper_leader --teleop.port={leader_port}"
-        + _DISCOVERY_ARGS
-    ),
-    # "Record"는 configs/recording.env + task/num_episodes 입력값을 조합해야 해서
-    # 고정 템플릿이 아니라 PiperMonitorUI._build_record_command()에서 동적으로 생성함.
-    # scripts/5__record.sh(lib/run_common.sh의 robot_camera_args/robot_action_offset_args)와
-    # 동등한 41개 인자를 그대로 반영.
+# 프리셋 이름 -> PiperMonitorUI의 커맨드 빌더 메서드 이름.
+# 콤보박스 목록도 이 딕셔너리 키에서 그대로 가져옴 — 나중에 추론(smolvla 등) 프리셋을
+# 추가할 때는 PiperMonitorUI에 _build_infer_command() 같은 메서드를 만들고 여기 한 줄만
+# 추가하면 됨 (_on_preset_selected/_on_launch 쪽은 손댈 필요 없음).
+PRESET_BUILDERS: dict[str, str] = {
+    "Teleoperate": "_build_teleoperate_command",
+    "Record": "_build_record_command",
 }
-
-# 콤보박스에 표시할 프리셋 이름 (SCRIPT_PRESETS에 없는 "Record"도 포함)
-PRESET_NAMES = ["Teleoperate", "Record"]
+PRESET_NAMES = list(PRESET_BUILDERS.keys())
 
 
 # ---------------------------------------------------------------- Main UI
@@ -459,14 +453,19 @@ class PiperMonitorUI:
     # ---------------------------------------------------------- Script Launcher
     def _on_preset_selected(self, _event):
         preset = self.preset_var.get()
-        if preset == "Record":
-            self.cmd_var.set(self._build_record_command())
-        elif preset in SCRIPT_PRESETS:
-            cmd = SCRIPT_PRESETS[preset].format(
-                leader_port=self.leader_port_var.get(),
-                follower_port=self.follower_port_var.get(),
-            )
-            self.cmd_var.set(cmd)
+        builder_name = PRESET_BUILDERS.get(preset)
+        if builder_name:
+            self.cmd_var.set(getattr(self, builder_name)())
+
+    def _build_teleoperate_command(self) -> str:
+        leader_port = self.leader_port_var.get().strip()
+        follower_port = self.follower_port_var.get().strip()
+        return (
+            "lerobot-teleoperate"
+            f" --robot.type=piper_follower --robot.port={follower_port}"
+            f" --teleop.type=piper_leader --teleop.port={leader_port}"
+            + _DISCOVERY_ARGS
+        )
 
     def _build_record_command(self) -> str:
         """scripts/5__record.sh(lib/run_common.sh)와 동등한 lerobot-record 커맨드 조립.
