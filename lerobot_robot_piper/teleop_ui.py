@@ -294,6 +294,7 @@ PRESET_BUILDERS: dict[str, str] = {
     "Record": "_build_record_command",
     "Infer": "_build_infer_command",
     "Replay (RViz)": "_build_replay_command",
+    "Infer Preview (RViz)": "_build_infer_preview_command",
 }
 PRESET_NAMES = list(PRESET_BUILDERS.keys())
 
@@ -893,6 +894,28 @@ class PiperMonitorUI:
             f"--dataset_root={dataset_root}",
             f"--episode={episode}",
         ]
+        return " ".join(args)
+
+    def _build_infer_preview_command(self) -> str:
+        """Dataset Browser에서 고른 dataset/episode의 카메라 프레임을 정책(Policy Path)에
+        순서대로 먹여서 예측 action을 뽑고, scripts/tools/piper_infer_preview.py로
+        RViz에 재생 (실제 로봇에 명령 안 보냄, open-loop 미리보기).
+        Infer 프리셋과 달리 하드웨어 연결이 전혀 필요 없음 — 정책 로딩과 추론만 함.
+        RViz + robot_state_publisher는 Replay와 마찬가지로 별도 터미널에서 미리 떠 있어야 함."""
+        script_path = REPO_ROOT / "scripts" / "tools" / "piper_infer_preview.py"
+        dataset_root = self.replay_dataset_root_var.get().strip()
+        episode = self.replay_episode_var.get().strip()
+        policy_path = self.policy_path_var.get().strip()
+        task = self.task_var.get().strip()
+
+        args = [
+            "python3", str(script_path),
+            f"--dataset_root={dataset_root}",
+            f"--episode={episode}",
+            f"--policy_path={policy_path}",
+        ]
+        if task:
+            args.append(f"--task={shlex.quote(task)}")
         return " ".join(args)
 
     def _on_launch(self):
