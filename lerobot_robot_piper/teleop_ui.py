@@ -183,6 +183,31 @@ def detect_can_interfaces() -> list[dict]:
     return interfaces
 
 
+def detect_can_role(iface: str) -> str:
+    """ctrl_mode를 실제로 읽어 leader/follower를 판별. 0x06(Linkage teaching input
+    mode)이면 leader, 그 외는 follower로 간주. 인터페이스가 이미 UP이고 bitrate가
+    맞춰져 있어야 함 (bring-up 전에는 호출하지 않음).
+    실패 시 "unknown" 반환 — 순서 기반 추측 대신 사용자가 직접 확인/입력하게 함."""
+    try:
+        piper = C_PiperInterface_V2(iface, judge_flag=False, can_auto_init=False)
+        piper.CreateCanBus(iface)
+        piper.ConnectPort(piper_init=False, start_thread=True)
+        try:
+            for _ in range(10):
+                time.sleep(0.2)
+                status = piper.GetArmStatus()
+                ctrl_mode = status.arm_status.ctrl_mode
+                mode_int = ctrl_mode.value if hasattr(ctrl_mode, "value") else int(ctrl_mode)
+                if mode_int != 0:
+                    return "leader" if mode_int == 0x06 else "follower"
+            return "unknown"
+        finally:
+            piper.DisconnectPort()
+    except Exception:
+        logger.exception(f"detect_can_role failed for {iface}")
+        return "unknown"
+
+
 def init_can_interface(iface: str, target_name: str, bitrate: int) -> tuple[bool, str]:
     msgs = []
     _run_cmd(["modprobe", "gs_usb"], sudo=True)
@@ -682,7 +707,19 @@ class PiperMonitorUI:
         if not interfaces:
             self.can_status_var.set("No CAN interfaces detected")
             return
-        self.can_status_var.set(f"{len(interfaces)} interface(s) found")
+        self.can_status_var.set(f"Detecting role (ctrl_mode) for {len(interfaces)} interface(s)...")
+        self.root.update()
+        # 순서로 leader/follower를 추측하지 않고, 실제 ctrl_mode(0x06=Linkage
+        # teaching input mode)를 읽어서 판별. UP 상태인 인터페이스만 조회 가능 —
+        # DOWN이면 role="unknown"으로 표시하고 사용자가 직접 이름을 입력해야 함.
+        roles = {}
+        for info in interfaces:
+            if info["state"] == "UP":
+                roles[info["iface"]] = detect_can_role(info["iface"])
+            else:
+                roles[info["iface"]] = "unknown"
+        self.can_status_var.set(f"{len(interfaces)} interface(s) found — role: " +
+                                 ", ".join(f"{i['iface']}={roles[i['iface']]}" for i in interfaces))
         for i, info in enumerate(interfaces):
             row = {"info": info}
             f = ttk.Frame(self.can_rows_frame)
@@ -691,7 +728,13 @@ class PiperMonitorUI:
             ttk.Label(f, text=info["bus_info"], width=16).pack(side="left", padx=2)
             state_color = "green" if info["state"] == "UP" else "gray"
             tk.Label(f, text=info["state"], fg=state_color, width=6).pack(side="left", padx=2)
-            default_name = f"can_{'leader' if i == 0 else 'follower'}" if len(interfaces) > 1 else "can_follower"
+            role = roles[info["iface"]]
+            role_color = {"leader": "blue", "follower": "purple", "unknown": "red"}[role]
+            tk.Label(f, text=role, fg=role_color, width=8).pack(side="left", padx=2)
+            if role == "unknown":
+                default_name = info["iface"]
+            else:
+                default_name = f"can_{role}"
             nv = tk.StringVar(value=default_name)
             ttk.Entry(f, textvariable=nv, width=14).pack(side="left", padx=2)
             row["target_name"] = nv
@@ -962,16 +1005,22 @@ class PiperMonitorUI:
         """실행 중인 subprocess의 stdout(stderr merge됨)을 계속 읽으면서
         lerobot-record의 "Recording episode N" 로그를 찾아 진행률로 표시.
         부수 효과로 stdout PIPE를 아무도 안 읽어서 버퍼가 꽉 차 서브프로세스가
-        멈추는 걸 막아줌 (기존엔 stdout=PIPE로 캡처만 하고 아무도 안 읽고 있었음)."""
+        멈추는 걸 막아줌 (기존엔 stdout=PIPE로 캡처만 하고 아무도 안 읽고 있었음).
+        전체 출력은 REPO_ROOT/last_launch.log에 저장 — GUI 화면엔 진행률만
+        보이고 실패 원인(스택트레이스 등)이 사라지는 문제가 있어서 추가함."""
         if proc.stdout is None:
             return
         target = self.num_episodes_var.get().strip() or "?"
-        for line in proc.stdout:
-            m = _RECORD_EPISODE_RE.search(line.decode(errors="replace") if isinstance(line, bytes) else line)
-            if m:
-                current = int(m.group(1)) + 1  # 0-indexed 누적 카운트 -> 1부터 보여줌
-                text = f"Recording episode {current}/{target}"
-                self.root.after(0, self.progress_var.set, text)
+        log_path = REPO_ROOT / "last_launch.log"
+        with open(log_path, "wb") as logf:
+            for line in proc.stdout:
+                logf.write(line)
+                logf.flush()
+                m = _RECORD_EPISODE_RE.search(line.decode(errors="replace") if isinstance(line, bytes) else line)
+                if m:
+                    current = int(m.group(1)) + 1  # 0-indexed 누적 카운트 -> 1부터 보여줌
+                    text = f"Recording episode {current}/{target}"
+                    self.root.after(0, self.progress_var.set, text)
 
     def _proc_finished(self, rc: int):
         # 프로세스는 완전히 죽었지만, 카메라 디바이스가 아직 release 안 됐을 수 있음

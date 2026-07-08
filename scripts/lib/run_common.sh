@@ -98,6 +98,11 @@ run_or_print() {
   "$@"
 }
 
+robot_safety_args() {
+  printf '%s\n' \
+    "--robot.max_relative_target=${MAX_RELATIVE_TARGET:-5.0}"
+}
+
 plugin_discovery_args() {
   printf '%s\n' \
     "--robot.discover_packages_path=lerobot_robot_piper" \
