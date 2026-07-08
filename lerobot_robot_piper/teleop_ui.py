@@ -25,6 +25,8 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
+import cv2
+
 from .ui import _load_geometry, _save_geometry
 
 from piper_sdk import C_PiperInterface_V2
@@ -32,6 +34,12 @@ from piper_sdk import C_PiperInterface_V2
 logger = logging.getLogger(__name__)
 
 JOINTS = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"]
+
+# lerobot-record 종료 직후, 다음 녹화 시작 전에 카메라 release를 위해 기다리는 시간(초).
+# SIGINT로 죽은 뒤 OS가 비디오 디바이스를 완전히 놓아주기까지 약간의 지연이 있는 경우가
+# 있어(녹화마다 카메라 open 타임아웃 나는 문제의 원인으로 추정), Launch 버튼을 이 시간
+# 동안 비활성화해서 바로 재시작하지 못하게 막음. 실제 하드웨어에서 적정값 조정 필요.
+CAMERA_RELEASE_WAIT_S = 1.5
 
 # configs/recording.env — repo root의 설정 파일 (teleop_ui.py 기준 두 단계 위)
 RECORDING_ENV_PATH = pathlib.Path(__file__).resolve().parent.parent / "configs" / "recording.env"
@@ -589,9 +597,47 @@ class PiperMonitorUI:
             self.root.after(0, self._proc_finished, rc)
 
     def _proc_finished(self, rc: int):
-        self.btn_launch.config(state="normal")
+        # 프로세스는 완전히 죽었지만, 카메라 디바이스가 아직 release 안 됐을 수 있음
+        # (SIGINT로 죽을 때 lerobot-record 쪽 cv2.VideoCapture release가 항상
+        # 깨끗하게 실행된다는 보장이 없음) — Launch를 바로 켜지 않고, 카메라
+        # release 사이클을 먼저 돌린 뒤 켬. Stop 버튼은 이미 끌 게 없으니 비활성화.
+        self.btn_launch.config(state="disabled")
         self.btn_kill.config(state="disabled")
-        self.bottom_var.set(f"Script exited (code {rc})")
+        self.bottom_var.set(f"Script exited (code {rc}) — releasing cameras...")
+        threading.Thread(target=self._release_cameras_then_ready, args=(rc,), daemon=True).start()
+
+    def _reset_opencv_cameras(self) -> None:
+        """녹화 프로세스 종료 직후 OpenCV 카메라 index를 열었다 바로 닫아서
+        OS 레벨 release를 유도. RealSense(serial 지정 카메라)는 index 기반이
+        아니라 이 방식이 안 맞아서 CAMERA_TYPE=opencv일 때만 수행함 — RealSense는
+        pyrealsense2의 hardware_reset()이 필요한데, 이 컴퓨터엔 하드웨어가 없어
+        검증 못 해서 이번 변경에는 포함하지 않음."""
+        camera_type = (self.recording_env.get("CAMERA_TYPE") or "opencv").lower()
+        if camera_type != "opencv":
+            return
+
+        indices: list[int] = []
+        for key in ("TOP_CAM", "WRIST_CAM"):
+            raw = self.recording_env.get(key, "")
+            if raw.isdecimal():
+                indices.append(int(raw))
+
+        for idx in indices:
+            try:
+                cap = cv2.VideoCapture(idx)
+                time.sleep(0.1)
+                cap.release()
+            except Exception:
+                logger.exception(f"Camera {idx} release probe failed")
+
+    def _release_cameras_then_ready(self, rc: int) -> None:
+        self._reset_opencv_cameras()
+        time.sleep(CAMERA_RELEASE_WAIT_S)
+        self.root.after(0, self._on_proc_fully_finished, rc)
+
+    def _on_proc_fully_finished(self, rc: int) -> None:
+        self.btn_launch.config(state="normal")
+        self.bottom_var.set(f"Script exited (code {rc}) — cameras reset, ready")
 
     def _on_kill(self):
         if self.script_proc:
