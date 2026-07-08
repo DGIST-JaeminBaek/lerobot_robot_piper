@@ -347,6 +347,14 @@ class PiperMonitorUI:
         cmd_entry = ttk.Entry(script_frame, textvariable=self.cmd_var)
         cmd_entry.grid(row=4, column=1, columnspan=2, padx=4, sticky="ew", pady=(4, 0))
 
+        # 입력값이 바뀔 때마다 Command를 자동으로 다시 조립 — Preset을 재선택 안 해도
+        # 항상 최신 값 기준 커맨드가 보이게 해서, 옛날 커맨드로 Launch 누르는 실수를 막음.
+        for var in (
+            self.leader_port_var, self.follower_port_var,
+            self.task_var, self.num_episodes_var, self.policy_path_var,
+        ):
+            var.trace_add("write", self._refresh_command)
+
         # -- Dataset Browser (records/ 밑의 기존 dataset/episode 탐색 — 향후 Replay 프리셋이 사용)
         self._build_dataset_browser_frame()
 
@@ -465,8 +473,12 @@ class PiperMonitorUI:
 
         # label(콤보박스 표시용 상대경로) -> 실제 dataset root 절대경로
         self._dataset_paths: dict[str, pathlib.Path] = {}
-        # 선택된 dataset의 절대경로 문자열 — 추후 Replay 프리셋이 --dataset_root로 씀
+        # 선택된 dataset의 절대경로 문자열 — Replay 프리셋이 --dataset_root로 씀
         self.replay_dataset_root_var = tk.StringVar(value="")
+
+        # Dataset/Episode 선택이 바뀌면 Replay 커맨드도 자동 새로고침
+        self.replay_dataset_root_var.trace_add("write", self._refresh_command)
+        self.replay_episode_var.trace_add("write", self._refresh_command)
 
         self._on_dataset_browser_refresh()
 
@@ -575,8 +587,16 @@ class PiperMonitorUI:
 
     # ---------------------------------------------------------- Script Launcher
     def _on_preset_selected(self, _event):
-        preset = self.preset_var.get()
-        builder_name = PRESET_BUILDERS.get(preset)
+        self._refresh_command()
+
+    def _refresh_command(self, *_trace_args):
+        """현재 선택된 Preset 기준으로 Command 칸을 다시 조립.
+        Preset 콤보박스 선택뿐 아니라 Leader/Follower/Task/Num Episodes/
+        Policy Path/Dataset Browser 선택이 바뀔 때도 이 메서드가 trace로
+        호출돼서, 옛날 값으로 조립된 커맨드로 실수로 Launch 누르는 걸 막음."""
+        if not hasattr(self, "cmd_var"):
+            return  # 위젯 초기 구성 중 trace가 너무 일찍 불린 경우 (cmd_var 생성 전)
+        builder_name = PRESET_BUILDERS.get(self.preset_var.get())
         if builder_name:
             self.cmd_var.set(getattr(self, builder_name)())
 
