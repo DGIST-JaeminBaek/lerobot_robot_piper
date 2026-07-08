@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import shlex
 import signal
 import subprocess
@@ -41,6 +42,12 @@ JOINTS = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"]
 # 있어(녹화마다 카메라 open 타임아웃 나는 문제의 원인으로 추정), Launch 버튼을 이 시간
 # 동안 비활성화해서 바로 재시작하지 못하게 막음. 실제 하드웨어에서 적정값 조정 필요.
 CAMERA_RELEASE_WAIT_S = 1.5
+
+# lerobot-record가 각 에피소드 시작 시 찍는 로그 문구
+# (lerobot/scripts/lerobot_record.py: log_say(f"Recording episode {dataset.num_episodes}", ...))
+# dataset.num_episodes는 목표 episode 수가 아니라 "지금까지 기록된 episode 개수"라서
+# 0부터 시작함 — UI에 보여줄 때는 +1해서 1부터 시작하는 사람이 읽기 편한 번호로 바꿈.
+_RECORD_EPISODE_RE = re.compile(r"Recording episode (\d+)")
 
 # repo root (teleop_ui.py 기준 두 단계 위) / configs/recording.env
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -323,16 +330,31 @@ class PiperMonitorUI:
 
         self._update_ui()
 
+    def _describe_recording_env(self) -> str:
+        """recording.env 상태 줄 텍스트 — 로드된 경로/수정시각 또는 '없음'."""
+        if not RECORDING_ENV_PATH.exists():
+            return f"recording.env: 없음 ({RECORDING_ENV_PATH}) — 기본값 fallback 사용 중"
+        mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(RECORDING_ENV_PATH.stat().st_mtime))
+        return f"recording.env: {RECORDING_ENV_PATH} (수정됨 {mtime}, {len(self.recording_env)}개 값 로드)"
+
     # ------------------------------------------------------------ Build UI
     def _build_ui(self):
         self.root.columnconfigure(0, weight=1)
+
+        # -- recording.env 상태 (로드된 경로/수정 시각 — 어떤 env 기준으로 값이
+        # 채워졌는지 한눈에 보이게, 특히 여러 recording.env를 오가며 실험할 때 헷갈림 방지)
+        self.env_status_var = tk.StringVar(value=self._describe_recording_env())
+        ttk.Label(
+            self.root, textvariable=self.env_status_var, anchor="w",
+            font=("", 9), foreground="#888888",
+        ).grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 0))
 
         # -- CAN Setup
         self._build_can_frame()
 
         # -- Script Launcher
         script_frame = ttk.LabelFrame(self.root, text="Script Launcher", padding=8)
-        script_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
+        script_frame.grid(row=2, column=0, sticky="ew", padx=8, pady=4)
         script_frame.columnconfigure(1, weight=1)
 
         # Ports (configs/recording.env의 LEADER_PORT/FOLLOWER_PORT를 기본값으로 사용,
@@ -393,6 +415,13 @@ class PiperMonitorUI:
         cmd_entry = ttk.Entry(script_frame, textvariable=self.cmd_var)
         cmd_entry.grid(row=4, column=1, columnspan=2, padx=4, sticky="ew", pady=(4, 0))
 
+        # 실행 중인 lerobot-record의 stdout에서 "Recording episode N" 로그를 파싱해서
+        # 진행 상황을 표시 (Rerun 창을 안 보고 있어도 상태 파악 가능). 녹화 중이 아니면 빈 문자열.
+        self.progress_var = tk.StringVar(value="")
+        ttk.Label(script_frame, textvariable=self.progress_var, foreground="#2a9d5c").grid(
+            row=5, column=0, columnspan=3, padx=4, sticky="w", pady=(2, 0)
+        )
+
         # 입력값이 바뀔 때마다 Command를 자동으로 다시 조립 — Preset을 재선택 안 해도
         # 항상 최신 값 기준 커맨드가 보이게 해서, 옛날 커맨드로 Launch 누르는 실수를 막음.
         for var in (
@@ -409,7 +438,7 @@ class PiperMonitorUI:
 
         # -- Monitor Controls
         mon_ctrl = ttk.LabelFrame(self.root, text="CAN Monitor", padding=8)
-        mon_ctrl.grid(row=4, column=0, sticky="ew", padx=8, pady=4)
+        mon_ctrl.grid(row=5, column=0, sticky="ew", padx=8, pady=4)
 
         self.btn_mon_start = ttk.Button(mon_ctrl, text="Start Monitor", command=self._on_mon_start)
         self.btn_mon_start.pack(side="left", padx=4)
@@ -424,8 +453,8 @@ class PiperMonitorUI:
 
         # -- Joint Monitor
         joint_frame = ttk.LabelFrame(self.root, text="Joint Positions (raw)", padding=8)
-        joint_frame.grid(row=5, column=0, sticky="nsew", padx=8, pady=4)
-        self.root.rowconfigure(5, weight=1)
+        joint_frame.grid(row=6, column=0, sticky="nsew", padx=8, pady=4)
+        self.root.rowconfigure(6, weight=1)
         joint_frame.columnconfigure(2, weight=1)
         joint_frame.columnconfigure(5, weight=1)
 
@@ -462,7 +491,7 @@ class PiperMonitorUI:
 
         # -- Arm Status
         status_frame = ttk.LabelFrame(self.root, text="Follower Arm Status", padding=8)
-        status_frame.grid(row=6, column=0, sticky="ew", padx=8, pady=4)
+        status_frame.grid(row=7, column=0, sticky="ew", padx=8, pady=4)
         status_frame.columnconfigure(0, weight=1)
 
         self.status_text_var = tk.StringVar(value="--")
@@ -479,7 +508,7 @@ class PiperMonitorUI:
     # ---------------------------------------------------------- CAN Setup
     def _build_can_frame(self):
         can_frame = ttk.LabelFrame(self.root, text="CAN Setup", padding=8)
-        can_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        can_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(8, 4))
 
         btn_row = ttk.Frame(can_frame)
         btn_row.pack(fill="x")
@@ -521,7 +550,7 @@ class PiperMonitorUI:
         선택하게 함. 여기서 고른 값(self.replay_dataset_root_var/replay_episode_var)은
         추후 Replay 프리셋이 그대로 씀."""
         frame = ttk.LabelFrame(self.root, text="Dataset Browser", padding=8)
-        frame.grid(row=2, column=0, sticky="ew", padx=8, pady=4)
+        frame.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
 
         ttk.Button(frame, text="Refresh", command=self._on_dataset_browser_refresh).pack(side="left", padx=4)
 
@@ -601,7 +630,7 @@ class PiperMonitorUI:
         """Dataset Browser와 같은 scan_root를 기준으로, 지금까지 녹화된
         dataset들을 task/episode/frame/시각 요약 표로 보여줌."""
         frame = ttk.LabelFrame(self.root, text="Recording History", padding=8)
-        frame.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
+        frame.grid(row=4, column=0, sticky="ew", padx=8, pady=4)
 
         ttk.Button(frame, text="Refresh", command=self._on_history_refresh).pack(anchor="w", pady=(0, 4))
 
@@ -892,9 +921,11 @@ class PiperMonitorUI:
         self.btn_launch.config(state="disabled")
         self.btn_kill.config(state="normal")
         self.bottom_var.set(f"Running (PID {self.script_proc.pid}): {cmd}")
+        self.progress_var.set("")
 
         # Monitor process in background
         threading.Thread(target=self._watch_proc, daemon=True).start()
+        threading.Thread(target=self._read_proc_output, args=(self.script_proc,), daemon=True).start()
 
     def _watch_proc(self):
         """Wait for subprocess to finish and update UI."""
@@ -903,6 +934,21 @@ class PiperMonitorUI:
             rc = self.script_proc.returncode
             self.script_proc = None
             self.root.after(0, self._proc_finished, rc)
+
+    def _read_proc_output(self, proc: subprocess.Popen):
+        """실행 중인 subprocess의 stdout(stderr merge됨)을 계속 읽으면서
+        lerobot-record의 "Recording episode N" 로그를 찾아 진행률로 표시.
+        부수 효과로 stdout PIPE를 아무도 안 읽어서 버퍼가 꽉 차 서브프로세스가
+        멈추는 걸 막아줌 (기존엔 stdout=PIPE로 캡처만 하고 아무도 안 읽고 있었음)."""
+        if proc.stdout is None:
+            return
+        target = self.num_episodes_var.get().strip() or "?"
+        for line in proc.stdout:
+            m = _RECORD_EPISODE_RE.search(line.decode(errors="replace") if isinstance(line, bytes) else line)
+            if m:
+                current = int(m.group(1)) + 1  # 0-indexed 누적 카운트 -> 1부터 보여줌
+                text = f"Recording episode {current}/{target}"
+                self.root.after(0, self.progress_var.set, text)
 
     def _proc_finished(self, rc: int):
         # 프로세스는 완전히 죽었지만, 카메라 디바이스가 아직 release 안 됐을 수 있음
@@ -946,6 +992,7 @@ class PiperMonitorUI:
     def _on_proc_fully_finished(self, rc: int) -> None:
         self.btn_launch.config(state="normal")
         self.bottom_var.set(f"Script exited (code {rc}) — cameras reset, ready")
+        self.progress_var.set("")
 
     def _on_kill(self):
         if self.script_proc:
