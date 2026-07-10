@@ -96,8 +96,14 @@ class PiperFollower(Robot):
             logger.info(f"{self} go to origin.")
             self.bus.parking()
 
+        # 카메라별 connect()가 각자 warmup_s(예: RealSense 10초)만큼 블로킹해서
+        # 카메라 개수만큼 그대로 곱해짐(top+wrist 2대면 20초+) — record/teleoperate
+        # 시작 직후 그동안 teleop이 응답 없는 것처럼 보이는 원인. 병렬 연결로 줄여봤으나
+        # RealSense 2대를 정확히 동시에 초기화하면 USB 대역폭 경합으로 한쪽이
+        # "read failed"/타임아웃 나는 게 실제 하드웨어에서 확인됨 — 그래서 순차 연결
+        # 유지. 대기 시간을 줄이고 싶으면 REALSENSE_WARMUP_S를 낮추는 쪽으로 접근할 것
+        # (단, 너무 낮추면 원래 있었던 "녹화마다 카메라 타임아웃" 문제가 재현될 수 있음).
         for cam in self.cameras.values():
-            # 모든 camera pipeline 먼저 시작
             cam.connect(warmup=self.config.camera_connect_warmup)
 
         if self.cameras and not self.config.camera_connect_warmup:
@@ -242,4 +248,7 @@ class PiperFollower(Robot):
         if disable_torque is None:
             disable_torque = self.config.disable_torque_on_disconnect
         self._disconnect_cameras()
-        self.bus.disconnect(disable_torque)
+        # torque 자동 해제 여부와 무관하게 follower는 항상 parking 자세로 이동.
+        # DISABLE_TORQUE_ON_DISCONNECT=false로 두면 parking만 하고 torque는
+        # 켜진 채로 남아 scripts/tools/safe_release_torque.py로 수동 해제 가능.
+        self.bus.disconnect(disable_torque, park=True)

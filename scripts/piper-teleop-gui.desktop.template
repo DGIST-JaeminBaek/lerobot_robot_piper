@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Piper Teleop GUI
+Comment=CAN 초기화 + 관절 체크 + teleop_ui 실행
+Exec=bash -lc "'%REPO_DIR%/scripts/0__launch_gui.sh'; echo; read -p '[Enter로 창 닫기]'"
+Icon=utilities-terminal
+Terminal=true
+Categories=Development;

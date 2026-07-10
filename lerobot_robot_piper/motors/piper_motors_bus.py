@@ -59,9 +59,16 @@ class PiperMotorsBus(MotorsBus):
             raise ConnectionError(f"Failed to open port for {self.id}")
         self._is_connected = True
 
-    def disconnect(self, disable_torque: bool = True) -> None:
-        if disable_torque:
+    def disconnect(self, disable_torque: bool = True, park: bool | None = None) -> None:
+        # park과 disable_torque를 분리 — follower는 항상 parking 자세로는 가되
+        # torque 자동 해제 여부만 선택하고 싶은 경우(DISABLE_TORQUE_ON_DISCONNECT=false
+        # + scripts/tools/safe_release_torque.py 조합)를 지원하기 위함.
+        # park을 명시하지 않으면 기존 동작과 동일하게 disable_torque 값을 따름.
+        if park is None:
+            park = disable_torque
+        if park:
             self.parking()
+        if disable_torque:
             self.piper.DisablePiper()
         self.port_handler.closePort()
         self._is_connected = False
