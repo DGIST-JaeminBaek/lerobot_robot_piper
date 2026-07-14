@@ -1,0 +1,83 @@
+INFO 2026-07-13 22:56:36 eoperate.py:208 {'display_compressed_images': False,
+ 'display_data': False,
+ 'display_ip': None,
+ 'display_port': None,
+ 'fps': 60,
+ 'robot': {'action_offset_gripper': 0.0,
+           'action_offset_joint1': 0.0,
+           'action_offset_joint2': 0.0,
+           'action_offset_joint3': 0.0,
+           'action_offset_joint4': 0.0,
+           'action_offset_joint5': 0.0,
+           'action_offset_joint6': 0.0,
+           'action_offset_report_threshold': 3.0,
+           'calibration_dir': None,
+           'cam_height': 480,
+           'cam_width': 640,
+           'camera_connect_warmup': False,
+           'camera_fps': 30,
+           'camera_post_connect_wait_s': 2.0,
+           'camera_type': 'opencv',
+           'cameras': {},
+           'disable_torque_on_disconnect': True,
+           'id': None,
+           'max_relative_target': 5.0,
+           'park_on_connect': False,
+           'port': 'can_follower',
+           'realsense_use_depth': False,
+           'realsense_warmup_s': 5.0,
+           'top_cam': '',
+           'top_cam_type': '',
+           'top_realsense_use_depth': False,
+           'use_action_offset': True,
+           'use_manual_action_offset': False,
+           'wrist_cam': '',
+           'wrist_cam_type': '',
+           'wrist_realsense_use_depth': False},
+ 'teleop': {'calibration_dir': None,
+            'gripper_open_pos': 50.0,
+            'id': None,
+            'port': 'can_leader'},
+ 'teleop_time_s': None}
+[2026-07-13 22:56:36] [ERROR] [PIPER] [{'can_leader': <piper_sdk.interface.piper_interface_v2.C_PiperInterface_V2 object at 0x0000026183337A60>}] CAN socket can_leader does not exist.
+Traceback (most recent call last):
+  File "C:\Users\easts\anaconda3\envs\piper_lerobot\lib\site-packages\piper_sdk\interface\piper_interface_v2.py", line 418, in __init__
+    self.__arm_can=C_STD_CAN(can_name, "socketcan", 1000000, judge_flag, True, self.ParseCANFrame)
+  File "C:\Users\easts\anaconda3\envs\piper_lerobot\lib\site-packages\piper_sdk\hardware_port\can_encapsulation_v0_4_0.py", line 96, in __init__
+    self.JudgeCanInfo()
+  File "C:\Users\easts\anaconda3\envs\piper_lerobot\lib\site-packages\piper_sdk\hardware_port\can_encapsulation_v0_4_0.py", line 152, in JudgeCanInfo
+    raise ValueError(f"CAN socket {self.channel_name} does not exist.")
+ValueError: CAN socket can_leader does not exist.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\easts\anaconda3\envs\piper_lerobot\lib\site-packages\lerobot\teleoperators\utils.py", line 104, in make_teleoperator_from_config
+    return cast("Teleoperator", make_device_from_device_class(config))
+  File "C:\Users\easts\anaconda3\envs\piper_lerobot\lib\site-packages\lerobot\utils\import_utils.py", line 131, in make_device_from_device_class
+    return cls(config)
+  File "C:\Users\easts\lerobot_robot_piper\lerobot_robot_piper\piper_leader.py", line 25, in __init__
+    self.bus = PiperMotorsBus(
+  File "C:\Users\easts\lerobot_robot_piper\lerobot_robot_piper\motors\piper_motors_bus.py", line 47, in __init__
+    self.piper = C_PiperInterface_V2(port)
+  File "C:\Users\easts\anaconda3\envs\piper_lerobot\lib\site-packages\piper_sdk\interface\piper_interface_v2.py", line 423, in __init__
+    raise ConnectionError("['%s' Interface __init__ ERROR]" % can_name)
+ConnectionError: ['can_leader' Interface __init__ ERROR]
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\easts\anaconda3\envs\piper_lerobot\lib\runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "C:\Users\easts\anaconda3\envs\piper_lerobot\lib\runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "C:\Users\easts\anaconda3\envs\piper_lerobot\Scripts\lerobot-teleoperate.exe\__main__.py", line 5, in <module>
+  File "C:\Users\easts\anaconda3\envs\piper_lerobot\lib\site-packages\lerobot\scripts\lerobot_teleoperate.py", line 247, in main
+    teleoperate()
+  File "C:\Users\easts\anaconda3\envs\piper_lerobot\lib\site-packages\lerobot\configs\parser.py", line 233, in wrapper_inner
+    response = fn(cfg, *args, **kwargs)
+  File "C:\Users\easts\anaconda3\envs\piper_lerobot\lib\site-packages\lerobot\scripts\lerobot_teleoperate.py", line 217, in teleoperate
+    teleop = make_teleoperator_from_config(cfg.teleop)
+  File "C:\Users\easts\anaconda3\envs\piper_lerobot\lib\site-packages\lerobot\teleoperators\utils.py", line 106, in make_teleoperator_from_config
+    raise ValueError(f"Error creating robot with config {config}: {e}") from e
+ValueError: Error creating robot with config PiperLeaderConfig(id=None, calibration_dir=None, port='can_leader', gripper_open_pos=50.0): ['can_leader' Interface __init__ ERROR]

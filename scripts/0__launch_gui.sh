@@ -2,7 +2,7 @@
 # CAN 인터페이스 초기화 → 관절값 프리플라이트 체크 → teleop_ui GUI 실행을 한 번에 수행.
 # 개별 단계만 필요하면 기존 1__init_can.sh / scripts/legacy_tools/piper_session.py를
 # 직접 실행할 것 — 이 스크립트는 그 둘을 그대로 호출하는 얇은 래퍼임.
-set -euo pipefail
+set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/run_common.sh
@@ -94,7 +94,7 @@ fi
 
 ros_setup="/opt/ros/${ROS_DISTRO_NAME}/setup.bash"
 if [[ -f "${ros_setup}" ]]; then
-  # ROS2 setup.bash 내부가 set -u와 안 맞는 미설정 변수(AMENT_TRACE_SETUP_FILES 등)를
+  # ROS2 setup.bash 내부가 set -u와 안 맞는 미설정r 변수(AMENT_TRACE_SETUP_FILES 등)를
   # 참조해서 죽으므로 conda.sh와 마찬가지로 잠시 해제.
   set +u
   # shellcheck disable=SC1090
@@ -107,3 +107,4 @@ fi
 echo
 echo "=== [3/4] teleop_ui GUI 실행 ==="
 exec python -m lerobot_robot_piper.teleop_ui
+
