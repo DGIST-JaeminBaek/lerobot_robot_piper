@@ -135,34 +135,54 @@ sudo ip link set can0 up
 
 ## GUI 도구
 
-![piper-ui](asset/piper-ui.png)
-![piper-teleop](asset/piper-teleop.png)
-![piper-setup](asset/piper-setup.png)
-
-### `piper-setup`
+프로젝트의 핵심 기능은 `0__launch_gui.sh`를 통해 실행되는 통합 GUI에 모두 포함되어 있습니다.
 
 ```bash
-piper-setup
+bash scripts/0__launch_gui.sh
 ```
 
-여러 arm 설정용 wizard입니다. CAN 포트 스캔, leader/follower 역할 지정, arm 식별, CAN 이름 고정을 지원합니다.
+### 통합 GUI (`teleop_ui.py`)
 
-### `piper-ui`
+![통합 GUI](asset/gui.png)
+
+Teleoperation, 데이터 녹화, 실시간 카메라 뷰, 그리고 데이터셋 뷰어 기능이 하나로 합쳐진 메인 애플리케이션입니다. 
+
+- **Teleoperation**: Leader와 Follower 암의 상태를 실시간으로 모니터링하며 원격 조종을 수행합니다.
+- **Recording**: 버튼 클릭으로 데이터셋 녹화를 시작하고 중지할 수 있습니다.
+- **Camera View**: Top, Wrist 카메라 영상을 실시간으로 확인할 수 있습니다.
+
+### 데이터셋 뷰어
+
+![데이터셋 뷰어](asset/viwer.png)
+
+통합 GUI의 'Dataset Viewer' 탭에서 사용할 수 있으며, 녹화된 데이터셋(`LeRobotDataset`)의 내용을 시각적으로 검토할 수 있습니다.
+
+- 에피소드 및 프레임 단위 탐색
+- 각 프레임의 관측(이미지), 행동(action), 상태(state) 데이터 확인
+
+### 보조 도구
+
+개별 기능 테스트나 하드웨어 설정을 위한 보조 GUI 도구들도 계속 지원됩니다.
+
+#### `piper-ui`
+
+![piper-ui](asset/piper-ui.png)
+
+단일 Piper arm을 직접 제어하는 간단한 UI입니다. Joint 제어, 토크 활성화/비활성화 등의 기능을 제공하여 하드웨어 점검 시 유용합니다.
 
 ```bash
 piper-ui
 ```
 
-단일 Piper arm 직접 제어 UI입니다. CAN 설정, role 전환, torque on/off, parking, joint slider 제어를 제공합니다.
+#### `piper-setup`
 
-### `piper-teleop`
+![piper-setup](asset/piper-setup.png)
+
+CAN 포트 스캔, 역할(Leader/Follower) 지정, Arm 고유 이름 설정 등 여러 로봇팔의 초기 설정을 돕는 마법사(wizard)입니다.
 
 ```bash
-piper-teleop
+piper-setup
 ```
-(이제 `scripts/0__launch_gui.sh`를 통해 실행하는 것을 권장합니다.)
-
-Teleoperation 모니터링 및 데이터셋 뷰어가 통합된 UI입니다. leader/follower 상태 확인, teleop/녹화 실행, 그리고 녹화된 데이터셋의 내용을 시각적으로 확인할 수 있습니다.
 
 ## 직접 사용 예시
 
