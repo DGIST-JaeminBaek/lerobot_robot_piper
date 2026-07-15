@@ -72,6 +72,7 @@ robot_action_offset_args() {
     "--robot.park_on_connect=$(bool_default "${PARK_ON_CONNECT:-}" false)" \
     "--robot.use_action_offset=$(bool_default "${USE_ACTION_OFFSET:-}" true)" \
     "--robot.use_manual_action_offset=$(bool_default "${USE_MANUAL_ACTION_OFFSET:-}" false)" \
+    "--robot.action_offset_warmup_s=${ACTION_OFFSET_WARMUP_S:-1.5}" \
     "--robot.action_offset_report_threshold=${ACTION_OFFSET_REPORT_THRESHOLD:-3.0}" \
     "--robot.action_offset_joint1=${ACTION_OFFSET_JOINT1:-0.0}" \
     "--robot.action_offset_joint2=${ACTION_OFFSET_JOINT2:-0.0}" \
@@ -96,6 +97,12 @@ run_or_print() {
     return 0
   fi
   "$@"
+}
+
+robot_safety_args() {
+  printf '%s\n' \
+    "--robot.max_relative_target=${MAX_RELATIVE_TARGET:-5.0}" \
+    "--robot.disable_torque_on_disconnect=$(bool_default "${DISABLE_TORQUE_ON_DISCONNECT:-}" true)"
 }
 
 plugin_discovery_args() {

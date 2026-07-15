@@ -753,12 +753,16 @@ class PiperMonitorUI:
     def _build_teleoperate_command(self) -> str:
         leader_port = self.leader_port_var.get().strip()
         follower_port = self.follower_port_var.get().strip()
-        return (
-            "lerobot-teleoperate"
-            f" --robot.type=piper_follower --robot.port={follower_port}"
-            f" --teleop.type=piper_leader --teleop.port={leader_port}"
-            + _DISCOVERY_ARGS
-        )
+        args = [
+            "lerobot-teleoperate",
+            "--robot.type=piper_follower",
+            f"--robot.port={follower_port}",
+            *self._action_offset_args(),
+            *self._robot_safety_args(),
+            "--teleop.type=piper_leader",
+            f"--teleop.port={leader_port}",
+        ]
+        return " ".join(args) + _DISCOVERY_ARGS
 
     # -- lerobot-record 커맨드 조립 공용 헬퍼 (Record/Infer가 공유) -----------
     def _camera_args(self) -> list[str]:
@@ -794,6 +798,7 @@ class PiperMonitorUI:
             f"--robot.park_on_connect={env.get('PARK_ON_CONNECT') or 'false'}",
             f"--robot.use_action_offset={env.get('USE_ACTION_OFFSET') or 'true'}",
             f"--robot.use_manual_action_offset={env.get('USE_MANUAL_ACTION_OFFSET') or 'false'}",
+            f"--robot.action_offset_warmup_s={env.get('ACTION_OFFSET_WARMUP_S') or '1.5'}",
             f"--robot.action_offset_report_threshold={env.get('ACTION_OFFSET_REPORT_THRESHOLD') or '3.0'}",
             f"--robot.action_offset_joint1={offset_joints[0]}",
             f"--robot.action_offset_joint2={offset_joints[1]}",
@@ -802,6 +807,14 @@ class PiperMonitorUI:
             f"--robot.action_offset_joint5={offset_joints[4]}",
             f"--robot.action_offset_joint6={offset_joints[5]}",
             f"--robot.action_offset_gripper={env.get('ACTION_OFFSET_GRIPPER') or '0.0'}",
+        ]
+
+    def _robot_safety_args(self) -> list[str]:
+        """robot_safety_args()(run_common.sh)와 동일한 fallback."""
+        env = self.recording_env
+        return [
+            f"--robot.max_relative_target={env.get('MAX_RELATIVE_TARGET') or '5.0'}",
+            f"--robot.disable_torque_on_disconnect={env.get('DISABLE_TORQUE_ON_DISCONNECT') or 'true'}",
         ]
 
     def _dataset_args(self, fps: str) -> list[str]:
@@ -836,6 +849,7 @@ class PiperMonitorUI:
             f"--robot.port={follower_port}",
             *self._camera_args(),
             *self._action_offset_args(),
+            *self._robot_safety_args(),
             "--teleop.type=piper_leader",
             f"--teleop.port={leader_port}",
             f"--display_data={env.get('DISPLAY_DATA') or 'true'}",
@@ -868,6 +882,7 @@ class PiperMonitorUI:
             f"--robot.port={follower_port}",
             *self._camera_args(),
             *self._action_offset_args(),
+            *self._robot_safety_args(),
             "--teleop.type=piper_leader",
             f"--teleop.port={leader_port}",
             f"--policy.path={policy_path}",

@@ -53,6 +53,7 @@ class PiperFollower(Robot):
         )
         self.cameras = make_cameras_from_configs(config.cameras)
         self._action_offset: dict[str, float] | None = None
+        self._action_offset_start_time: float | None = None
         self._action_offset_reported = False
         self._camera_executor: ThreadPoolExecutor | None = None
         self._ensure_camera_executor()
@@ -169,11 +170,22 @@ class PiperFollower(Robot):
                     # recording.env 기준 수동 offset
                     self._action_offset = self._manual_action_offset(goal_pos)
                     logger.info(f"{self} manual action offset applied: {self._action_offset}")
+                    self._report_action_offset(goal_pos, present_pos, self._action_offset)
                 else:
-                    # 첫 leader action과 follower 현재 자세 차이
+                    # leader control frame이 시작 직후 늦게 안정화될 수 있어 바로 고정하지 않는다.
+                    self._action_offset_start_time = time.perf_counter()
                     self._action_offset = {key: present_pos[key] - val for key, val in goal_pos.items()}
-                    logger.info(f"{self} action offset initialized: {self._action_offset}")
-                self._report_action_offset(goal_pos, present_pos, self._action_offset)
+                    logger.info(
+                        f"{self} action offset warmup started "
+                        f"({self.config.action_offset_warmup_s:.1f}s): {self._action_offset}"
+                    )
+            elif not self.config.use_manual_action_offset and self._action_offset_start_time is not None:
+                elapsed_s = time.perf_counter() - self._action_offset_start_time
+                self._action_offset = {key: present_pos[key] - val for key, val in goal_pos.items()}
+                if elapsed_s >= self.config.action_offset_warmup_s:
+                    logger.info(f"{self} action offset locked: {self._action_offset}")
+                    self._report_action_offset(goal_pos, present_pos, self._action_offset)
+                    self._action_offset_start_time = None
 
             # follower 현재 자세 기준 상대 추종
             goal_pos = {key: val + self._action_offset.get(key, 0.0) for key, val in goal_pos.items()}
@@ -242,4 +254,4 @@ class PiperFollower(Robot):
         if disable_torque is None:
             disable_torque = self.config.disable_torque_on_disconnect
         self._disconnect_cameras()
-        self.bus.disconnect(disable_torque)
+        self.bus.disconnect(disable_torque, park=True)

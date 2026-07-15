@@ -59,9 +59,14 @@ class PiperMotorsBus(MotorsBus):
             raise ConnectionError(f"Failed to open port for {self.id}")
         self._is_connected = True
 
-    def disconnect(self, disable_torque: bool = True) -> None:
-        if disable_torque:
+    def disconnect(self, disable_torque: bool = True, park: bool | None = None) -> None:
+        # Separate parking from torque release so experiments can keep torque on
+        # after moving to a safe pose, then release it manually if needed.
+        if park is None:
+            park = disable_torque
+        if park:
             self.parking()
+        if disable_torque:
             self.piper.DisablePiper()
         self.port_handler.closePort()
         self._is_connected = False

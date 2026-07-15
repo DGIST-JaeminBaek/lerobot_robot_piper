@@ -48,6 +48,7 @@ class PiperFollowerConfig(RobotConfig):
     # leader/follower 시작 자세 차이 보정
     use_action_offset: bool = True
     use_manual_action_offset: bool = False
+    action_offset_warmup_s: float = 1.5
     action_offset_report_threshold: float = 3.0
     action_offset_joint1: float = 0.0
     action_offset_joint2: float = 0.0

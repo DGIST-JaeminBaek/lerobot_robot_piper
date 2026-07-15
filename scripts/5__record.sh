@@ -24,6 +24,7 @@ RESUME="$(bool_default "${RESUME:-}" false)"
 mapfile -t DISCOVERY_ARGS < <(plugin_discovery_args)
 mapfile -t CAMERA_ARGS < <(robot_camera_args)
 mapfile -t OFFSET_ARGS < <(robot_action_offset_args)
+mapfile -t SAFETY_ARGS < <(robot_safety_args)
 
 # LeRobot dataset 부모 저장 위치
 mkdir -p "$(dirname "${DATASET_ROOT}")"
@@ -34,6 +35,7 @@ cmd=(
   "--robot.port=${FOLLOWER_PORT}"
   "${CAMERA_ARGS[@]}"
   "${OFFSET_ARGS[@]}"
+  "${SAFETY_ARGS[@]}"
   "--teleop.type=piper_leader"
   "--teleop.port=${LEADER_PORT}"
   "--display_data=${DISPLAY_DATA}"
