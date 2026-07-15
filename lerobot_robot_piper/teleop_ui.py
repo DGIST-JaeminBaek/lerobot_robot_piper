@@ -55,6 +55,12 @@ _RECORD_EPISODE_RE = re.compile(r"Recording episode (\d+)")
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RECORDING_ENV_PATH = REPO_ROOT / "configs" / "recording.env"
 
+# 녹화(lerobot-record) 종료 후, 각 에피소드 초반 N 프레임을 parking에서 시작하도록 자동
+# 보정(scripts/tools/smooth_start_frames.py)할 기본 프레임 수. recording.env의
+# SMOOTH_START_FRAMES로 덮어쓸 수 있고, 0/false/off면 자동 보정을 끈다.
+SMOOTH_START_FRAMES_DEFAULT = 100
+SMOOTH_SCRIPT_PATH = REPO_ROOT / "scripts" / "tools" / "smooth_start_frames.py"
+
 
 def load_recording_env(path: pathlib.Path = RECORDING_ENV_PATH) -> dict[str, str]:
     """configs/recording.env를 KEY=VALUE 딕셔너리로 파싱. 파일이 없거나
@@ -332,6 +338,8 @@ class PiperMonitorUI:
     def __init__(self):
         self.running = True
         self.script_proc: subprocess.Popen | None = None
+        # 이번 Launch가 Record면 그 dataset root를 담아둠(종료 후 초반 프레임 보정용). Record가 아니면 None.
+        self._record_dataset_root: str | None = None
         self.leader_mon: CANMonitor | None = None
         self.follower_mon: CANMonitor | None = None
         self.monitoring = False
@@ -1062,6 +1070,9 @@ class PiperMonitorUI:
         cmd = cmd.replace("{leader_port}", self.leader_port_var.get())
         cmd = cmd.replace("{follower_port}", self.follower_port_var.get())
 
+        # Record 커맨드면 dataset root를 잡아둠(종료 후 초반 프레임 보정에 사용)
+        self._record_dataset_root = self._record_dataset_root_from_cmd(cmd)
+
         self.bottom_var.set(f"Launching: {cmd}")
         self.root.update()
 
@@ -1197,6 +1208,68 @@ class PiperMonitorUI:
         self.btn_launch.config(state="normal")
         self.bottom_var.set(f"Script exited (code {rc}) — cameras reset, ready")
         self.progress_var.set("")
+
+        # Record였다면, 방금 녹화한 데이터셋의 각 에피소드 초반 프레임을 parking 시작으로 보정.
+        # (SIGINT 조기 종료로 rc!=0이어도 lerobot-record는 지금까지 녹화분을 저장하므로 시도함.
+        #  실제 편집은 meta/info.json 존재 등 smooth_start 내부 방어 로직으로 걸러짐.)
+        root = self._record_dataset_root
+        self._record_dataset_root = None
+        if root:
+            enabled, num_frames = self._smooth_config()
+            if enabled:
+                threading.Thread(
+                    target=self._run_smooth_start, args=(root, num_frames), daemon=True
+                ).start()
+
+    # ---- 녹화 후 초반 프레임 보정 (smooth start) ----
+    def _record_dataset_root_from_cmd(self, cmd: str) -> str | None:
+        """실행 커맨드가 lerobot-record면 --dataset.root 값을 뽑아 반환, 아니면 None."""
+        if "lerobot-record" not in cmd:
+            return None
+        try:
+            tokens = shlex.split(cmd)
+        except ValueError:
+            return None
+        for tok in tokens:
+            if tok.startswith("--dataset.root="):
+                return tok.split("=", 1)[1]
+        return None
+
+    def _smooth_config(self) -> tuple[bool, int]:
+        """recording.env의 SMOOTH_START_FRAMES로 (활성화 여부, 프레임 수) 결정.
+        미설정이면 기본 활성화 + SMOOTH_START_FRAMES_DEFAULT. 0/false/off면 비활성화."""
+        raw = (self.recording_env.get("SMOOTH_START_FRAMES") or "").strip().lower()
+        if raw in ("0", "false", "off", "no"):
+            return False, 0
+        if not raw:
+            return True, SMOOTH_START_FRAMES_DEFAULT
+        try:
+            n = int(raw)
+        except ValueError:
+            return True, SMOOTH_START_FRAMES_DEFAULT
+        return (n > 0), max(n, 0)
+
+    def _run_smooth_start(self, dataset_root: str, num_frames: int) -> None:
+        """백그라운드 스레드: smooth_start_frames 모듈을 로드해 초반 프레임 보정 실행.
+        GUI가 죽지 않도록 모든 예외를 잡아 상태바에만 결과를 표시한다."""
+        self.root.after(0, self.bottom_var.set, f"Smoothing start frames (N={num_frames})...")
+        try:
+            import importlib.util
+
+            spec = importlib.util.spec_from_file_location(
+                "smooth_start_frames", SMOOTH_SCRIPT_PATH
+            )
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            summary = mod.smooth_start(dataset_root, num_frames=num_frames)
+            msg = (
+                f"Start frames smoothed: {summary['episodes']} episodes, "
+                f"{summary['frames_edited']} frames (N={num_frames})"
+            )
+        except Exception as e:
+            logger.exception("smooth_start_frames 실패")
+            msg = f"Smooth start failed: {e}"
+        self.root.after(0, self.bottom_var.set, msg)
 
     def _on_kill(self):
         if self.script_proc:
