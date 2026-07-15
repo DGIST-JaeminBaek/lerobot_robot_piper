@@ -32,7 +32,7 @@ piper_session.py — UGRP PiPER 실험실 세션 자동화 CLI
 
     # 추론 검증 전체 자동
     python piper_session.py --step full_validate \\
-        --dataset_root /home/ugrp308/Group43/datasets/piper-smolvla \\
+        --dataset_root records/local/piper-smolvla \\
         --pretrained_path outputs/piper-smolvla/checkpoints/last/pretrained_model
 """
 
@@ -49,10 +49,12 @@ import time
 # 설정값 — 실험 환경에 맞게 수정
 # ───────────────────────────────────────────────
 CFG = {
-    # 가상환경
-    "venv_activate":    "/home/ugrp308/Group43/.venv/bin/activate",
-    "lerobot_dir":      "/home/ugrp308/Group43/lerobot",
-    "ugrp_dir":         "/home/ugrp308/Group43/UGRP",
+    # 가상환경 — 이 PC(ugrp43)는 원본 실험실 PC(ugrp308)와 달리 plain venv가 아니라
+    # conda를 씀. conda_base/conda_env로 source_prefix()가 conda activate를 함.
+    "conda_base":       "/home/ugrp43/miniconda3",
+    "conda_env":        "piper-gui-refactor",
+    "lerobot_dir":      "/home/ugrp43/UGRP/lerobot",
+    "ugrp_dir":         "/home/ugrp43/UGRP",
     # CAN — lerobot_robot_piper는 leader/follower가 물리적으로 분리된
     # 두 개의 CAN 인터페이스를 씀. 이름은 configs/recording.env의
     # LEADER_PORT/FOLLOWER_PORT 컨벤션을 그대로 따름.
@@ -63,13 +65,14 @@ CFG = {
     # 카메라
     "top_serial":       "327122074262",
     "wrist_serial":     "243322071626",
-    # URDF
+    # URDF — 주의: 이 PC(ugrp43)엔 /opt/ros/* 자체가 설치돼 있지 않음(확인함, 2026-07-09).
+    # ROS2가 설치되기 전까지 rviz/rviz_preview 스텝은 이 경로값과 무관하게 동작 안 함.
     "urdf_repo":        "https://github.com/agilexrobotics/agx_arm_urdf.git",
-    "urdf_local_dir":   "/home/ugrp308/Group43/agx_arm_urdf",
-    "ros2_ws":          "/home/ugrp308/ros2_ws",
+    "urdf_local_dir":   "/home/ugrp43/UGRP/agx_arm_urdf",
+    "ros2_ws":          "/home/ugrp43/UGRP/ros2_ws",
     "ros_distro":       "humble",
-    # 데이터셋
-    "dataset_root":     "/home/ugrp308/Group43/datasets/piper-smolvla",
+    # 데이터셋 — 레포 내 records/ 컨벤션(configs/recording.env의 DATASET_ROOT)과 맞춤
+    "dataset_root":     "/home/ugrp43/lerobot_robot_piper-gui-refactor/records/local/piper-smolvla",
     "dataset_repo_id":  "local/piper-smolvla",
     # joint-space 안전 범위 (정규화 단위) — data_check/calc_range/rviz_preview에서 사용.
     # action/observation.state 컬럼 순서(joint1.pos~joint6.pos, gripper.pos)와
@@ -132,14 +135,19 @@ def run_sudo(cmd_str):
 # 공통 유틸
 # ═══════════════════════════════════════════════
 def source_prefix():
-    """bash에서 venv + ROS2 source하는 prefix 문자열"""
-    venv   = CFG["venv_activate"]
-    distro = CFG["ros_distro"]
-    ws     = CFG["ros2_ws"]
+    """bash에서 conda env + ROS2 source하는 prefix 문자열.
+    각 source는 서로 독립적으로 실패를 삼킴(각자 `|| true`) — 하나(예: ROS2
+    미설치)가 없다고 나머지(conda activate)까지 통째로 스킵되던 예전 버그
+    (&&로 체이닝돼 있어서 첫 source 실패 시 뒤엣것들이 아예 실행조차 안 됐음)
+    수정."""
+    conda_base = CFG["conda_base"]
+    conda_env  = CFG["conda_env"]
+    distro     = CFG["ros_distro"]
+    ws         = CFG["ros2_ws"]
     return (
-        f"source {venv} && "
-        f"source /opt/ros/{distro}/setup.bash && "
-        f"source {ws}/install/setup.bash 2>/dev/null || true && "
+        f"source {conda_base}/etc/profile.d/conda.sh 2>/dev/null && conda activate {conda_env} || true; "
+        f"source /opt/ros/{distro}/setup.bash 2>/dev/null || true; "
+        f"source {ws}/install/setup.bash 2>/dev/null || true; "
     )
 
 def bash(cmd_str, check=True):
@@ -504,33 +512,31 @@ def step_rviz(args):
     else:
         ok(f"agx_arm_urdf 이미 존재: {urdf_dir}")
 
-    # 2. piper_description을 ros2_ws/src에 복사
-    src_piper = urdf_dir / "piper"
-    dst_piper = ros2_ws / "src" / "piper_description"
-    if not dst_piper.exists():
-        info(f"piper_description → {dst_piper}")
-        if src_piper.exists():
-            import shutil
-            shutil.copytree(str(src_piper), str(dst_piper))
-        else:
-            # agx_arm_urdf 구조에 따라 경로 탐색
-            candidates = list(urdf_dir.glob("**/piper_description"))
-            if candidates:
-                shutil.copytree(str(candidates[0]), str(dst_piper))
-            else:
-                warn("piper_description 디렉터리를 찾지 못함 — 수동 확인 필요")
-                warn(f"agx_arm_urdf 내용: {list(urdf_dir.iterdir())}")
+    # 2. agx_arm_description(wrapper 패키지)에 agx_arm_urdf를 통째로 복사.
+    # xacro가 package://agx_arm_description/agx_arm_urdf/... 경로로 mesh를 참조하므로
+    # (piper/urdf/*.xacro 확인됨) 패키지 이름과 내부 디렉터리 구조를 그대로 맞춰야
+    # RViz에서 mesh가 실제로 로드됨. package.xml/CMakeLists.txt/launch는
+    # ros2_ws/src/agx_arm_description에 미리 준비되어 있어야 함(레포에 없으면 수동 생성).
+    dst_pkg = ros2_ws / "src" / "agx_arm_description"
+    dst_urdf = dst_pkg / "agx_arm_urdf"
+    if not (dst_pkg / "package.xml").exists():
+        warn(f"{dst_pkg}/package.xml 없음 — agx_arm_description 패키지가 준비 안 됨. 수동 설정 필요")
+        return False
+    if not dst_urdf.exists():
+        info(f"agx_arm_urdf → {dst_urdf}")
+        import shutil
+        shutil.copytree(str(urdf_dir), str(dst_urdf), ignore=shutil.ignore_patterns(".git"))
 
     # 3. colcon build
     info("colcon build 실행 중...")
     build_cmd = (
         f"source /opt/ros/{distro}/setup.bash && "
         f"cd {ros2_ws} && "
-        f"colcon build --packages-select piper_description 2>&1 | tail -5"
+        f"colcon build --packages-select agx_arm_description 2>&1 | tail -20"
     )
     built = run(["bash", "-c", build_cmd])
     if built:
-        ok("piper_description 빌드 완료")
+        ok("agx_arm_description 빌드 완료")
     else:
         warn("colcon build 실패 또는 이미 빌드됨 — 계속 진행")
 
@@ -541,7 +547,7 @@ def step_rviz(args):
     rviz_cmd = (
         f"source /opt/ros/{distro}/setup.bash && "
         f"source {ros2_ws}/install/setup.bash && "
-        f"ros2 launch piper_description display_piper.launch.py"
+        f"ros2 launch agx_arm_description display_piper.launch.py"
     )
     try:
         subprocess.run(["bash", "-c", rviz_cmd])

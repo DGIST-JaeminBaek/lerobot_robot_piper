@@ -30,6 +30,8 @@ import cv2
 import pandas as pd
 
 from .ui import _load_geometry, _save_geometry
+from .config_piper import PiperFollowerConfig
+from .piper_follower import PiperFollower
 
 from piper_sdk import C_PiperInterface_V2
 
@@ -319,6 +321,7 @@ PRESET_BUILDERS: dict[str, str] = {
     "Record": "_build_record_command",
     "Infer": "_build_infer_command",
     "Replay (RViz)": "_build_replay_command",
+    "Replay (Real Robot)": "_build_replay_real_command",
     "Infer Preview (RViz)": "_build_infer_preview_command",
 }
 PRESET_NAMES = list(PRESET_BUILDERS.keys())
@@ -552,6 +555,14 @@ class PiperMonitorUI:
         )
         self.btn_estop.pack(side="right", padx=4)
 
+        # follower(slave) torque on/off + parking 자세 이동 — E-STOP 옆에 배치.
+        # 각각 백그라운드 스레드에서 짧게 connect/disconnect하며 동작하므로 UI가
+        # 멈추지 않음. Script Launcher의 Follower 포트 입력값을 그대로 씀.
+        ttk.Button(btn_row, text="Go Parking", command=self._on_go_parking).pack(side="right", padx=4)
+        ttk.Button(btn_row, text="Slave Torque ON", command=self._on_slave_torque_on).pack(side="right", padx=4)
+        ttk.Button(btn_row, text="Slave Torque OFF", command=self._on_slave_torque_off).pack(side="right", padx=4)
+        ttk.Button(btn_row, text="Camera Reset", command=self._on_camera_reset).pack(side="right", padx=4)
+
         self.can_rows_frame = ttk.Frame(can_frame)
         self.can_rows_frame.pack(fill="x", pady=(4, 0))
         self.can_row_widgets: list[dict] = []
@@ -569,6 +580,45 @@ class PiperMonitorUI:
             self.bottom_var.set("E-STOP: follower/leader CAN 모두 차단됨 — 로봇 정지됨")
         else:
             self.bottom_var.set("E-STOP: 일부 CAN 차단 실패 — 전원 차단 권고")
+
+    def _run_follower_action(self, label: str, fn):
+        """follower에 짧게 connect()해서 fn(follower)를 실행하고 바로 disconnect.
+        UI를 막지 않도록 백그라운드 스레드에서 실행 — 결과는 bottom_var에 반영."""
+        follower_port = self.follower_port_var.get().strip()
+        self.bottom_var.set(f"{label}: 실행 중...")
+
+        def worker():
+            try:
+                cfg = PiperFollowerConfig(
+                    port=follower_port,
+                    park_on_connect=False,
+                    use_action_offset=False,
+                )
+                follower = PiperFollower(cfg)
+                follower.connect()  # connect()가 항상 torque를 켬 (기존 동작)
+                try:
+                    fn(follower)
+                finally:
+                    # park=False — 여기서 자세를 바꾸지 않고, torque도 자동으로
+                    # 건드리지 않음(각 액션이 이미 원하는 상태로 만들어 둔 뒤이므로).
+                    follower.bus.disconnect(disable_torque=False, park=False)
+                msg = f"{label}: 완료"
+            except Exception as e:
+                logger.exception(f"{label} failed")
+                msg = f"{label}: 실패 ({e})"
+            self.root.after(0, lambda: self.bottom_var.set(msg))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_slave_torque_off(self):
+        self._run_follower_action("Slave Torque OFF", lambda f: f.bus.disable_torque())
+
+    def _on_slave_torque_on(self):
+        # connect()가 이미 enable_torque()를 호출하므로 별도 동작 불필요 — 상태만 보고.
+        self._run_follower_action("Slave Torque ON", lambda f: None)
+
+    def _on_go_parking(self):
+        self._run_follower_action("Go Parking", lambda f: f.bus.parking())
 
     # ---------------------------------------------------------- Dataset Browser
     def _build_dataset_browser_frame(self):
@@ -848,12 +898,22 @@ class PiperMonitorUI:
         ]
 
     def _dataset_args(self, fps: str) -> list[str]:
-        """5__record.sh의 dataset.* 인자와 동일한 fallback. Task/Num Episodes만 UI 입력값 사용."""
+        """5__record.sh의 dataset.* 인자와 동일한 fallback. Task/Num Episodes만 UI 입력값 사용.
+        scripts/5__record.sh와 동일하게, resume이 아니면 매번 월일-시분초 타임스탬프를
+        붙여서 이전 녹화 폴더를 덮어쓰지 않게 함."""
         env = self.recording_env
         task = self.task_var.get().strip()
         num_episodes = self.num_episodes_var.get().strip()
-        dataset_repo_id = env.get("DATASET_REPO_ID") or "local/piper_write_light"
-        dataset_root = env.get("DATASET_ROOT") or f"records/{dataset_repo_id}"
+        resume = env.get("RESUME") or "false"
+        dataset_repo_id_base = env.get("DATASET_REPO_ID") or "local/piper_write_light"
+        dataset_root_base = env.get("DATASET_ROOT") or f"records/{dataset_repo_id_base}"
+        if resume == "true":
+            dataset_repo_id = dataset_repo_id_base
+            dataset_root = dataset_root_base
+        else:
+            timestamp = time.strftime("%m%d-%H%M%S")
+            dataset_repo_id = f"{dataset_repo_id_base}_{timestamp}"
+            dataset_root = f"{dataset_root_base}_{timestamp}"
         return [
             f"--dataset.repo_id={dataset_repo_id}",
             f"--dataset.root={dataset_root}",
@@ -863,7 +923,7 @@ class PiperMonitorUI:
             f"--dataset.reset_time_s={env.get('RESET_TIME_S') or '60'}",
             f"--dataset.single_task={shlex.quote(task)}",
             f"--dataset.push_to_hub={env.get('PUSH_TO_HUB') or 'false'}",
-            f"--resume={env.get('RESUME') or 'false'}",
+            f"--resume={resume}",
         ]
 
     def _build_record_command(self) -> str:
@@ -936,6 +996,37 @@ class PiperMonitorUI:
             "python3", str(script_path),
             f"--dataset_root={dataset_root}",
             f"--episode={episode}",
+        ]
+        return " ".join(args)
+
+    def _robot_safety_args(self) -> list[str]:
+        """scripts/lib/run_common.sh의 robot_safety_args()와 동일한 fallback."""
+        env = self.recording_env
+        return [
+            f"--robot.max_relative_target={env.get('MAX_RELATIVE_TARGET') or '5.0'}",
+            f"--robot.disable_torque_on_disconnect={env.get('DISABLE_TORQUE_ON_DISCONNECT') or 'true'}",
+        ]
+
+    def _build_replay_real_command(self) -> str:
+        """Dataset Browser에서 고른 dataset/episode를 lerobot-replay로 실제
+        follower 로봇에 재생 (scripts/6__replay.sh와 동일한 커맨드). RViz
+        미리보기(Replay (RViz))와 달리 하드웨어에 실제로 명령을 보냄 — Launch를
+        누르면 바로 follower 팔이 녹화된 그대로 움직임. leader는 건드리지 않음."""
+        follower_port = self.follower_port_var.get().strip()
+        dataset_root = self.replay_dataset_root_var.get().strip()
+        episode = self.replay_episode_var.get().strip()
+        repo_id = self.dataset_label_var.get().strip() or (self.recording_env.get("DATASET_REPO_ID") or "local/piper_write_light")
+        fps = self.recording_env.get("FPS") or "30"
+
+        args = [
+            "lerobot-replay",
+            f"--robot.type=piper_follower --robot.port={follower_port}",
+            *self._robot_safety_args(),
+            f"--dataset.repo_id={repo_id}",
+            f"--dataset.root={dataset_root}",
+            f"--dataset.episode={episode}",
+            f"--dataset.fps={fps}",
+            "--robot.discover_packages_path=lerobot_robot_piper",
         ]
         return " ".join(args)
 
@@ -1036,8 +1127,7 @@ class PiperMonitorUI:
         """녹화 프로세스 종료 직후 OpenCV 카메라 index를 열었다 바로 닫아서
         OS 레벨 release를 유도. RealSense(serial 지정 카메라)는 index 기반이
         아니라 이 방식이 안 맞아서 CAMERA_TYPE=opencv일 때만 수행함 — RealSense는
-        pyrealsense2의 hardware_reset()이 필요한데, 이 컴퓨터엔 하드웨어가 없어
-        검증 못 해서 이번 변경에는 포함하지 않음."""
+        _reset_realsense_cameras()가 별도로 처리함."""
         camera_type = (self.recording_env.get("CAMERA_TYPE") or "opencv").lower()
         if camera_type != "opencv":
             return
@@ -1055,6 +1145,48 @@ class PiperMonitorUI:
                 cap.release()
             except Exception:
                 logger.exception(f"Camera {idx} release probe failed")
+
+    def _reset_realsense_cameras(self) -> list[str]:
+        """RealSense 카메라를 hardware_reset()으로 강제 재초기화.
+        병렬/동시 연결 충돌 등으로 스트림을 못 열게 된(started는 되는데
+        wait_for_frames가 타임아웃나는) 상태를 해소하는 데 씀 — 실제 하드웨어에서
+        확인됨(2026-07-09). 리셋된 시리얼 번호 목록을 반환."""
+        import pyrealsense2 as rs
+
+        ctx = rs.context()
+        devices = ctx.query_devices()
+        serials = []
+        for d in devices:
+            serial = d.get_info(rs.camera_info.serial_number)
+            d.hardware_reset()
+            serials.append(serial)
+        return serials
+
+    def _on_camera_reset(self):
+        """CAMERA_TYPE에 따라 RealSense는 hardware_reset(), OpenCV는 index
+        open/close 사이클로 카메라를 강제 재초기화. 녹화/텔레옵 중에는 카메라가
+        이미 열려있어 충돌할 수 있으므로 스크립트가 안 돌고 있을 때 사용할 것."""
+        camera_type = (self.recording_env.get("CAMERA_TYPE") or "opencv").lower()
+        self.bottom_var.set(f"Camera Reset ({camera_type}): 실행 중...")
+
+        def worker():
+            try:
+                if camera_type == "intelrealsense":
+                    serials = self._reset_realsense_cameras()
+                    if not serials:
+                        msg = "Camera Reset: 감지된 RealSense 장치 없음"
+                    else:
+                        time.sleep(3.0)  # 재인식 대기
+                        msg = f"Camera Reset 완료: {', '.join(serials)}"
+                else:
+                    self._reset_opencv_cameras()
+                    msg = "Camera Reset 완료 (OpenCV index open/close)"
+            except Exception as e:
+                logger.exception("Camera Reset failed")
+                msg = f"Camera Reset 실패: {e}"
+            self.root.after(0, lambda: self.bottom_var.set(msg))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _release_cameras_then_ready(self, rc: int) -> None:
         self._reset_opencv_cameras()

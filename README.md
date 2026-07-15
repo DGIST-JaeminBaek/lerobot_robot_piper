@@ -89,6 +89,7 @@ DRY_RUN=true bash scripts/5__record.sh
 | `scripts/tools/camera_check.py` | OpenCV 카메라 index grid viewer |
 | `scripts/tools/realsense_view.py` | RealSense serial 확인 및 RGB stream 미리보기 |
 | `scripts/tools/wego_dataset_check.py` | 녹화된 LeRobotDataset feature/action/state 점검 |
+| `scripts/tools/safe_release_torque.py` | joint1~6을 0으로 이동 후, 사람이 팔을 잡은 상태에서 수동으로 torque 해제 (`DISABLE_TORQUE_ON_DISCONNECT=false`와 짝) |
 
 예시:
 
@@ -96,6 +97,7 @@ DRY_RUN=true bash scripts/5__record.sh
 python3 scripts/tools/realsense_view.py --list
 python3 scripts/tools/realsense_view.py --serial 327122074262
 python3 scripts/tools/wego_dataset_check.py --dataset-repo-id local/piper_write_light --episode 0
+python3 scripts/tools/safe_release_torque.py --port can_follower
 ```
 
 ## 하드웨어 설정

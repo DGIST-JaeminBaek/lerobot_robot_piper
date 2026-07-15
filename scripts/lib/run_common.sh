@@ -72,6 +72,7 @@ robot_action_offset_args() {
     "--robot.park_on_connect=$(bool_default "${PARK_ON_CONNECT:-}" false)" \
     "--robot.use_action_offset=$(bool_default "${USE_ACTION_OFFSET:-}" true)" \
     "--robot.use_manual_action_offset=$(bool_default "${USE_MANUAL_ACTION_OFFSET:-}" false)" \
+    "--robot.action_offset_warmup_s=${ACTION_OFFSET_WARMUP_S:-1.5}" \
     "--robot.action_offset_report_threshold=${ACTION_OFFSET_REPORT_THRESHOLD:-3.0}" \
     "--robot.action_offset_joint1=${ACTION_OFFSET_JOINT1:-0.0}" \
     "--robot.action_offset_joint2=${ACTION_OFFSET_JOINT2:-0.0}" \
@@ -99,8 +100,12 @@ run_or_print() {
 }
 
 robot_safety_args() {
+  # DISABLE_TORQUE_ON_DISCONNECT=false로 두면 disconnect() 시 parking 자세로는
+  # 이동하되 torque는 자동으로 풀지 않음 — scripts/tools/safe_release_torque.py로
+  # 사람이 팔을 잡은 상태에서 수동으로 torque를 해제하는 루틴과 짝을 이룸.
   printf '%s\n' \
-    "--robot.max_relative_target=${MAX_RELATIVE_TARGET:-5.0}"
+    "--robot.max_relative_target=${MAX_RELATIVE_TARGET:-5.0}" \
+    "--robot.disable_torque_on_disconnect=$(bool_default "${DISABLE_TORQUE_ON_DISCONNECT:-}" true)"
 }
 
 plugin_discovery_args() {

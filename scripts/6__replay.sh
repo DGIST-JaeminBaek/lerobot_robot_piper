@@ -14,10 +14,13 @@ DATASET_ROOT="${DATASET_ROOT:-${REPO_DIR}/records/${DATASET_REPO_ID}}"
 DATASET_EPISODE="${DATASET_EPISODE:-0}"
 FPS="${FPS:-30}"
 
+mapfile -t SAFETY_ARGS < <(robot_safety_args)
+
 cmd=(
   lerobot-replay
   "--robot.type=piper_follower"
   "--robot.port=${FOLLOWER_PORT}"
+  "${SAFETY_ARGS[@]}"
   "--dataset.repo_id=${DATASET_REPO_ID}"
   "--dataset.root=${DATASET_ROOT}"
   "--dataset.episode=${DATASET_EPISODE}"

@@ -53,6 +53,7 @@ class PiperFollower(Robot):
         )
         self.cameras = make_cameras_from_configs(config.cameras)
         self._action_offset: dict[str, float] | None = None
+        self._action_offset_start_time: float | None = None
         self._action_offset_reported = False
         self._camera_executor: ThreadPoolExecutor | None = None
         self._ensure_camera_executor()
@@ -96,8 +97,14 @@ class PiperFollower(Robot):
             logger.info(f"{self} go to origin.")
             self.bus.parking()
 
+        # 카메라별 connect()가 각자 warmup_s(예: RealSense 10초)만큼 블로킹해서
+        # 카메라 개수만큼 그대로 곱해짐(top+wrist 2대면 20초+) — record/teleoperate
+        # 시작 직후 그동안 teleop이 응답 없는 것처럼 보이는 원인. 병렬 연결로 줄여봤으나
+        # RealSense 2대를 정확히 동시에 초기화하면 USB 대역폭 경합으로 한쪽이
+        # "read failed"/타임아웃 나는 게 실제 하드웨어에서 확인됨 — 그래서 순차 연결
+        # 유지. 대기 시간을 줄이고 싶으면 REALSENSE_WARMUP_S를 낮추는 쪽으로 접근할 것
+        # (단, 너무 낮추면 원래 있었던 "녹화마다 카메라 타임아웃" 문제가 재현될 수 있음).
         for cam in self.cameras.values():
-            # 모든 camera pipeline 먼저 시작
             cam.connect(warmup=self.config.camera_connect_warmup)
 
         if self.cameras and not self.config.camera_connect_warmup:
@@ -169,11 +176,22 @@ class PiperFollower(Robot):
                     # recording.env 기준 수동 offset
                     self._action_offset = self._manual_action_offset(goal_pos)
                     logger.info(f"{self} manual action offset applied: {self._action_offset}")
+                    self._report_action_offset(goal_pos, present_pos, self._action_offset)
                 else:
-                    # 첫 leader action과 follower 현재 자세 차이
+                    # leader control frame이 시작 직후 늦게 안정화될 수 있어 바로 고정하지 않는다.
+                    self._action_offset_start_time = time.perf_counter()
                     self._action_offset = {key: present_pos[key] - val for key, val in goal_pos.items()}
-                    logger.info(f"{self} action offset initialized: {self._action_offset}")
-                self._report_action_offset(goal_pos, present_pos, self._action_offset)
+                    logger.info(
+                        f"{self} action offset warmup started "
+                        f"({self.config.action_offset_warmup_s:.1f}s): {self._action_offset}"
+                    )
+            elif not self.config.use_manual_action_offset and self._action_offset_start_time is not None:
+                elapsed_s = time.perf_counter() - self._action_offset_start_time
+                self._action_offset = {key: present_pos[key] - val for key, val in goal_pos.items()}
+                if elapsed_s >= self.config.action_offset_warmup_s:
+                    logger.info(f"{self} action offset locked: {self._action_offset}")
+                    self._report_action_offset(goal_pos, present_pos, self._action_offset)
+                    self._action_offset_start_time = None
 
             # follower 현재 자세 기준 상대 추종
             goal_pos = {key: val + self._action_offset.get(key, 0.0) for key, val in goal_pos.items()}
@@ -242,4 +260,7 @@ class PiperFollower(Robot):
         if disable_torque is None:
             disable_torque = self.config.disable_torque_on_disconnect
         self._disconnect_cameras()
-        self.bus.disconnect(disable_torque)
+        # torque 자동 해제 여부와 무관하게 follower는 항상 parking 자세로 이동.
+        # DISABLE_TORQUE_ON_DISCONNECT=false로 두면 parking만 하고 torque는
+        # 켜진 채로 남아 scripts/tools/safe_release_torque.py로 수동 해제 가능.
+        self.bus.disconnect(disable_torque, park=True)
