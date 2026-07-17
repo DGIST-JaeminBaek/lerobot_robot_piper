@@ -189,6 +189,32 @@ python -m lerobot.teleoperate \
 ```
 
 ## 설정 요약
+### 3. Bimanual LeRobot CLI
+
+Use `piper-setup` first to assign and rename four CAN ports, then run the bimanual
+wrapper types:
+
+```bash
+lerobot-teleoperate \
+    --robot.type=bi_piper_follower \
+    --robot.left_arm_config.port=can_follower1 \
+    --robot.right_arm_config.port=can_follower2 \
+    --robot.id=bimanual_piper_follower \
+    --teleop.type=bi_piper_leader \
+    --teleop.left_arm_config.port=can_leader1 \
+    --teleop.right_arm_config.port=can_leader2 \
+    --teleop.id=bimanual_piper_leader \
+    --display_data=true
+```
+
+Bimanual observations and actions are prefixed with `left_` and `right_`, for
+example `left_joint1.pos` and `right_joint1.pos`.
+
+---
+
+## Configuration
+
+### PiperFollowerConfig
 
 ### `PiperFollowerConfig`
 
@@ -249,6 +275,24 @@ Parking pose의 normalized 값은 `0, -100, 100, 0, 35, 0, 0`입니다.
 |-- pyproject.toml
 `-- README.md
 ```
+lerobot_robot_piper/
+├── bi_piper_follower.py     # BiPiperFollower (two follower arms)
+├── bi_piper_leader.py       # BiPiperLeader (two leader arms)
+├── config_bi_piper.py       # BiPiperFollowerConfig
+├── config_bi_piper_leader.py # BiPiperLeaderConfig
+├── config_piper.py          # PiperFollowerConfig
+├── config_piper_leader.py   # PiperLeaderConfig
+├── piper_follower.py        # PiperFollower (Robot)
+├── piper_leader.py          # PiperLeader (Teleoperator)
+├── ui.py                    # piper-ui entrypoint
+├── teleop_ui.py             # piper-monitor entrypoint
+├── arm_setup_ui.py          # piper-setup entrypoint (multi-arm wizard)
+└── motors/
+    ├── piper_motors_bus.py  # CAN bus abstraction
+    └── tables.py            # Motor model tables
+```
+
+---
 
 ## License
 
