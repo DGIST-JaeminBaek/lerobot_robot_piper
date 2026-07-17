@@ -21,6 +21,7 @@ import re
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -68,7 +69,7 @@ def load_recording_env(path: pathlib.Path = RECORDING_ENV_PATH) -> dict[str, str
     fallback 기본값을 씀)."""
     env: dict[str, str] = {}
     try:
-        text = path.read_text()
+        text = path.read_text(encoding='utf-8')
     except OSError:
         return env
 
@@ -653,6 +654,9 @@ class PiperMonitorUI:
         )
         self.episode_combo.pack(side="left", padx=2)
 
+        self.play_button = ttk.Button(frame, text="▶ Play", command=self._on_play_episode, width=8)
+        self.play_button.pack(side="left", padx=(8, 2))
+
         self.dataset_status_var = tk.StringVar(value="Click 'Refresh' to scan")
         ttk.Label(frame, textvariable=self.dataset_status_var).pack(side="left", padx=12)
 
@@ -708,6 +712,41 @@ class PiperMonitorUI:
         episodes = [str(i) for i in range(n)]
         self.episode_combo["values"] = episodes
         self.replay_episode_var.set(episodes[0] if episodes else "")
+
+        # 아래의 깨끗한 코드로 교체해주세요.
+    def _on_play_episode(self):
+        dataset_root = self.replay_dataset_root_var.get().strip()
+        episode = self.replay_episode_var.get().strip()
+
+        if not dataset_root or not episode:
+            # 데이터셋이나 에피소드가 선택되지 않았으면 아무것도 하지 않음
+            self.root.bell()  # 사용자에게 '띵' 소리로 알림
+            return
+
+        cmd_list = [
+            sys.executable,
+            str(REPO_ROOT / "lerobot_sync_player.py"),
+            "--dataset-root",
+            dataset_root,
+            "--episode",
+            episode,
+        ]
+
+        # 윈도우에서는 CREATE_NEW_PROCESS_GROUP을, 다른 OS에서는 preexec_fn을 사용합니다.
+        kwargs = {
+            **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {"preexec_fn": os.setsid})
+        }
+        
+        try:
+            subprocess.Popen(cmd_list, **kwargs)
+        except FileNotFoundError:
+            # 플레이어 스크립트를 찾을 수 없는 경우
+            self.command_preview_text.delete("1.0", "end")
+            self.command_preview_text.insert("1.0", "# ERROR: lerobot_sync_player.py not found!")
+        except Exception as e:
+            # 그 외 예외 처리
+            self.command_preview_text.delete("1.0", "end")
+            self.command_preview_text.insert("1.0", f"# ERROR: {e}")    
 
     # ---------------------------------------------------------- Recording History
     def _build_history_frame(self):
@@ -1053,6 +1092,28 @@ class PiperMonitorUI:
         ]
         return " ".join(args)
 
+    def _build_sync_player_command(self) -> str:
+        """Dataset Browser에서 고른 dataset/episode를 lerobot_sync_player.py로 재생.
+        하드웨어 연결 없이 동작하는 순수 데이터 뷰어입니다.
+        """
+        script_path = REPO_ROOT / "lerobot_sync_player.py"
+        dataset_root = self.replay_dataset_root_var.get().strip()
+        episode = self.replay_episode_var.get().strip()
+
+        # dataset_root 또는 episode가 선택되지 않았으면 아무것도 하지 않음
+        if not dataset_root or not episode:
+            return "# Select a dataset and episode first"
+
+        args = [
+            str(self.python_executable),
+            str(script_path),
+            "--dataset-root",
+            f'"{dataset_root}"',  # 경로에 공백이 있을 수 있으므로 따옴표 추가
+            "--episode",
+            episode,
+        ]
+        return " ".join(args)
+
     def _build_infer_preview_command(self) -> str:
         """Dataset Browser에서 고른 dataset/episode의 카메라 프레임을 정책(Policy Path)에
         순서대로 먹여서 예측 action을 뽑고, scripts/tools/piper_infer_preview.py로
@@ -1095,7 +1156,7 @@ class PiperMonitorUI:
             self.script_proc = subprocess.Popen(
                 cmd, shell=True,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                preexec_fn=os.setsid,
+                **(dict(creationflags=subprocess.CREATE_NEW_PROCESS_GROUP) if sys.platform == "win32" else dict(preexec_fn=os.setsid)),
             )
         except Exception as e:
             self.bottom_var.set(f"Launch failed: {e}")

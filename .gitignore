@@ -9,3 +9,6 @@ configs/recording.env
 .claude/settings.json
 .vscode/settings.json
 records/
+vertex-key.json
+.continue/
+last_launch.log

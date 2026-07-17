@@ -22,6 +22,7 @@
 - **CAN Bus Communication**: `piper_sdk`, `wego_piper` 기반 하드웨어 제어
 - **Safety Limits**: `max_relative_target`으로 timestep별 joint 이동량 제한
 - **Camera Integration**: OpenCV/Intel RealSense 카메라를 follower observation으로 기록
+- **통합 GUI**: Teleoperation과 데이터셋 뷰어를 하나의 GUI로 통합 (`0__launch_gui.sh`)
 - **GUI Tools**: `piper-ui`, `piper-teleop`, `piper-setup`, `piper-calibrate` 제공
 - **Experiment Scripts**: CAN 초기화부터 record/train/async 실행까지 번호형 스크립트 제공
 
@@ -60,7 +61,18 @@ cp configs/recording.env.example configs/recording.env
 | `DATASET_REPO_ID` | 저장할 dataset 이름 |
 | `DATASET_ROOT` | 로컬 dataset 저장 경로 |
 
-기본 실행 순서:
+기본 실행 순서 (통합 GUI 사용):
+
+```bash
+bash scripts/1__init_can.sh
+bash scripts/0__launch_gui.sh
+```
+
+`0__launch_gui.sh`로 실행되는 GUI 내에서 텔레오퍼레이션, 녹화, 데이터셋 뷰어 기능까지 모두 사용할 수 있습니다.
+
+---
+
+기존의 개별 스크립트 실행도 여전히 지원됩니다:
 
 ```bash
 bash scripts/1__init_can.sh
@@ -82,6 +94,7 @@ DRY_RUN=true bash scripts/5__record.sh
 
 | 파일 | 역할 |
 |---|---|
+| `scripts/0__launch_gui.sh` | Teleop과 Dataset 뷰어가 통합된 메인 GUI 실행 |
 | `scripts/1__init_can.sh` | CAN 인터페이스 bitrate 설정 및 선택적 USB bus 기반 rename |
 | `scripts/2__find_camera.sh` | LeRobot 카메라 탐색 또는 `scripts/tools/camera_check.py` 실행 |
 | `scripts/3__set_camera.sh` | `configs/recording.env`의 `TOP_CAM`/`WRIST_CAM` 갱신 |
@@ -101,7 +114,7 @@ DRY_RUN=true bash scripts/5__record.sh
 | `scripts/tools/setup_can.sh` | 수동 CAN 초기화 도구 |
 | `scripts/tools/camera_check.py` | OpenCV 카메라 index grid viewer |
 | `scripts/tools/realsense_view.py` | RealSense serial 확인 및 RGB stream 미리보기 |
-| `scripts/tools/wego_dataset_check.py` | 녹화된 LeRobotDataset feature/action/state 점검 |
+| `scripts/tools/wego_dataset_check.py` | 녹화된 LeRobotDataset feature/action/state 점검 (현재 `0__launch_gui.sh`의 뷰어에 통합됨) |
 | `scripts/tools/safe_release_torque.py` | joint1~6을 0으로 이동 후, 사람이 팔을 잡은 상태에서 수동으로 torque 해제 (`DISABLE_TORQUE_ON_DISCONNECT=false`와 짝) |
 
 예시:
@@ -135,33 +148,54 @@ sudo ip link set can0 up
 
 ## GUI 도구
 
-![piper-ui](asset/piper-ui.png)
-![piper-teleop](asset/piper-teleop.png)
-![piper-setup](asset/piper-setup.png)
-
-### `piper-setup`
+프로젝트의 핵심 기능은 `0__launch_gui.sh`를 통해 실행되는 통합 GUI에 모두 포함되어 있습니다.
 
 ```bash
-piper-setup
+bash scripts/0__launch_gui.sh
 ```
 
-여러 arm 설정용 wizard입니다. CAN 포트 스캔, leader/follower 역할 지정, arm 식별, CAN 이름 고정을 지원합니다.
+### 통합 GUI (`teleop_ui.py`)
 
-### `piper-ui`
+![통합 GUI](asset/gui.png)
+
+Teleoperation, 데이터 녹화, 실시간 카메라 뷰, 그리고 데이터셋 뷰어 기능이 하나로 합쳐진 메인 애플리케이션입니다. 
+
+- **Teleoperation**: Leader와 Follower 암의 상태를 실시간으로 모니터링하며 원격 조종을 수행합니다.
+- **Recording**: 버튼 클릭으로 데이터셋 녹화를 시작하고 중지할 수 있습니다.
+- **Camera View**: Top, Wrist 카메라 영상을 실시간으로 확인할 수 있습니다.
+
+### 데이터셋 뷰어
+
+![데이터셋 뷰어](asset/viwer.png)
+
+통합 GUI의 'Dataset Viewer' 탭에서 사용할 수 있으며, 녹화된 데이터셋(`LeRobotDataset`)의 내용을 시각적으로 검토할 수 있습니다.
+
+- 에피소드 및 프레임 단위 탐색
+- 각 프레임의 관측(이미지), 행동(action), 상태(state) 데이터 확인
+
+### 보조 도구
+
+개별 기능 테스트나 하드웨어 설정을 위한 보조 GUI 도구들도 계속 지원됩니다.
+
+#### `piper-ui`
+
+![piper-ui](asset/piper-ui.png)
+
+단일 Piper arm을 직접 제어하는 간단한 UI입니다. Joint 제어, 토크 활성화/비활성화 등의 기능을 제공하여 하드웨어 점검 시 유용합니다.
 
 ```bash
 piper-ui
 ```
 
-단일 Piper arm 직접 제어 UI입니다. CAN 설정, role 전환, torque on/off, parking, joint slider 제어를 제공합니다.
+#### `piper-setup`
 
-### `piper-teleop`
+![piper-setup](asset/piper-setup.png)
+
+CAN 포트 스캔, 역할(Leader/Follower) 지정, Arm 고유 이름 설정 등 여러 로봇팔의 초기 설정을 돕는 마법사(wizard)입니다.
 
 ```bash
-piper-teleop
+piper-setup
 ```
-
-Teleoperation 모니터링 UI입니다. leader/follower 상태 확인과 teleoperation/recording 명령 실행을 지원합니다.
 
 ## 직접 사용 예시
 
