@@ -297,7 +297,7 @@ Piper arm은 7개 joint를 사용합니다. 정규화된 값 범위는 아래와
 | Joint 6 | AGILEX-S | -100 to +100 | +/-100-130 deg |
 | Gripper | AGILEX-S | 0 to 100 | 0-68 deg |
 
-Parking pose의 normalized 값은 `0, -100, 100, 0, 35, 0, 0`입니다.
+Parking pose의 normalized 값은 `0, -100, 100, 0, 0, -13.04, 0`입니다 (`motors/tables.py`의 `INITIALIZE_POSITION` 참고 — joint2/3/6은 calibration 범위가 0 기준 비대칭이라 이 값이 실제 물리 각도 0도에 대응).
 
 ## 문서
 
@@ -307,7 +307,23 @@ Parking pose의 normalized 값은 `0, -100, 100, 0, 35, 0, 0`입니다.
 | [setup_guide.md](setup_guide.md) | 환경 준비와 설정 방법 |
 | [docs/data_collection_protocol.md](docs/data_collection_protocol.md) | 데이터 수집 프로토콜 |
 | [docs/roadmap.md](docs/roadmap.md) | 남은 작업 |
-| [docs/change_history/](docs/change_history/) | 변경 이력 |
+| [docs/change_history/](docs/change_history/) | 변경 이력 (~2026-07-03, WEGO 원본 대비 초기 호환성 수정) |
+
+### 변경 이력 (날짜별, 2026-07-02 ~ 현재)
+
+`docs/change_history/`는 2026-07-03 이전 초기 호환성 수정까지만 다룹니다. 그 이후 브랜치별로 진행된 작업을 커밋 로그 기준으로 정리합니다.
+
+| 날짜 | 작성자 | 구현 내용 |
+|---|---|---|
+| 2026-06-29 ~ 06-30 | ilseong827 | Bimanual(양팔) Piper 지원, CAN 설정 복구 로직 추가 |
+| 2026-07-02 ~ 07-04 | DGIST-JaeminBaek | UGRP 워크플로 스크립트, RealSense 카메라 설정, 레코드 샘플/문서 정리 |
+| 2026-07-06 | ilseong827 | 카메라 식별 헬퍼(`identify_piper_cameras.sh`) 추가 (`minjun/test` 브랜치) |
+| 2026-07-07 ~ 07-08 | 조성일 | Legacy CLI 정리 + `teleop_ui.py` 확장: Record/Infer/Replay(RViz) 프리셋, Dataset Browser, Recording History, E-STOP 버튼, 카메라 릴리즈 처리 등 초기 GUI 리팩터링 핵심 작업 |
+| 2026-07-10 | SEONGIL | GUI 원클릭 launcher(`0__launch_gui.sh`), safe torque 해제 도구 추가 (`ver0710` 브랜치 — 이때 있던 Replay-Record 프리셋은 07-15에 정리되어 제거됨) |
+| 2026-07-14 | DarrkBllue | 통합 GUI에 Dataset Viewer(데이터셋 뷰어) 탭 통합 (`DONGKYU/gui+viewer` 브랜치) |
+| 2026-07-15 | mjkwak0906-lab | Action offset warmup/safety 인자 추가 (`minjun/test` 브랜치) |
+| 2026-07-15 | SEONGIL | GUI 런처 다듬기, follower torque/parking 제어, 실물 로봇 재생(Replay Real Robot) 프리셋 |
+| 2026-07-17 ~ 07-18 | 조성일 | 녹화 초반 프레임을 parking에서 자연스럽게 시작하도록 자동 보정(`scripts/tools/smooth_start_frames.py`, 위 "이 브랜치에서 추가한 것" 참고), `minjun/test` + `DONGKYU/gui+viewer` 브랜치 병합·통합 |
 
 ## Project Structure
 
