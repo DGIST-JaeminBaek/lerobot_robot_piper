@@ -2,6 +2,19 @@
 
 **Agilex Piper** 7-DOF 로봇팔을 위한 LeRobot 플러그인입니다. `piper_follower` 로봇 인터페이스와 `piper_leader` 텔레오퍼레이터 인터페이스를 제공하며, 이 레포에서는 실험 실행을 위해 `configs/recording.env`와 `scripts/` 번호형 스크립트를 함께 제공합니다.
 
+> ## 📌 이 브랜치(`seongil/gui-refactor`)에서 추가한 것 — 녹화 초반 프레임 보정
+>
+> 매 녹화마다 각 에피소드의 **초반 N(기본 100) 프레임을 parking 자세에서 시작하도록 자동 보정**하는 기능을 추가했습니다. 모든 에피소드가 동일한 시작 자세에서 출발해 실제 시연으로 자연스럽게 이어지므로, VLA 학습용 데이터의 시작 상태가 일관돼집니다.
+>
+> - **`scripts/tools/smooth_start_frames.py`** (신규): LeRobotDataset v3.0의 각 에피소드 초반 프레임 `observation.state`/`action`을 parking(`INITIALIZE_POSITION`)에서 (N+1)번째 프레임까지 **선형 보간**으로 덮어씀. `v[i] = parking + (v_real[N] − parking)·(i/N)`. lerobot `compute_stats`로 `meta/stats.json`·`episodes` 통계 재계산. parking 값은 `motors/tables.py`에서 동적 import(단일 소스). 비디오는 수정하지 않음.
+>   ```bash
+>   python scripts/tools/smooth_start_frames.py <dataset_root> --num-frames 100   # 적용
+>   python scripts/tools/smooth_start_frames.py <dataset_root> --dry-run           # 미리보기
+>   ```
+> - **`teleop_ui.py`**: Record 종료 후 방금 녹화한 데이터셋에 위 보정을 자동 실행. `configs/recording.env`의 `SMOOTH_START_FRAMES`로 프레임 수 조절, `0`/`false`로 비활성화.
+>
+> ⚠️ 개인 PC에서 정적 검증(데이터 도구 e2e)만 완료. 실물 하드웨어 녹화 검증 전에는 실제 데이터셋에 `--dry-run`으로 먼저 확인 권장.
+
 ## 주요 기능
 
 - **Leader-Follower Teleoperation**: leader 팔의 움직임을 follower 팔에 실시간 반영
