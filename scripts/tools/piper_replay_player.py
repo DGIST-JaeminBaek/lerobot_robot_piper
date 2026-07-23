@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import av
 import cv2
 import numpy as np
 import pandas as pd
@@ -160,7 +161,7 @@ def _panel(
     frame_index = int(row["frame_index"]) if "frame_index" in row else frame_pos
 
     y = 28
-    _draw_text(panel, "LeRobot sync player", (14, y), scale=0.62, color=(255, 255, 255), thickness=2)
+    _draw_text(panel, "Piper replay player", (14, y), scale=0.62, color=(255, 255, 255), thickness=2)
     y += 30
     _draw_text(panel, f"frame {frame_pos + 1}/{total}  dataset_frame={frame_index}", (14, y))
     y += 22
@@ -207,12 +208,25 @@ def _panel(
     return panel
 
 
-def _read_frame(cap: cv2.VideoCapture, frame_pos: int) -> np.ndarray | None:
-    current = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-    if current != frame_pos:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
-    ok, frame = cap.read()
-    return frame if ok else None
+def _load_video_frames(path: Path) -> list[np.ndarray] | None:
+    """path의 영상을 전부 디코딩해서 프레임 리스트로 반환, 실패하면 None.
+
+    cv2.VideoCapture(내장 ffmpeg의 AV1 디코더)는 이 프로젝트의 mp4(AV1/libdav1d
+    인코딩)를 seek할 때 'Missing Sequence Header'로 깨져서 프레임을 못 읽어옴
+    (seek 없이 순차로 읽어도 마찬가지로 실패함) — 대신 PyAV(av)로 처음부터
+    순차 디코딩해서 메모리에 전부 올려놓음. episode 길이가 짧아서 메모리도
+    부담 없음(scripts/tools/piper_replay_player_rviz.py와 동일한 방식)."""
+    try:
+        container = av.open(str(path))
+        frames = [f.to_ndarray(format="bgr24") for f in container.decode(video=0)]
+        container.close()
+    except Exception as e:
+        print(f"[WARN] Could not open video: {path} ({e})")
+        return None
+    if not frames:
+        print(f"[WARN] No frames decoded from video: {path}")
+        return None
+    return frames
 
 
 def play(initial_args: argparse.Namespace) -> None:
@@ -255,26 +269,21 @@ def play(initial_args: argparse.Namespace) -> None:
         if not video_keys:
             raise ValueError("No video features found. Pass --video-key if the metadata is unusual.")
 
-        captures: list[tuple[str, cv2.VideoCapture]] = []
+        video_frames: dict[str, list[np.ndarray] | None] = {}
         for key in video_keys:
             path = _video_path(root, info, meta, args.episode, key)
-            cap = cv2.VideoCapture(str(path))
-            if not cap.isOpened():
-                print(f"[WARN] Could not open video for {key}: {path}")
-                # 비디오가 없어도 플레이어는 계속 동작하도록 빈 캡처 객체 추가
-                captures.append((key, None))
-            else:
-                captures.append((key, cap))
+            video_frames[key] = _load_video_frames(path)
+            # 비디오가 없어도(None) 플레이어는 계속 동작함 — placeholder로 표시
 
         fps = float(args.fps or info.get("fps") or 30)
         delay = max(1, int(1000 / (fps * args.speed)))
         data_key = args.data_key
         action_key = args.action_key if args.action_key in df.columns else None
         joint_names = _feature_names(info, data_key)
-        
-        valid_caps = [cap for _, cap in captures if cap is not None]
-        total_frames = min(len(df), *[int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) for cap in valid_caps]) if valid_caps else len(df)
-        
+
+        valid_lengths = [len(f) for f in video_frames.values() if f is not None]
+        total_frames = min(len(df), *valid_lengths) if valid_lengths else len(df)
+
         frame_pos = 0
         paused = args.start_paused
         last_tick = time.monotonic()
@@ -293,15 +302,16 @@ def play(initial_args: argparse.Namespace) -> None:
 
         while 0 <= frame_pos < total_frames and episode_running:
             frames = []
-            for key, cap in captures:
-                if cap is None:
+            for key in video_keys:
+                decoded = video_frames.get(key)
+                if decoded is None:
                     frame = np.full((240, 424, 3), (20, 20, 20), dtype=np.uint8)
                     _draw_text(frame, f"video not found: {key}", (18, 38), color=(80, 80, 255))
+                elif frame_pos >= len(decoded):
+                    frame = np.full((240, 424, 3), (20, 20, 20), dtype=np.uint8)
+                    _draw_text(frame, f"missing frame: {key}", (18, 38), color=(80, 170, 255))
                 else:
-                    frame = _read_frame(cap, frame_pos)
-                    if frame is None:
-                        frame = np.full((240, 424, 3), (20, 20, 20), dtype=np.uint8)
-                        _draw_text(frame, f"missing frame: {key}", (18, 38), color=(80, 170, 255))
+                    frame = decoded[frame_pos].copy()  # 캐시된 원본을 mutate하지 않도록 복사
                 _draw_text(frame, key, (12, 24), color=(40, 230, 255), thickness=2)
                 frames.append(_resize_to_height(frame, args.video_height))
 
@@ -403,9 +413,6 @@ def play(initial_args: argparse.Namespace) -> None:
                     frame_pos += 1
                     last_tick = now
         
-        # for _, cap in captures:
-        #     if cap: cap.release()
-
         if key in (ord("q"), 27):
             break
     
@@ -441,7 +448,7 @@ INTERACTIVE CONTROLS:
     parser.add_argument("--start-paused", action="store_true", help="Start paused for frame-by-frame inspection")
     parser.add_argument("--video-height", type=int, default=480, help="Display height for each video")
     parser.add_argument("--panel-width", type=int, default=430, help="Width of the joint-data panel")
-    parser.add_argument("--window-name", default="LeRobot synchronized player", help="OpenCV window title")
+    parser.add_argument("--window-name", default="Piper replay player", help="OpenCV window title")
     return parser.parse_args()
 
 def main() -> None:

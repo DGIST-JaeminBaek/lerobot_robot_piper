@@ -2,38 +2,27 @@
 
 **Agilex Piper** 7-DOF 로봇팔을 위한 LeRobot 플러그인입니다. `piper_follower` 로봇 인터페이스와 `piper_leader` 텔레오퍼레이터 인터페이스를 제공하며, 이 레포에서는 실험 실행을 위해 `configs/recording.env`와 `scripts/` 번호형 스크립트를 함께 제공합니다.
 
-> ## 📌 이 브랜치(`seongil/gui-refactor`)에서 추가한 것 — 녹화 초반 프레임 보정
->
-> 매 녹화마다 각 에피소드의 **초반 N(기본 100) 프레임을 parking 자세에서 시작하도록 자동 보정**하는 기능을 추가했습니다. 모든 에피소드가 동일한 시작 자세에서 출발해 실제 시연으로 자연스럽게 이어지므로, VLA 학습용 데이터의 시작 상태가 일관돼집니다.
->
-> - **`scripts/tools/smooth_start_frames.py`** (신규): LeRobotDataset v3.0의 각 에피소드 초반 프레임 `observation.state`/`action`을 parking(`INITIALIZE_POSITION`)에서 (N+1)번째 프레임까지 **선형 보간**으로 덮어씀. `v[i] = parking + (v_real[N] − parking)·(i/N)`. lerobot `compute_stats`로 `meta/stats.json`·`episodes` 통계 재계산. parking 값은 `motors/tables.py`에서 동적 import(단일 소스). 비디오는 수정하지 않음.
->   ```bash
->   python scripts/tools/smooth_start_frames.py <dataset_root> --num-frames 100   # 적용
->   python scripts/tools/smooth_start_frames.py <dataset_root> --dry-run           # 미리보기
->   ```
-> - **`teleop_ui.py`**: Record 종료 후 방금 녹화한 데이터셋에 위 보정을 자동 실행. `configs/recording.env`의 `SMOOTH_START_FRAMES`로 프레임 수 조절, `0`/`false`로 비활성화.
->
-> ⚠️ 개인 PC에서 정적 검증(데이터 도구 e2e)만 완료. 실물 하드웨어 녹화 검증 전에는 실제 데이터셋에 `--dry-run`으로 먼저 확인 권장.
-
 ## 주요 기능
 
 - **Leader-Follower Teleoperation**: leader 팔의 움직임을 follower 팔에 실시간 반영
 - **Dataset Recording**: joint position과 camera frame을 LeRobotDataset으로 기록
+- **녹화 초반 프레임 자동 보정**: 매 녹화마다 각 에피소드의 초반 N(기본 100) 프레임을 parking 자세에서 시작하도록 `scripts/tools/smooth_start_frames.py`로 선형 보간 보정(`configs/recording.env`의 `SMOOTH_START_FRAMES`로 조절/비활성화). 모든 에피소드가 동일한 시작 자세에서 출발하므로 VLA 학습용 데이터의 시작 상태가 일관돼짐
 - **CAN Bus Communication**: `piper_sdk`, `wego_piper` 기반 하드웨어 제어
 - **Safety Limits**: `max_relative_target`으로 timestep별 joint 이동량 제한
 - **Camera Integration**: OpenCV/Intel RealSense 카메라를 follower observation으로 기록
-- **통합 GUI**: Teleoperation과 데이터셋 뷰어를 하나의 GUI로 통합 (`0__launch_gui.sh`)
-- **GUI Tools**: `piper-ui`, `piper-teleop`, `piper-setup`, `piper-calibrate` 제공
+- **통합 GUI**: Teleoperation, 녹화, RViz 연동, 데이터셋 뷰어를 하나의 GUI로 통합 (`0__launch_gui.sh`)
+- **GUI Tools**: `piper-ui`, `piper-teleop`, `piper-calibrate` 제공
 - **Experiment Scripts**: CAN 초기화부터 record/train/async 실행까지 번호형 스크립트 제공
 
 ## 요구 사항
 
-- Python >= 3.10
-- LeRobot >= 0.3.0
+- **Ubuntu 22.04 (Jammy) + Python 3.10** — ROS2 Humble의 공식 타겟 플랫폼 조합이자 `piper_sdk` 공식 저장소가 지원을 확인한 조합. RViz 연동 도구(`rclpy`)가 시스템 Python 3.10 빌드에 묶여 있어 다른 Python 버전으로는 동작하지 않음
+- LeRobot 0.4.x (0.4.0~0.4.4 전부 `Requires-Python: >=3.10`, 0.5.0부터 `>=3.12`로 올라가 3.10 환경엔 설치 자체가 안 됨 — PyPI 메타데이터로 확인)
 - [`piper_sdk`](https://github.com/agilexrobotics/piper_sdk)
 - [`wego_piper`](https://github.com/agilexrobotics/wego_piper)
 - Piper arm 및 CAN-USB interface
 - 선택: OpenCV camera 또는 Intel RealSense camera
+- 선택(RViz 연동 시): ROS2 Humble
 
 설치:
 
@@ -144,7 +133,7 @@ sudo ip link set can0 up
 | Follower robot | `can0` 또는 `can_follower1` |
 | Leader teleoperator | `can1` 또는 `can_leader1` |
 
-`piper-setup`으로 여러 CAN 포트를 감지하고 `can_leader1`, `can_follower1` 같은 고정 이름으로 설정할 수 있습니다.
+통합 GUI(`piper-teleop`)의 CAN Setup 패널(Detect/Init All)로 CAN 포트를 감지하고, `ctrl_mode`를 읽어 leader/follower 역할을 자동 판별한 뒤 `can_leader1`, `can_follower1` 같은 고정 이름으로 설정할 수 있습니다.
 
 ## GUI 도구
 
@@ -187,16 +176,6 @@ Teleoperation, 데이터 녹화, 실시간 카메라 뷰, 그리고 데이터셋
 piper-ui
 ```
 
-#### `piper-setup`
-
-![piper-setup](asset/piper-setup.png)
-
-CAN 포트 스캔, 역할(Leader/Follower) 지정, Arm 고유 이름 설정 등 여러 로봇팔의 초기 설정을 돕는 마법사(wizard)입니다.
-
-```bash
-piper-setup
-```
-
 ## 직접 사용 예시
 
 번호형 스크립트가 기본 진입점이지만, 플러그인을 직접 사용할 수도 있습니다.
@@ -237,11 +216,9 @@ python -m lerobot.teleoperate \
     --teleop.discover_packages_path=lerobot_robot_piper
 ```
 
-## 설정 요약
-### 3. Bimanual LeRobot CLI
+## Bimanual LeRobot CLI
 
-Use `piper-setup` first to assign and rename four CAN ports, then run the bimanual
-wrapper types:
+통합 GUI(`piper-teleop`)의 CAN Setup 패널로 네 개의 CAN 포트를 감지/역할 판별하고 이름을 고정한 뒤, bimanual wrapper 타입으로 실행합니다:
 
 ```bash
 lerobot-teleoperate \
@@ -262,8 +239,6 @@ example `left_joint1.pos` and `right_joint1.pos`.
 ---
 
 ## Configuration
-
-### PiperFollowerConfig
 
 ### `PiperFollowerConfig`
 
@@ -307,54 +282,36 @@ Parking pose의 normalized 값은 `0, -100, 100, 0, 0, -13.04, 0`입니다 (`mot
 | [setup_guide.md](setup_guide.md) | 환경 준비와 설정 방법 |
 | [docs/data_collection_protocol.md](docs/data_collection_protocol.md) | 데이터 수집 프로토콜 |
 | [docs/roadmap.md](docs/roadmap.md) | 남은 작업 |
-| [docs/change_history/](docs/change_history/) | 변경 이력 (~2026-07-03, WEGO 원본 대비 초기 호환성 수정) |
-
-### 변경 이력 (날짜별, 2026-07-02 ~ 현재)
-
-`docs/change_history/`는 2026-07-03 이전 초기 호환성 수정까지만 다룹니다. 그 이후 브랜치별로 진행된 작업을 커밋 로그 기준으로 정리합니다.
-
-| 날짜 | 작성자 | 구현 내용 |
-|---|---|---|
-| 2026-06-29 ~ 06-30 | ilseong827 | Bimanual(양팔) Piper 지원, CAN 설정 복구 로직 추가 |
-| 2026-07-02 ~ 07-04 | DGIST-JaeminBaek | UGRP 워크플로 스크립트, RealSense 카메라 설정, 레코드 샘플/문서 정리 |
-| 2026-07-06 | ilseong827 | 카메라 식별 헬퍼(`identify_piper_cameras.sh`) 추가 (`minjun/test` 브랜치) |
-| 2026-07-07 ~ 07-08 | 조성일 | Legacy CLI 정리 + `teleop_ui.py` 확장: Record/Infer/Replay(RViz) 프리셋, Dataset Browser, Recording History, E-STOP 버튼, 카메라 릴리즈 처리 등 초기 GUI 리팩터링 핵심 작업 |
-| 2026-07-10 | SEONGIL | GUI 원클릭 launcher(`0__launch_gui.sh`), safe torque 해제 도구 추가 (`ver0710` 브랜치 — 이때 있던 Replay-Record 프리셋은 07-15에 정리되어 제거됨) |
-| 2026-07-14 | DarrkBllue | 통합 GUI에 Dataset Viewer(데이터셋 뷰어) 탭 통합 (`DONGKYU/gui+viewer` 브랜치) |
-| 2026-07-15 | mjkwak0906-lab | Action offset warmup/safety 인자 추가 (`minjun/test` 브랜치) |
-| 2026-07-15 | SEONGIL | GUI 런처 다듬기, follower torque/parking 제어, 실물 로봇 재생(Replay Real Robot) 프리셋 |
-| 2026-07-17 ~ 07-18 | 조성일 | 녹화 초반 프레임을 parking에서 자연스럽게 시작하도록 자동 보정(`scripts/tools/smooth_start_frames.py`, 위 "이 브랜치에서 추가한 것" 참고), `minjun/test` + `DONGKYU/gui+viewer` 브랜치 병합·통합 |
+| [docs/change.md](docs/change.md) | WEGO 원본 대비 변경 사항 |
 
 ## Project Structure
 
 ```text
 .
-|-- lerobot_robot_piper/      # LeRobot plugin source
-|-- scripts/                  # Numbered experiment scripts
-|   |-- lib/                  # Shared shell helpers
-|   `-- tools/                # Manual diagnostics and checks
-|-- configs/                  # Environment templates
-|-- docs/                     # Project docs
-|-- record_sample/            # Sample LeRobot dataset
-|-- asset/                    # README/UI images
-|-- pyproject.toml
-`-- README.md
-```
-lerobot_robot_piper/
-├── bi_piper_follower.py     # BiPiperFollower (two follower arms)
-├── bi_piper_leader.py       # BiPiperLeader (two leader arms)
-├── config_bi_piper.py       # BiPiperFollowerConfig
-├── config_bi_piper_leader.py # BiPiperLeaderConfig
-├── config_piper.py          # PiperFollowerConfig
-├── config_piper_leader.py   # PiperLeaderConfig
-├── piper_follower.py        # PiperFollower (Robot)
-├── piper_leader.py          # PiperLeader (Teleoperator)
-├── ui.py                    # piper-ui entrypoint
-├── teleop_ui.py             # piper-monitor entrypoint
-├── arm_setup_ui.py          # piper-setup entrypoint (multi-arm wizard)
-└── motors/
-    ├── piper_motors_bus.py  # CAN bus abstraction
-    └── tables.py            # Motor model tables
+├── lerobot_robot_piper/        # LeRobot plugin source
+│   ├── bi_piper_follower.py     # BiPiperFollower (two follower arms)
+│   ├── bi_piper_leader.py       # BiPiperLeader (two leader arms)
+│   ├── config_bi_piper.py       # BiPiperFollowerConfig
+│   ├── config_bi_piper_leader.py # BiPiperLeaderConfig
+│   ├── config_piper.py          # PiperFollowerConfig
+│   ├── config_piper_leader.py   # PiperLeaderConfig
+│   ├── piper_follower.py        # PiperFollower (Robot)
+│   ├── piper_leader.py          # PiperLeader (Teleoperator)
+│   ├── ui.py                    # piper-ui entrypoint
+│   ├── teleop_ui.py             # piper-teleop entrypoint (통합 GUI)
+│   ├── calibration_ui.py        # piper-calibrate entrypoint
+│   └── motors/
+│       ├── piper_motors_bus.py  # CAN bus abstraction
+│       └── tables.py            # Motor model tables
+├── scripts/                    # Numbered experiment scripts
+│   ├── lib/                     # Shared shell helpers
+│   └── tools/                   # Manual diagnostics and checks
+├── configs/                    # Environment templates
+├── docs/                       # Project docs
+├── record_sample/              # Sample LeRobot dataset
+├── asset/                      # README/UI images
+├── pyproject.toml
+└── README.md
 ```
 
 ---

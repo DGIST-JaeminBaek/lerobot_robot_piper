@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # CAN 인터페이스 초기화 → 관절값 프리플라이트 체크 → teleop_ui GUI 실행을 한 번에 수행.
-# 개별 단계만 필요하면 기존 1__init_can.sh / scripts/legacy_tools/piper_session.py를
+# 개별 단계만 필요하면 기존 1__init_can.sh / scripts/tools/piper_session.py를
 # 직접 실행할 것 — 이 스크립트는 그 둘을 그대로 호출하는 얇은 래퍼임.
 set -euo pipefail
 
@@ -13,7 +13,7 @@ load_recording_env
 SKIP_CAN_INIT="$(bool_default "${SKIP_CAN_INIT:-}" false)"
 SKIP_JOINT_CHECK="$(bool_default "${SKIP_JOINT_CHECK:-}" false)"
 ROS_DISTRO_NAME="${ROS_DISTRO_NAME:-humble}"
-CONDA_ENV_NAME="${CONDA_ENV_NAME:-piper-gui-refactor}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-ugrp}"
 
 echo "=== [0/3] conda 가상환경 활성화 (${CONDA_ENV_NAME}) ==="
 if [[ "${CONDA_DEFAULT_ENV:-}" == "${CONDA_ENV_NAME}" ]]; then
@@ -81,7 +81,7 @@ if [[ "${SKIP_JOINT_CHECK}" == "true" ]]; then
 elif ! ip link show "${LEADER_PORT}" >/dev/null 2>&1 || ! ip link show "${FOLLOWER_PORT}" >/dev/null 2>&1; then
   echo "[INFO] ${LEADER_PORT}/${FOLLOWER_PORT} 이름이 아직 없어 건너뜀 — GUI에서 이름 배정 후 CAN Monitor로 직접 확인하세요."
 else
-  if ! python "${REPO_DIR}/scripts/legacy_tools/piper_session.py" --step joint_check --check_leader \
+  if ! python "${REPO_DIR}/scripts/tools/piper_session.py" --step joint_check --check_leader \
       --follower_can_interface="${FOLLOWER_PORT}" --leader_can_interface="${LEADER_PORT}"; then
     echo "[WARN] joint_check 실패 — CAN 배선/전원을 확인하세요." >&2
     read -r -p "그래도 GUI를 실행할까요? (y/N): " reply
