@@ -12,3 +12,4 @@ records/
 vertex-key.json
 .continue/
 last_launch.log
+.DS_Store
