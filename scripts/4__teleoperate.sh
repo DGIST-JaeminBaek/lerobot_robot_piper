@@ -14,12 +14,14 @@ DISPLAY_DATA="$(bool_default "${DISPLAY_DATA:-}" true)"
 
 mapfile -t DISCOVERY_ARGS < <(plugin_discovery_args)
 mapfile -t OFFSET_ARGS < <(robot_action_offset_args)
+mapfile -t SAFETY_ARGS < <(robot_safety_args)
 
 cmd=(
   lerobot-teleoperate
   "--robot.type=piper_follower"
   "--robot.port=${FOLLOWER_PORT}"
   "${OFFSET_ARGS[@]}"
+  "${SAFETY_ARGS[@]}"
   "--teleop.type=piper_leader"
   "--teleop.port=${LEADER_PORT}"
   "--display_data=${DISPLAY_DATA}"

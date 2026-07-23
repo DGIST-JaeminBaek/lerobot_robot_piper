@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# 바탕화면용 실행 스크립트. Nautilus에서 더블클릭 시 "Run in Terminal"을 선택하면
+# 이 스크립트가 scripts/0__launch_gui.sh를 실행함.
+"%REPO_DIR%/scripts/0__launch_gui.sh"
+echo
+read -r -p "[Enter로 창 닫기]"

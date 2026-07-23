@@ -72,11 +72,7 @@ bash scripts/1__init_can.sh
 | Leader arm | `can_leader1` 또는 `can1` |
 | Follower arm | `can_follower1` 또는 `can0` |
 
-`piper-setup` GUI로 포트를 식별하고 이름을 고정할 수 있습니다.
-
-```bash
-piper-setup
-```
+통합 GUI(`piper-teleop`)의 CAN Setup 패널(Detect/Init All)로 포트를 식별하고 이름을 고정할 수 있습니다.
 
 USB 물리 포트 기준으로 이름을 고정하려면 `configs/recording.env`의 `LEADER_USB_BUS`, `FOLLOWER_USB_BUS`를 사용합니다. bus 정보는 다음 명령으로 확인합니다.
 

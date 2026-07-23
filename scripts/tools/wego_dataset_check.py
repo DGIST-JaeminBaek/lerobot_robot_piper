@@ -80,10 +80,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main(args):
     """dataset 점검 실행"""
-    check_dataset(parse_args())
+    check_dataset(args)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Inspect a LeRobot dataset recorded with WeGo Piper plugin.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--dataset-repo-id", required=True, help="owner/dataset_name 또는 local repo id")
+    parser.add_argument("--dataset-root", default=None, help="로컬 dataset root")
+    parser.add_argument("--episode", type=int, default=None, help="점검할 episode index")
+    args = parser.parse_args()
+    main(args)
+

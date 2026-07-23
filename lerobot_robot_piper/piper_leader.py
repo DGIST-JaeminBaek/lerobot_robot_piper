@@ -63,8 +63,11 @@ class PiperLeader(Teleoperator):
     def connect(self, calibrate: bool = True) -> None:
         self.bus.connect()
         logger.info(f"{self} connected.")
-        self.bus.enable_torque()
-        logger.info(f"{self} torque on.")
+        # Piper 공식 dual-arm 문서(agilexrobotics/piper_sdk asserts/double_piper.MD):
+        # "Master arm: only sends control frame messages (0x155/156/157/159/151)."
+        # 즉 leader(master) 팔은 EnableArm 대상이 아님 — 사람이 손으로 움직이는 값을
+        # CAN으로 흘려보내기만 하고, 모터 서보 활성화가 필요 없음(활성화 시도 시 계속
+        # 타임아웃남, 실제 하드웨어에서 확인됨). follower만 enable_torque 필요.
 
     @property
     def is_calibrated(self) -> bool:
