@@ -1,5 +1,7 @@
 # lerobot_robot_piper
 
+[WeGo-Robotics/lerobot_robot_piper](https://github.com/WeGo-Robotics/lerobot_robot_piper)를 원본으로 하는 fork입니다. 원본 대비 변경 사항은 [docs/change.md](docs/change.md)를 참고하세요.
+
 **Agilex Piper** 7-DOF 로봇팔을 위한 LeRobot 플러그인입니다. `piper_follower` 로봇 인터페이스와 `piper_leader` 텔레오퍼레이터 인터페이스를 제공하며, 이 레포에서는 실험 실행을 위해 `configs/recording.env`와 `scripts/` 번호형 스크립트를 함께 제공합니다.
 
 ## 주요 기능
