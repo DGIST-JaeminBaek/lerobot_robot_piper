@@ -324,6 +324,7 @@ Parking pose의 normalized 값은 `0, -100, 100, 0, 0, -13.04, 0`입니다 (`mot
 | 2026-07-15 | mjkwak0906-lab | Action offset warmup/safety 인자 추가 (`minjun/test` 브랜치) |
 | 2026-07-15 | SEONGIL | GUI 런처 다듬기, follower torque/parking 제어, 실물 로봇 재생(Replay Real Robot) 프리셋 |
 | 2026-07-17 ~ 07-18 | 조성일 | 녹화 초반 프레임을 parking에서 자연스럽게 시작하도록 자동 보정(`scripts/tools/smooth_start_frames.py`, 위 "이 브랜치에서 추가한 것" 참고), `minjun/test` + `DONGKYU/gui+viewer` 브랜치 병합·통합 |
+| 2026-07-23 | 조성일 | `teleop_ui.py` GUI 편의성 개선: Dataset 이름/경로 위젯화(Task 변경 시 자동 반영 + 폴더 선택 다이얼로그), FPS/Episode·Reset 시간/Push to Hub/Smooth Start를 GUI에서 직접 편집 + `recording.env`로 저장(`Save as Default`), 녹화 중 "End Episode (Save)"(조기 종료) 버튼과 리더 팔 parking 근접 자동 종료, RViz/robot_state_publisher 자동 실행("Launch RViz", Replay·Infer Preview 시 자동), 바탕화면 아이콘 실행 시 상대경로가 `REPO_ROOT` 대신 `~/Desktop` 기준으로 풀리던 경로 버그 수정. 상세: [docs/lab_handoff.md](docs/lab_handoff.md) 3절, 실물 검증 체크리스트는 5절 1번. |
 
 ## Project Structure
 

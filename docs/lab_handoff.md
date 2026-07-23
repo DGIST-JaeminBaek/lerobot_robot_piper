@@ -81,6 +81,31 @@ URDF와 실제로 일치하는지 여기서 최종 확인 필요.
 | `scripts/tools/piper_infer_preview.py` | 신규 — 정책 추론 결과를 실제 로봇 전송 전 RViz로 미리보기 (open-loop) |
 | `docs/lab_handoff.md` | 이 문서 |
 
+### 2026-07-23 추가분 (`teleop_ui.py`, 하드웨어 없이 로직만 검증됨)
+
+- **Dataset 이름/경로 GUI화** — Task Entry 옆에 Dataset 이름/경로 Entry + "Auto-name from
+  Task" 체크박스 + "Browse..."(GTK 폴더 선택) 추가. 이전엔 `DATASET_REPO_ID`/`DATASET_ROOT`가
+  `recording.env` 고정값이라 Task를 바꿔도 이름이 안 바뀌었음 — 이제 Auto 켜져 있으면 Task
+  변경마다 `local/piper_<task_slug>`로 자동 반영, Browse로 직접 고르면 Auto 자동 해제.
+- **FPS/Episode(s)/Reset(s)/Push to Hub/Smooth Start(프레임 수)를 GUI 위젯으로 노출** —
+  이전엔 `recording.env`에서만 읽혀서 GUI에서 손댈 수 없었음. "Save as Default" 버튼으로
+  지금 값들을 `recording.env`에 되돌려 씀(`save_recording_env()`, 주석/순서 보존).
+- **"End Episode (Save)" 버튼** — 현재 에피소드를 지금까지 녹화분만 저장하고 조기 종료.
+  **"Auto-stop at Parking" 체크박스** — "Capture Parking Pose"로 캡처해둔 리더 팔 기준
+  자세에 근접하면 에피소드당 1회 자동으로 같은 조기종료를 트리거.
+  **둘 다 `pynput`으로 lerobot-record의 keyboard listener에 가상 오른쪽 화살표(exit_early로
+  추정) 입력을 보내는 방식 — 아래 5절 체크리스트 1번으로 실물 검증 전까지는 미검증.**
+- **RViz 자동 실행** — "Launch RViz"/"Stop RViz" 버튼 추가, `Replay (RViz)`/`Infer Preview
+  (RViz)` Launch 시 RViz가 안 떠 있으면 자동으로 먼저 띄움(`piper_session.py`의 step_rviz
+  4단계와 동일 커맨드: `ros2 launch $RVIZ_PACKAGE $RVIZ_LAUNCH_FILE`). `configs/recording.env`의
+  `ROS2_WS`/`ROS_DISTRO`/`RVIZ_PACKAGE`/`RVIZ_LAUNCH_FILE`로 설정 — **`ROS2_WS`는 아직
+  주석 처리만 해뒀음, 랩 PC 실제 colcon workspace 경로로 채워야 함**. `agx_arm_description`
+  패키지 최초 클론+colcon build는 자동화 안 함 — `piper_session.py --step rviz`로 1회
+  수동 실행 필요(4절 체크리스트와 동일 사전조건).
+- **경로 이관 버그 수정** — 바탕화면 아이콘(`0__launch_gui.sh`)으로 GUI를 실행하면 cwd가
+  `REPO_DIR`이 아니라 `~/Desktop`이 되던 문제. `DATASET_ROOT`가 상대경로일 때
+  `~/Desktop/records/...`처럼 엉뚱한 곳에 녹화되던 걸 `main()`의 `os.chdir(REPO_ROOT)`로 고침.
+
 ## 4. `teleop_ui.py` (piper-teleop) 상세
 
 기존 CAN 모니터 UI를 녹화/추론/재생 통합 콘솔로 확장함. 5개 Preset:
@@ -96,40 +121,52 @@ URDF와 실제로 일치하는지 여기서 최종 확인 필요.
 요약 표), E-STOP 버튼(follower+leader CAN 즉시 차단), recording.env 로드 상태줄,
 녹화 진행률 표시("Recording episode N/M", lerobot-record stdout 파싱), 카메라
 release 로직(녹화 종료 시 OpenCV 카메라 index open/close 사이클로 강제 release).
+2026-07-23 추가분은 위 3절 참고.
 
 ## 5. 실험실 PC에서 확인해야 할 체크리스트 (하드웨어 필요해서 여태 못 한 것)
 
 우선순위 순:
 
-1. **CAN 연결 기본 동작** — `python scripts/legacy_tools/piper_session.py --step joint_check
+1. **(신규, 최우선) "End Episode (Save)" 버튼 동작 확인** — Record로 짧게 돌리다가 버튼을
+   눌러서 (a) 그 에피소드가 지금까지 녹화분만으로 저장되는지 (b) 다음 에피소드로 정상
+   넘어가는지 `last_launch.log`/진행률로 확인. 안 되면 `_send_lerobot_hotkey()`
+   (`teleop_ui.py`)만 lerobot 실제 방식(설치된 `lerobot/utils/control_utils.py` 소스로
+   재확인)에 맞게 바꾸면 됨 — 호출부(버튼, parking 자동종료)는 안 건드려도 됨. 이게 되면
+   "Auto-stop at Parking"도 같은 메커니즘이라 그대로 따라옴.
+2. **CAN 연결 기본 동작** — `python scripts/legacy_tools/piper_session.py --step joint_check
    --check_leader` 실행해서 follower/leader 둘 다 `[OK]` 뜨는지. 관절값이 실제 팔 자세와
    맞는지(관절 부호/방향 정상인지) 눈으로 확인.
-2. **`teleop_ui.py` 실제 실행** — `python -m lerobot_robot_piper.teleop_ui`로 창 띄우고,
+3. **`teleop_ui.py` 실제 실행** — `python -m lerobot_robot_piper.teleop_ui`로 창 띄우고,
    Teleoperate 프리셋으로 leader→follower 텔레옵 실제 확인. 이후 Record로 짧게 1 episode
    녹화 테스트.
-3. **카메라 타임아웃 재현 여부** — 원래 문제였던 "녹화마다 카메라 타임아웃" 현상이
+4. **카메라 타임아웃 재현 여부** — 원래 문제였던 "녹화마다 카메라 타임아웃" 현상이
    `CAMERA_RELEASE_WAIT_S`(현재 1.5초, `teleop_ui.py` 상단 상수) 도입 후에도 재현되는지.
    재현되면 이 값을 늘려보고, OpenCV가 아니라 RealSense를 쓴다면
    `_reset_opencv_cameras()`가 RealSense는 건너뛰게 되어 있어서(hardware_reset() 미구현)
    별도 처리 필요할 수 있음.
-4. **RViz 조인트 이름 검증** — `piper_replay_viz.py`/`piper_infer_preview.py`/
-   `piper_session.py --step rviz_preview`가 publish하는 `/joint_states`의 `joint1~6`,
-   `gripper` 이름이 실제 robot_state_publisher가 기대하는 이름과 일치하는지. 안 맞으면
-   RViz에서 로봇이 안 움직임(에러 없이 조용히 무시될 수 있음 — 꼭 시각 확인 필요).
-5. **gripper 물리 단위 재확인** — `piper_replay_viz.py`/`piper_infer_preview.py`/
+5. **RViz 조인트 이름 검증 + `ROS2_WS` 경로 설정** — `configs/recording.env`에 `ROS2_WS`
+   채우고(주석 해제) "Launch RViz"로 실제 뜨는지, `piper_replay_viz.py`/
+   `piper_infer_preview.py`/`piper_session.py --step rviz_preview`가 publish하는
+   `/joint_states`의 `joint1~6`, `gripper` 이름이 실제 robot_state_publisher가 기대하는
+   이름과 일치하는지. 안 맞으면 RViz에서 로봇이 안 움직임(에러 없이 조용히 무시될 수
+   있음 — 꼭 시각 확인 필요).
+6. **gripper 물리 단위 재확인** — `piper_replay_viz.py`/`piper_infer_preview.py`/
    `piper_session.py`의 gripper 변환 로직이 "raw 값을 mm로 해석해 미터로 변환"하는데
    (README 표는 "0-68 deg"라 적혀있지만 URDF가 prismatic이라 mm 해석이 맞다고 판단함,
    docs 참고: 각 파일 상단 주석), 실제 그리퍼 열림 정도와 맞는지 눈으로 대조.
-6. **E-STOP 버튼 실동작** — `teleop_ui.py`의 빨간 E-STOP 버튼이 실제로 follower/leader
+7. **E-STOP 버튼 실동작** — `teleop_ui.py`의 빨간 E-STOP 버튼이 실제로 follower/leader
    CAN을 즉시 내리는지. (macOS엔 `ip` 명령이 없어서 로직만 mock으로 검증했음, 실제
-   `sudo ip link set ... down` 명령이 제대로 도는지 여기서 처음 확인하는 것.)
-7. **`max_delta_per_step`(현재 20, 정규화 단위) 재보정** — 실제 정상 녹화 데이터의
+   `sudo ip link set ... down` 명령이 제대로 도는지 여기서 처음 확인하는 것.) E-STOP은
+   CAN 링크만 내리고 torque를 명시적으로 끄지 않음 — 복구는 CAN Setup의 "Init All" →
+   Teleoperate 재실행(`connect()`가 항상 torque enable) 순서로. Piper 펌웨어 자체에
+   CAN 두절 시 자동 토크 차단 워치독이 있는지는 미확인이라 여기서 같이 확인.
+8. **`max_delta_per_step`(현재 20, 정규화 단위) 재보정** — 실제 정상 녹화 데이터의
    프레임간 delta를 보고 이 임계값이 적절한지 조정. (`piper_session.py` CFG)
-8. **`CFG["venv_activate"]` 등 UGRP 실험실 PC 하드코딩 경로 정리** — `piper_session.py`의
+9. **`CFG["venv_activate"]` 등 UGRP 실험실 PC 하드코딩 경로 정리** — `piper_session.py`의
    `source_prefix()`가 여전히 `/home/ugrp308/Group43/...` 참조함. 실제 이 PC의 venv/ROS2
    경로로 갱신 필요 (지금은 `|| true`로 실패를 삼켜서 동작엔 지장 없지만 노이즈 로그가 남음).
-9. **정책 체크포인트 확보 후 Infer/Infer Preview 검증** — 이 프로젝트는 아직 SmolVLA를
-   학습시키지 않아서 실제 체크포인트로 테스트해본 적이 없음. 학습 끝나면 여기서 처음 검증.
+10. **정책 체크포인트 확보 후 Infer/Infer Preview 검증** — 이 프로젝트는 아직 SmolVLA를
+    학습시키지 않아서 실제 체크포인트로 테스트해본 적이 없음. 학습 끝나면 여기서 처음 검증.
 
 ## 6. 참고 — 이번 세션에서 실측/확인한 것 (재검증 불필요)
 

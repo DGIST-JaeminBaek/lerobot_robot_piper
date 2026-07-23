@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, ttk
 
 import cv2
 import pandas as pd
@@ -35,6 +35,18 @@ from .config_piper import PiperFollowerConfig
 from .piper_follower import PiperFollower
 
 from piper_sdk import C_PiperInterface_V2
+
+# lerobot-record의 keyboard listener(lerobot.utils.control_utils.init_keyboard_listener,
+# pynput 기반 OS 전역 리스너)로 가상 키 입력을 보내 "에피소드 조기 종료(저장)"를 트리거하는 데 씀.
+# lerobot 자체가 이미 pynput에 의존하므로 별도 설치 없이도 있을 가능성이 높음.
+# 정확한 단축키 매핑(오른쪽 화살표 = exit_early)은 설치된 lerobot 버전 소스로 재확인 필요 —
+# 아직 미검증이라 소프트 임포트로 두고, 실물 로봇에서 한 번 눌러서 실제로 그 에피소드가
+# 저장되고 다음으로 넘어가는지 확인할 것 (아래 _send_lerobot_hotkey 주석 참고).
+try:
+    from pynput.keyboard import Controller as _KeyboardController, Key as _Key
+except Exception:
+    _KeyboardController = None
+    _Key = None
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +97,35 @@ def load_recording_env(path: pathlib.Path = RECORDING_ENV_PATH) -> dict[str, str
         if key:
             env[key] = value
     return env
+
+
+def save_recording_env(updates: dict[str, str], path: pathlib.Path = RECORDING_ENV_PATH) -> None:
+    """GUI에서 바꾼 값을 configs/recording.env에 반영. 기존 KEY=VALUE 줄이 있으면
+    그 줄의 값만 바꾸고(주석/순서 보존), 없는 키는 파일 끝에 추가. 공백이 섞인 값
+    (TASK 등)은 기존 파일 컨벤션대로 큰따옴표로 감쌈."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+
+    def fmt(value: str) -> str:
+        return f'"{value}"' if " " in value else value
+
+    remaining = dict(updates)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in remaining:
+            lines[i] = f"{key}={fmt(remaining.pop(key))}"
+
+    if remaining:
+        lines.append("")
+        lines.append("# GUI에서 저장한 값")
+        lines.extend(f"{key}={fmt(value)}" for key, value in remaining.items())
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def dataset_scan_root(recording_env: dict[str, str]) -> pathlib.Path:
@@ -333,6 +374,9 @@ PRESET_BUILDERS: dict[str, str] = {
 }
 PRESET_NAMES = list(PRESET_BUILDERS.keys())
 
+# 이 프리셋으로 Launch를 누르면 RViz가 안 떠 있을 때 자동으로 먼저 띄움.
+RVIZ_REQUIRED_PRESETS = {"Replay (RViz)", "Infer Preview (RViz)"}
+
 
 # ---------------------------------------------------------------- Main UI
 class PiperMonitorUI:
@@ -344,6 +388,16 @@ class PiperMonitorUI:
         self.leader_mon: CANMonitor | None = None
         self.follower_mon: CANMonitor | None = None
         self.monitoring = False
+
+        # Parking 근접 자동 종료(#4)용 상태 — "Capture Parking Pose"로 잡은 기준 자세
+        # (follower_pos와 동일하게 raw 단위, CANMonitor.read_joints() 그대로) 및
+        # 에피소드당 한 번만 트리거하기 위한 guard.
+        self._parking_reference: dict[str, float] | None = None
+        self._parking_triggered_episode = False
+
+        # GUI가 직접 띄운 RViz + robot_state_publisher (Replay (RViz)/Infer Preview (RViz)용).
+        # 우리가 띄운 것만 추적/종료함 — 사용자가 별도 터미널에서 직접 띄운 RViz는 건드리지 않음.
+        self._rviz_proc: subprocess.Popen | None = None
 
         # configs/recording.env 값 (없거나 읽기 실패해도 빈 dict — 각 필드는 fallback 기본값 사용)
         self.recording_env: dict[str, str] = load_recording_env()
@@ -421,52 +475,153 @@ class PiperMonitorUI:
         self.num_episodes_var = tk.StringVar(value=self.recording_env.get("NUM_EPISODES") or "5")
         ttk.Entry(task_row, textvariable=self.num_episodes_var, width=6).pack(side="left", padx=2)
 
+        # Dataset name/root — Record의 --dataset.repo_id/--dataset.root로 반영.
+        # "Auto"가 켜져 있으면 Task가 바뀔 때마다 이름/경로를 task 기준으로 다시 채움
+        # (그동안은 recording.env의 고정값만 쓰여서 task를 바꿔도 안 바뀌는 문제가 있었음).
+        # Browse로 직접 폴더를 고르면 Auto가 자동으로 꺼져서 그 선택을 덮어쓰지 않음.
+        dataset_row = ttk.Frame(script_frame)
+        dataset_row.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        ttk.Label(dataset_row, text="Dataset:").pack(side="left", padx=4)
+        self.dataset_name_var = tk.StringVar(value=self.recording_env.get("DATASET_REPO_ID") or "local/piper_write_light")
+        ttk.Entry(dataset_row, textvariable=self.dataset_name_var, width=26).pack(side="left", padx=2)
+
+        self.dataset_root_var = tk.StringVar(
+            value=self.recording_env.get("DATASET_ROOT") or f"records/{self.dataset_name_var.get()}"
+        )
+        ttk.Entry(dataset_row, textvariable=self.dataset_root_var, width=30).pack(side="left", padx=(8, 2))
+        ttk.Button(dataset_row, text="Browse...", command=self._on_browse_dataset_root, width=9).pack(side="left", padx=2)
+
+        self.dataset_auto_name_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            dataset_row, text="Auto-name from Task", variable=self.dataset_auto_name_var
+        ).pack(side="left", padx=(8, 2))
+
+        # Recording timing/fps — Record의 --dataset.fps/episode_time_s/reset_time_s/push_to_hub.
+        # 기존엔 recording.env에서만 읽혀서 GUI에서 손댈 수 없었음.
+        timing_row = ttk.Frame(script_frame)
+        timing_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        ttk.Label(timing_row, text="FPS:").pack(side="left", padx=4)
+        self.fps_var = tk.StringVar(value=self.recording_env.get("FPS") or "30")
+        ttk.Entry(timing_row, textvariable=self.fps_var, width=5).pack(side="left", padx=2)
+
+        ttk.Label(timing_row, text="Episode(s):").pack(side="left", padx=(12, 4))
+        self.episode_time_var = tk.StringVar(value=self.recording_env.get("EPISODE_TIME_S") or "60")
+        ttk.Entry(timing_row, textvariable=self.episode_time_var, width=6).pack(side="left", padx=2)
+
+        ttk.Label(timing_row, text="Reset(s):").pack(side="left", padx=(12, 4))
+        self.reset_time_var = tk.StringVar(value=self.recording_env.get("RESET_TIME_S") or "60")
+        ttk.Entry(timing_row, textvariable=self.reset_time_var, width=6).pack(side="left", padx=2)
+
+        self.push_to_hub_var = tk.BooleanVar(value=(self.recording_env.get("PUSH_TO_HUB") or "false").lower() == "true")
+        ttk.Checkbutton(timing_row, text="Push to Hub", variable=self.push_to_hub_var).pack(side="left", padx=(12, 2))
+
+        # 녹화 초반 프레임을 parking 시작으로 자동 보정하는 smooth start on/off
+        # (로직 자체는 이미 있었음 — _smooth_config()/_run_smooth_start() 참고, GUI 스위치만 없었음).
+        smooth_enabled, smooth_frames = self._initial_smooth_config()
+        self.smooth_enabled_var = tk.BooleanVar(value=smooth_enabled)
+        ttk.Checkbutton(timing_row, text="Smooth Start", variable=self.smooth_enabled_var).pack(side="left", padx=(12, 2))
+        self.smooth_frames_var = tk.StringVar(value=str(smooth_frames or SMOOTH_START_FRAMES_DEFAULT))
+        ttk.Entry(timing_row, textvariable=self.smooth_frames_var, width=5).pack(side="left", padx=2)
+        ttk.Label(timing_row, text="frames").pack(side="left", padx=(0, 4))
+
+        ttk.Button(timing_row, text="Save as Default", command=self._on_save_settings).pack(side="right", padx=4)
+
+        # 녹화 중 조기 종료(#3)/parking 근접 자동 종료(#4) 컨트롤.
+        # 둘 다 lerobot-record의 keyboard listener에 가상 오른쪽-화살표 입력(exit_early)을
+        # 보내는 방식이라 미검증 부분(_send_lerobot_hotkey 주석 참고) — 실물에서 먼저
+        # "End Episode (Save)" 버튼 하나로 정말 그 에피소드가 저장되고 다음으로 넘어가는지
+        # 확인한 뒤에 Auto-stop을 켜서 쓸 것.
+        record_ctrl_row = ttk.Frame(script_frame)
+        record_ctrl_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        self.parking_auto_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            record_ctrl_row, text="Auto-stop at Parking", variable=self.parking_auto_var
+        ).pack(side="left", padx=(4, 2))
+
+        ttk.Label(record_ctrl_row, text="threshold(raw):").pack(side="left", padx=(8, 2))
+        self.parking_threshold_var = tk.StringVar(value="3000")
+        ttk.Entry(record_ctrl_row, textvariable=self.parking_threshold_var, width=7).pack(side="left", padx=2)
+
+        ttk.Button(
+            record_ctrl_row, text="Capture Parking Pose", command=self._on_capture_parking
+        ).pack(side="left", padx=(8, 2))
+        self.parking_captured_var = tk.StringVar(value="(not captured)")
+        ttk.Label(record_ctrl_row, textvariable=self.parking_captured_var, foreground="#888888").pack(
+            side="left", padx=(4, 2)
+        )
+
         # Policy Path — Infer 프리셋의 --policy.path로 반영 (체크포인트 로컬 경로 또는 HF repo id).
         # Teleoperate/Record에서는 안 쓰이지만 항상 보이게 둠 (프리셋 전환 시 값 유지).
         policy_row = ttk.Frame(script_frame)
-        policy_row.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        policy_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 4))
 
         ttk.Label(policy_row, text="Policy Path:").pack(side="left", padx=4)
         self.policy_path_var = tk.StringVar(value=self.recording_env.get("POLICY_PRETRAINED_PATH") or "")
         ttk.Entry(policy_row, textvariable=self.policy_path_var, width=40).pack(side="left", padx=2)
 
         # Preset + custom command
-        ttk.Label(script_frame, text="Preset:").grid(row=3, column=0, padx=4, sticky="e")
+        ttk.Label(script_frame, text="Preset:").grid(row=6, column=0, padx=4, sticky="e")
         self.preset_var = tk.StringVar(value="Teleoperate")
         preset_combo = ttk.Combobox(
             script_frame, textvariable=self.preset_var,
             values=PRESET_NAMES, state="readonly", width=14,
         )
-        preset_combo.grid(row=3, column=1, padx=4, sticky="w")
+        preset_combo.grid(row=6, column=1, padx=4, sticky="w")
         preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
 
         btn_row2 = ttk.Frame(script_frame)
-        btn_row2.grid(row=3, column=2, sticky="e")
+        btn_row2.grid(row=6, column=2, sticky="e")
         self.btn_launch = ttk.Button(btn_row2, text="Launch", command=self._on_launch)
         self.btn_launch.pack(side="left", padx=4)
+        self.btn_end_episode = ttk.Button(
+            btn_row2, text="End Episode (Save)", command=self._on_end_episode_now, state="disabled"
+        )
+        self.btn_end_episode.pack(side="left", padx=4)
         self.btn_kill = ttk.Button(btn_row2, text="Stop", command=self._on_kill, state="disabled")
         self.btn_kill.pack(side="left", padx=4)
 
-        ttk.Label(script_frame, text="Command:").grid(row=4, column=0, padx=4, sticky="e")
+        ttk.Label(script_frame, text="Command:").grid(row=7, column=0, padx=4, sticky="e")
         self.cmd_var = tk.StringVar()
         self._on_preset_selected(None)  # fill initial command
         cmd_entry = ttk.Entry(script_frame, textvariable=self.cmd_var)
-        cmd_entry.grid(row=4, column=1, columnspan=2, padx=4, sticky="ew", pady=(4, 0))
+        cmd_entry.grid(row=7, column=1, columnspan=2, padx=4, sticky="ew", pady=(4, 0))
 
         # 실행 중인 lerobot-record의 stdout에서 "Recording episode N" 로그를 파싱해서
         # 진행 상황을 표시 (Rerun 창을 안 보고 있어도 상태 파악 가능). 녹화 중이 아니면 빈 문자열.
         self.progress_var = tk.StringVar(value="")
         ttk.Label(script_frame, textvariable=self.progress_var, foreground="#2a9d5c").grid(
-            row=5, column=0, columnspan=3, padx=4, sticky="w", pady=(2, 0)
+            row=8, column=0, columnspan=3, padx=4, sticky="w", pady=(2, 0)
         )
+
+        # RViz + robot_state_publisher — Replay (RViz)/Infer Preview (RViz) Launch 시
+        # 자동으로 띄우게 함 (_on_launch 참고). agx_arm_description ROS2 패키지가 이미
+        # colcon build 되어 있어야 함(최초 1회는 `python scripts/legacy_tools/piper_session.py
+        # --step rviz`로 클론+빌드 — GUI에서 매번 자동으로는 안 함, colcon build가 느리고
+        # 실패 시 원인 파악이 어려워서 최초 셋업은 수동으로 남겨둠). ROS2_WS/ROS_DISTRO는
+        # recording.env에서 읽음.
+        rviz_row = ttk.Frame(script_frame)
+        rviz_row.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        ttk.Label(rviz_row, text="RViz:").pack(side="left", padx=4)
+        ttk.Button(rviz_row, text="Launch RViz", command=self._on_rviz_launch).pack(side="left", padx=2)
+        ttk.Button(rviz_row, text="Stop RViz", command=self._on_rviz_stop).pack(side="left", padx=2)
+        self.rviz_status_var = tk.StringVar(value="RViz not started")
+        ttk.Label(rviz_row, textvariable=self.rviz_status_var, foreground="#888888").pack(side="left", padx=8)
 
         # 입력값이 바뀔 때마다 Command를 자동으로 다시 조립 — Preset을 재선택 안 해도
         # 항상 최신 값 기준 커맨드가 보이게 해서, 옛날 커맨드로 Launch 누르는 실수를 막음.
         for var in (
             self.leader_port_var, self.follower_port_var,
             self.task_var, self.num_episodes_var, self.policy_path_var,
+            self.dataset_name_var, self.dataset_root_var,
+            self.fps_var, self.episode_time_var, self.reset_time_var, self.push_to_hub_var,
         ):
             var.trace_add("write", self._refresh_command)
+
+        # Task가 바뀌면(Auto-name 켜진 경우) dataset 이름/경로를 task 기준으로 다시 채움.
+        self.task_var.trace_add("write", self._on_task_changed_for_dataset)
 
         # -- Dataset Browser (records/ 밑의 기존 dataset/episode 탐색 — Replay 프리셋이 사용)
         self._build_dataset_browser_frame()
@@ -890,6 +1045,60 @@ class PiperMonitorUI:
         if builder_name:
             self.cmd_var.set(getattr(self, builder_name)())
 
+    # ---------------------------------------------------------- Dataset naming
+    @staticmethod
+    def _slugify_task(task: str) -> str:
+        slug = re.sub(r"[^a-zA-Z0-9]+", "_", task.strip().lower()).strip("_")
+        return slug or "task"
+
+    def _on_task_changed_for_dataset(self, *_trace_args):
+        """Task Entry가 바뀔 때, Auto-name이 켜져 있으면 dataset 이름/경로를
+        task 기준으로 다시 채움 (꺼져 있으면 Browse 등으로 고른 값을 그대로 둠)."""
+        if not hasattr(self, "dataset_auto_name_var") or not self.dataset_auto_name_var.get():
+            return
+        repo_id = f"local/piper_{self._slugify_task(self.task_var.get())}"
+        self.dataset_name_var.set(repo_id)
+        self.dataset_root_var.set(f"records/{repo_id}")
+
+    def _on_browse_dataset_root(self):
+        """우분투 GTK 파일 다이얼로그로 dataset 저장 폴더를 직접 선택.
+        직접 골랐으면 Auto-name을 꺼서 이후 Task 변경에 덮어써지지 않게 함."""
+        initial = self.dataset_root_var.get().strip() or str(REPO_ROOT / "records")
+        initial_path = pathlib.Path(initial)
+        if not initial_path.is_absolute():
+            initial_path = REPO_ROOT / initial_path
+        chosen = filedialog.askdirectory(
+            initialdir=str(initial_path if initial_path.exists() else REPO_ROOT),
+            title="Select dataset root folder",
+        )
+        if chosen:
+            self.dataset_root_var.set(chosen)
+            self.dataset_auto_name_var.set(False)
+
+    def _on_save_settings(self):
+        """지금 GUI에 입력된 값들을 configs/recording.env의 기본값으로 저장."""
+        updates = {
+            "LEADER_PORT": self.leader_port_var.get().strip(),
+            "FOLLOWER_PORT": self.follower_port_var.get().strip(),
+            "TASK": self.task_var.get().strip(),
+            "NUM_EPISODES": self.num_episodes_var.get().strip(),
+            "DATASET_REPO_ID": self.dataset_name_var.get().strip(),
+            "DATASET_ROOT": self.dataset_root_var.get().strip(),
+            "FPS": self.fps_var.get().strip(),
+            "EPISODE_TIME_S": self.episode_time_var.get().strip(),
+            "RESET_TIME_S": self.reset_time_var.get().strip(),
+            "PUSH_TO_HUB": "true" if self.push_to_hub_var.get() else "false",
+            "SMOOTH_START_FRAMES": self.smooth_frames_var.get().strip() if self.smooth_enabled_var.get() else "0",
+        }
+        try:
+            save_recording_env(updates)
+        except OSError as e:
+            self.bottom_var.set(f"설정 저장 실패: {e}")
+            return
+        self.recording_env = load_recording_env()
+        self.env_status_var.set(self._describe_recording_env())
+        self.bottom_var.set(f"설정 저장 완료: {RECORDING_ENV_PATH}")
+
     def _build_teleoperate_command(self) -> str:
         leader_port = self.leader_port_var.get().strip()
         follower_port = self.follower_port_var.get().strip()
@@ -921,7 +1130,7 @@ class PiperMonitorUI:
             f"--robot.wrist_cam={env.get('WRIST_CAM') or '1'}",
             f"--robot.cam_width={env.get('CAM_WIDTH') or '640'}",
             f"--robot.cam_height={env.get('CAM_HEIGHT') or '480'}",
-            f"--robot.camera_fps={env.get('FPS') or '30'}",
+            f"--robot.camera_fps={self.fps_var.get().strip() or '30'}",
             f"--robot.realsense_use_depth={realsense_use_depth}",
             f"--robot.realsense_warmup_s={env.get('REALSENSE_WARMUP_S') or '5.0'}",
             f"--robot.camera_connect_warmup={env.get('CAMERA_CONNECT_WARMUP') or 'false'}",
@@ -958,15 +1167,18 @@ class PiperMonitorUI:
         ]
 
     def _dataset_args(self, fps: str) -> list[str]:
-        """5__record.sh의 dataset.* 인자와 동일한 fallback. Task/Num Episodes만 UI 입력값 사용.
+        """5__record.sh의 dataset.* 인자와 동일한 fallback이되, Dataset 이름/경로/시간
+        설정은 GUI 입력값(dataset_name_var 등)을 우선 사용 — task를 바꿔도 안 바뀌던
+        문제 및 fps/episode_time_s/reset_time_s/push_to_hub를 recording.env에서만
+        읽던 문제 해결.
         scripts/5__record.sh와 동일하게, resume이 아니면 매번 월일-시분초 타임스탬프를
         붙여서 이전 녹화 폴더를 덮어쓰지 않게 함."""
         env = self.recording_env
         task = self.task_var.get().strip()
         num_episodes = self.num_episodes_var.get().strip()
         resume = env.get("RESUME") or "false"
-        dataset_repo_id_base = env.get("DATASET_REPO_ID") or "local/piper_write_light"
-        dataset_root_base = env.get("DATASET_ROOT") or f"records/{dataset_repo_id_base}"
+        dataset_repo_id_base = self.dataset_name_var.get().strip() or "local/piper_write_light"
+        dataset_root_base = self.dataset_root_var.get().strip() or f"records/{dataset_repo_id_base}"
         if resume == "true":
             dataset_repo_id = dataset_repo_id_base
             dataset_root = dataset_root_base
@@ -979,10 +1191,10 @@ class PiperMonitorUI:
             f"--dataset.root={dataset_root}",
             f"--dataset.fps={fps}",
             f"--dataset.num_episodes={num_episodes}",
-            f"--dataset.episode_time_s={env.get('EPISODE_TIME_S') or '60'}",
-            f"--dataset.reset_time_s={env.get('RESET_TIME_S') or '60'}",
+            f"--dataset.episode_time_s={self.episode_time_var.get().strip() or '60'}",
+            f"--dataset.reset_time_s={self.reset_time_var.get().strip() or '60'}",
             f"--dataset.single_task={shlex.quote(task)}",
-            f"--dataset.push_to_hub={env.get('PUSH_TO_HUB') or 'false'}",
+            f"--dataset.push_to_hub={'true' if self.push_to_hub_var.get() else 'false'}",
             f"--resume={resume}",
         ]
 
@@ -991,7 +1203,7 @@ class PiperMonitorUI:
         env = self.recording_env
         follower_port = self.follower_port_var.get().strip()
         leader_port = self.leader_port_var.get().strip()
-        fps = env.get("FPS") or "30"
+        fps = self.fps_var.get().strip() or "30"
 
         args = [
             "lerobot-record",
@@ -1024,7 +1236,7 @@ class PiperMonitorUI:
         follower_port = self.follower_port_var.get().strip()
         leader_port = self.leader_port_var.get().strip()
         policy_path = self.policy_path_var.get().strip()
-        fps = env.get("FPS") or "30"
+        fps = self.fps_var.get().strip() or "30"
 
         args = [
             "lerobot-record",
@@ -1149,6 +1361,12 @@ class PiperMonitorUI:
         # Record 커맨드면 dataset root를 잡아둠(종료 후 초반 프레임 보정에 사용)
         self._record_dataset_root = self._record_dataset_root_from_cmd(cmd)
 
+        # RViz가 필요한 프리셋인데 아직 안 떠 있으면 먼저 띄움 (별도 터미널 없이도 되게).
+        # RViz가 완전히 뜰 때까지 기다리진 않음 — 늦게 떠도 재생 스크립트는 계속
+        # publish하고 있으므로 RViz 쪽에서 뒤늦게 구독을 시작해도 따라잡음.
+        if self.preset_var.get() in RVIZ_REQUIRED_PRESETS and not self._rviz_running():
+            self._on_rviz_launch()
+
         self.bottom_var.set(f"Launching: {cmd}")
         self.root.update()
 
@@ -1164,6 +1382,9 @@ class PiperMonitorUI:
 
         self.btn_launch.config(state="disabled")
         self.btn_kill.config(state="normal")
+        # 조기 종료(exit_early 핫키)는 lerobot-record가 떠 있을 때만 의미가 있음 (Record/Infer 프리셋).
+        self.btn_end_episode.config(state="normal" if "lerobot-record" in cmd else "disabled")
+        self._parking_triggered_episode = False
         self.bottom_var.set(f"Running (PID {self.script_proc.pid}): {cmd}")
         self.progress_var.set("")
 
@@ -1199,6 +1420,7 @@ class PiperMonitorUI:
                     current = int(m.group(1)) + 1  # 0-indexed 누적 카운트 -> 1부터 보여줌
                     text = f"Recording episode {current}/{target}"
                     self.root.after(0, self.progress_var.set, text)
+                    self._parking_triggered_episode = False  # 새 에피소드 시작 -> auto-stop 다시 무장
 
     def _proc_finished(self, rc: int):
         # 프로세스는 완전히 죽었지만, 카메라 디바이스가 아직 release 안 됐을 수 있음
@@ -1207,6 +1429,7 @@ class PiperMonitorUI:
         # release 사이클을 먼저 돌린 뒤 켬. Stop 버튼은 이미 끌 게 없으니 비활성화.
         self.btn_launch.config(state="disabled")
         self.btn_kill.config(state="disabled")
+        self.btn_end_episode.config(state="disabled")
         self.bottom_var.set(f"Script exited (code {rc}) — releasing cameras...")
         threading.Thread(target=self._release_cameras_then_ready, args=(rc,), daemon=True).start()
 
@@ -1311,9 +1534,10 @@ class PiperMonitorUI:
                 return tok.split("=", 1)[1]
         return None
 
-    def _smooth_config(self) -> tuple[bool, int]:
-        """recording.env의 SMOOTH_START_FRAMES로 (활성화 여부, 프레임 수) 결정.
-        미설정이면 기본 활성화 + SMOOTH_START_FRAMES_DEFAULT. 0/false/off면 비활성화."""
+    def _initial_smooth_config(self) -> tuple[bool, int]:
+        """recording.env의 SMOOTH_START_FRAMES로 (활성화 여부, 프레임 수) 결정 — GUI의
+        Smooth Start 체크박스/프레임 수 Entry 초기값을 채우는 데만 씀. 미설정이면
+        기본 활성화 + SMOOTH_START_FRAMES_DEFAULT. 0/false/off면 비활성화."""
         raw = (self.recording_env.get("SMOOTH_START_FRAMES") or "").strip().lower()
         if raw in ("0", "false", "off", "no"):
             return False, 0
@@ -1321,6 +1545,17 @@ class PiperMonitorUI:
             return True, SMOOTH_START_FRAMES_DEFAULT
         try:
             n = int(raw)
+        except ValueError:
+            return True, SMOOTH_START_FRAMES_DEFAULT
+        return (n > 0), max(n, 0)
+
+    def _smooth_config(self) -> tuple[bool, int]:
+        """녹화 종료 후 실제로 쓰이는 (활성화 여부, 프레임 수) — Smooth Start
+        체크박스/프레임 수 Entry의 현재 값 기준."""
+        if not self.smooth_enabled_var.get():
+            return False, 0
+        try:
+            n = int(self.smooth_frames_var.get().strip())
         except ValueError:
             return True, SMOOTH_START_FRAMES_DEFAULT
         return (n > 0), max(n, 0)
@@ -1354,6 +1589,139 @@ class PiperMonitorUI:
             except ProcessLookupError:
                 pass
             self.bottom_var.set("Sending SIGINT to script...")
+
+    # ---------------------------------------------------------- 조기 종료 / Parking 자동 종료
+    def _send_lerobot_hotkey(self, key_name: str) -> bool:
+        """lerobot-record가 여는 keyboard listener(lerobot.utils.control_utils.
+        init_keyboard_listener, pynput 기반 OS 전역 리스너로 추정)에 가상 키 입력을 합성해서
+        보냄. 물리 키보드로 오른쪽 화살표를 누르는 것과 동일한 효과를 노림 —
+        "현재 에피소드를 지금까지 녹화분만 저장하고 조기 종료(exit_early)".
+
+        미검증 지점(실물 로봇에서 한 번 확인 필요):
+        1) 설치된 lerobot 버전에서 실제로 exit_early 단축키가 오른쪽 화살표가 맞는지
+           (lerobot/utils/control_utils.py 소스로 재확인 — 버전마다 바뀔 수 있음)
+        2) pynput 전역 리스너가 GUI 창에 포커스가 없어도 이 합성 입력을 받는지
+           (X11 세션 기준 가정 — Wayland면 안 될 수 있음)
+        둘 다 맞으면 그대로 쓰면 되고, 아니면 lerobot_record.py의 실제 이벤트 처리
+        방식(예: stdin 기반이면 subprocess stdin에 문자 전송)에 맞춰 이 메서드만
+        바꾸면 됨 — 호출부(End Episode 버튼, parking 자동 종료)는 안 건드려도 됨."""
+        if _KeyboardController is None:
+            self.bottom_var.set("pynput 미설치 — 'pip install pynput' 필요 (조기종료 버튼 사용 불가)")
+            return False
+        try:
+            controller = _KeyboardController()
+            key = {"right": _Key.right, "esc": _Key.esc}[key_name]
+            controller.press(key)
+            controller.release(key)
+            return True
+        except Exception as e:
+            logger.exception("Failed to send lerobot hotkey")
+            self.bottom_var.set(f"키 입력 전송 실패: {e}")
+            return False
+
+    def _on_end_episode_now(self):
+        """"여기까지만 저장" 버튼 — 현재 에피소드를 지금까지 녹화된 만큼만 저장하고
+        조기 종료. 실물 검증 전까지는 결과를 GUI에서 눈으로 확인(진행률/로그)할 것."""
+        if not self.script_proc:
+            return
+        if self._send_lerobot_hotkey("right"):
+            self.bottom_var.set("현재 에피소드 조기 종료 요청 전송 — 로그/진행률로 실제 저장 확인하세요.")
+
+    def _on_capture_parking(self):
+        """CAN Monitor가 켜져 있고 '리더' 팔을 손으로 parking 자세 근처(follower의
+        Go Parking 자세와 맞춰서)로 옮겨둔 상태에서 눌러서, 지금 읽히는 leader의
+        raw joint 값을 '기준 parking 자세'로 저장. leader는 사람이 손으로 움직이는
+        팔이라 follower처럼 자동으로 parking에 보낼 수 없음 — 그래서 리더를 손으로
+        follower Go Parking과 비슷한 자세로 맞춘 뒤 이 버튼으로 캡처.
+        INITIALIZE_POSITION(motors/tables.py)은 정규화(-100~100) 단위라 CANMonitor의
+        raw 값과 단위가 달라서 직접 못 씀 — 그래서 raw 기준값은 하드코딩하지 않고
+        실물에서 이렇게 직접 캡처함."""
+        if not self.leader_pos:
+            self.bottom_var.set("Capture 실패 — CAN Monitor를 먼저 Start하고 리더 팔을 parking 자세로 맞추세요")
+            return
+        self._parking_reference = dict(self.leader_pos)
+        self.parking_captured_var.set(
+            "captured: " + ", ".join(f"{k}={v:.0f}" for k, v in self._parking_reference.items())
+        )
+        self.bottom_var.set("Parking 기준 자세(리더) 캡처 완료")
+
+    def _check_parking_auto_stop(self):
+        """_update_ui(메인 스레드, ~20Hz)에서 매 tick 호출. Record 실행 중 +
+        Auto-stop 켜짐 + 기준 자세 캡처됨 + 이번 에피소드에서 아직 안 쐈으면,
+        현재 leader_pos(리더 팔)가 기준 자세에 threshold 이내로 들어온 순간
+        조기 종료 핫키를 쏨."""
+        if not (self.script_proc and self.parking_auto_var.get() and self._parking_reference):
+            return
+        if self._parking_triggered_episode or not self.leader_pos:
+            return
+        try:
+            threshold = float(self.parking_threshold_var.get().strip())
+        except ValueError:
+            threshold = 3000.0
+        diffs = [
+            abs(self.leader_pos[j] - v)
+            for j, v in self._parking_reference.items()
+            if j in self.leader_pos
+        ]
+        if diffs and max(diffs) <= threshold:
+            self._parking_triggered_episode = True
+            if self._send_lerobot_hotkey("right"):
+                self.bottom_var.set("리더 팔이 parking 근접 — 에피소드 자동 종료 요청 전송")
+
+    # ---------------------------------------------------------- RViz
+    def _rviz_running(self) -> bool:
+        return self._rviz_proc is not None and self._rviz_proc.poll() is None
+
+    def _build_rviz_cmd(self) -> str | None:
+        """piper_session.py step_rviz()의 4번(RViz 실행) 단계와 동일한 커맨드 조립.
+        클론/colcon build(1~3번 단계)는 여기서 안 함 — 최초 1회는 수동으로
+        `python scripts/legacy_tools/piper_session.py --step rviz`를 실행해서
+        agx_arm_description 패키지를 빌드해둬야 함. ROS2_WS가 recording.env에
+        없으면 자동 실행을 포기하고 None 반환."""
+        env = self.recording_env
+        ros2_ws = env.get("ROS2_WS", "").strip()
+        if not ros2_ws:
+            self.bottom_var.set(
+                "RViz 자동 실행 불가 — configs/recording.env에 ROS2_WS=<colcon workspace 경로> 추가 필요"
+            )
+            return None
+        distro = env.get("ROS_DISTRO") or "humble"
+        package = env.get("RVIZ_PACKAGE") or "agx_arm_description"
+        launch_file = env.get("RVIZ_LAUNCH_FILE") or "display_piper.launch.py"
+        return (
+            f"source /opt/ros/{distro}/setup.bash && "
+            f"source {ros2_ws}/install/setup.bash && "
+            f"ros2 launch {package} {launch_file}"
+        )
+
+    def _on_rviz_launch(self):
+        if self._rviz_running():
+            self.rviz_status_var.set("RViz already running")
+            return
+        cmd = self._build_rviz_cmd()
+        if cmd is None:
+            return
+        self.rviz_status_var.set("Launching RViz...")
+        try:
+            self._rviz_proc = subprocess.Popen(
+                cmd, shell=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                **(dict(creationflags=subprocess.CREATE_NEW_PROCESS_GROUP) if sys.platform == "win32" else dict(preexec_fn=os.setsid)),
+            )
+        except Exception as e:
+            self.rviz_status_var.set(f"RViz launch failed: {e}")
+            return
+        self.rviz_status_var.set(f"RViz running (PID {self._rviz_proc.pid})")
+
+    def _on_rviz_stop(self):
+        if not self._rviz_running():
+            self.rviz_status_var.set("RViz not started")
+            return
+        try:
+            os.killpg(os.getpgid(self._rviz_proc.pid), signal.SIGINT)
+        except ProcessLookupError:
+            pass
+        self.rviz_status_var.set("RViz stopping...")
 
     # ---------------------------------------------------------- CAN Monitor
     def _on_mon_start(self):
@@ -1460,6 +1828,8 @@ class PiperMonitorUI:
         if self.monitoring and self.mon_hz > 0:
             self.mon_hz_var.set(f"{self.mon_hz:.0f} Hz")
 
+        self._check_parking_auto_stop()
+
         # Check if script is still running
         if self.script_proc and self.script_proc.poll() is not None:
             self._proc_finished(self.script_proc.returncode)
@@ -1476,6 +1846,8 @@ class PiperMonitorUI:
         if self.script_proc:
             self._on_kill()
             time.sleep(0.5)
+        if self._rviz_running():
+            self._on_rviz_stop()
         self.root.destroy()
 
     def run(self):
@@ -1491,6 +1863,12 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
+
+    # 데스크톱 아이콘(피퍼실행.sh)으로 실행하면 cwd가 REPO_ROOT가 아닐 수 있음
+    # (스크립트가 REPO_DIR을 절대경로로 호출만 하고 cd는 안 함) — DATASET_ROOT 등
+    # recording.env의 상대경로 값들이 엉뚱한 곳(예: ~/Desktop/records/...)에
+    # 만들어지는 걸 막기 위해 여기서 명시적으로 REPO_ROOT로 고정.
+    os.chdir(REPO_ROOT)
 
     app = PiperMonitorUI()
     app.leader_port_var.set(args.leader_port)
