@@ -21,6 +21,17 @@ RESUME="$(bool_default "${RESUME:-}" false)"
 
 DATASET_REPO_ID_BASE="${DATASET_REPO_ID:-local/piper_write_light}"
 DATASET_ROOT_BASE="${DATASET_ROOT:-${REPO_DIR}/records/${DATASET_REPO_ID_BASE}}"
+
+# TASK를 repo_id/폴더명의 프로젝트명 세그먼트로 반영 — 네임스페이스(local/ 등
+# 상위 경로)는 유지. TASK가 비어있지 않은 한 항상 적용되므로(기본값도 있음),
+# recording.env의 DATASET_REPO_ID/DATASET_ROOT는 사실상 "네임스페이스"만
+# 정하는 값이 됨.
+TASK_SLUG="$(task_slug "${TASK}")"
+if [[ -n "${TASK_SLUG}" ]]; then
+  DATASET_REPO_ID_BASE="$(replace_last_path_segment "${DATASET_REPO_ID_BASE}" "${TASK_SLUG}")"
+  DATASET_ROOT_BASE="$(replace_last_path_segment "${DATASET_ROOT_BASE}" "${TASK_SLUG}")"
+fi
+
 if [[ "${RESUME}" == "true" ]]; then
   # 이어서 녹화하는 경우엔 기존 폴더를 그대로 찾아야 하므로 타임스탬프를 붙이지 않음
   DATASET_REPO_ID="${DATASET_REPO_ID_BASE}"
