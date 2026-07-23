@@ -113,3 +113,23 @@ plugin_discovery_args() {
     "--robot.discover_packages_path=lerobot_robot_piper" \
     "--teleop.discover_packages_path=lerobot_robot_piper"
 }
+
+task_slug() {
+  # TASK 문자열을 폴더/repo_id 세그먼트로 쓸 수 있게 슬러그화.
+  # 소문자로 바꾸고 영숫자 외 문자는 전부 "_"로(연속 문자는 하나로 뭉침),
+  # 앞뒤 "_"는 제거. tr의 [:alnum:]은 한글 등 비-ASCII를 문자로 인식 못 해서
+  # 통째로 사라짐(빈 문자열이 됨) — 이 프로젝트는 영어 TASK 문자열만 쓰므로
+  # 문제없음. teleop_ui.py의 _task_slug()와 동일한 규칙을 유지할 것.
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '_' | sed 's/^_*//;s/_*$//'
+}
+
+replace_last_path_segment() {
+  # "$1"의 마지막 "/" 다음 세그먼트를 "$2"로 교체. "/"가 없으면 통째로 "$2"로 교체.
+  # 예: local/piper_write_light + pick_up_the_pen -> local/pick_up_the_pen
+  local path="$1" replacement="$2"
+  if [[ "${path}" == */* ]]; then
+    printf '%s/%s' "${path%/*}" "${replacement}"
+  else
+    printf '%s' "${replacement}"
+  fi
+}
