@@ -21,6 +21,10 @@ cmd=(
   "--robot.type=piper_follower"
   "--robot.port=${FOLLOWER_PORT}"
   "${SAFETY_ARGS[@]}"
+  # recorded action은 send_action()이 실제로 follower에 보낸 값(offset 이미 적용된
+  # follower 좌표계 절대 목표값) — replay 때 use_action_offset이 켜져 있으면 또
+  # 한 번 보정이 얹혀서 이중 보정이 되므로 꺼야 함.
+  "--robot.use_action_offset=false"
   "--dataset.repo_id=${DATASET_REPO_ID}"
   "--dataset.root=${DATASET_ROOT}"
   "--dataset.episode=${DATASET_EPISODE}"

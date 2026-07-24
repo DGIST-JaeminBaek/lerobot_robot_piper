@@ -13,6 +13,8 @@ import cv2
 import numpy as np
 import pandas as pd
 
+from lerobot.datasets.depth_utils import dequantize_depth
+
 try:
     from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 except Exception:  # pragma: no cover - optional fallback for simple local datasets
@@ -103,11 +105,49 @@ def _video_path(
     )
 
 
-def _video_keys(info: dict[str, Any], requested: list[str] | None) -> list[str]:
+def _is_depth_key(info: dict[str, Any], key: str) -> bool:
+    return bool(info.get("features", {}).get(key, {}).get("info", {}).get("is_depth_map"))
+
+
+def _video_keys(info: dict[str, Any], requested: list[str] | None, view: str = "both") -> list[str]:
     if requested:
         return requested
     features = info.get("features", {})
-    return [key for key, value in features.items() if value.get("dtype") == "video"]
+    keys = [key for key, value in features.items() if value.get("dtype") == "video"]
+    if view == "both":
+        return keys
+    filtered = [k for k in keys if _is_depth_key(info, k) == (view == "depth")]
+    if not filtered:
+        print(f"[WARN] --view {view} but no matching stream found — showing all cameras instead")
+        return keys
+    return filtered
+
+
+DEPTH_MIN_MM = 100.0
+DEPTH_MAX_MM = 3000.0
+
+
+def _depth_params(info: dict[str, Any], key: str) -> dict[str, Any]:
+    feature_info = info.get("features", {}).get(key, {}).get("info", {})
+    return {
+        "depth_min": feature_info.get("video.depth_min", 0.0),
+        "depth_max": feature_info.get("video.depth_max", 10.0),
+        "shift": feature_info.get("video.shift", 3.5),
+        "use_log": feature_info.get("video.use_log", True),
+        "output_tensor": False,
+    }
+
+
+def _colorize_depth_frame(quantized: np.ndarray, params: dict[str, Any]) -> np.ndarray:
+    """양자화된 12-bit depth code(uint16, HxW)를 실측 mm로 복원한 뒤 사람이 보기
+    좋은 컬러맵 BGR로 변환 — docs/depth/tools/depth_video_viewer.py와 동일한 방식.
+    저장된 MP4/데이터 자체는 건드리지 않고 미리보기에서만 씀."""
+    depth_mm = dequantize_depth(quantized, **params).squeeze()
+    clipped = np.clip(depth_mm, DEPTH_MIN_MM, DEPTH_MAX_MM)
+    normalized = ((clipped - DEPTH_MIN_MM) * (255.0 / (DEPTH_MAX_MM - DEPTH_MIN_MM))).astype(np.uint8)
+    colored = cv2.applyColorMap(normalized, cv2.COLORMAP_TURBO)
+    colored[depth_mm <= DEPTH_MIN_MM] = 0
+    return colored
 
 
 def _feature_names(info: dict[str, Any], key: str) -> list[str]:
@@ -208,17 +248,29 @@ def _panel(
     return panel
 
 
-def _load_video_frames(path: Path) -> list[np.ndarray] | None:
+def _load_video_frames(
+    path: Path, *, is_depth: bool = False, depth_params: dict[str, Any] | None = None
+) -> list[np.ndarray] | None:
     """path의 영상을 전부 디코딩해서 프레임 리스트로 반환, 실패하면 None.
 
     cv2.VideoCapture(내장 ffmpeg의 AV1 디코더)는 이 프로젝트의 mp4(AV1/libdav1d
     인코딩)를 seek할 때 'Missing Sequence Header'로 깨져서 프레임을 못 읽어옴
     (seek 없이 순차로 읽어도 마찬가지로 실패함) — 대신 PyAV(av)로 처음부터
     순차 디코딩해서 메모리에 전부 올려놓음. episode 길이가 짧아서 메모리도
-    부담 없음(scripts/tools/piper_replay_player_rviz.py와 동일한 방식)."""
+    부담 없음(scripts/tools/piper_replay_player_rviz.py와 동일한 방식).
+
+    is_depth=True면 gray12le 12-bit code를 그대로 디코딩한 뒤 _colorize_depth_frame()으로
+    mm 단위 컬러맵 BGR로 변환함(원본 RGB 디코딩과 동일한 배열 형태로 맞춰서 이후
+    파이프라인이 카메라 종류를 신경 쓸 필요 없게 함)."""
     try:
         container = av.open(str(path))
-        frames = [f.to_ndarray(format="bgr24") for f in container.decode(video=0)]
+        if is_depth:
+            frames = [
+                _colorize_depth_frame(f.to_ndarray(format="gray12le"), depth_params or {})
+                for f in container.decode(video=0)
+            ]
+        else:
+            frames = [f.to_ndarray(format="bgr24") for f in container.decode(video=0)]
         container.close()
     except Exception as e:
         print(f"[WARN] Could not open video: {path} ({e})")
@@ -265,14 +317,17 @@ def play(initial_args: argparse.Namespace) -> None:
             else:
                 break
 
-        video_keys = _video_keys(info, args.video_key)
+        video_keys = _video_keys(info, args.video_key, args.view)
         if not video_keys:
             raise ValueError("No video features found. Pass --video-key if the metadata is unusual.")
 
         video_frames: dict[str, list[np.ndarray] | None] = {}
         for key in video_keys:
             path = _video_path(root, info, meta, args.episode, key)
-            video_frames[key] = _load_video_frames(path)
+            is_depth = _is_depth_key(info, key)
+            video_frames[key] = _load_video_frames(
+                path, is_depth=is_depth, depth_params=_depth_params(info, key) if is_depth else None
+            )
             # 비디오가 없어도(None) 플레이어는 계속 동작함 — placeholder로 표시
 
         fps = float(args.fps or info.get("fps") or 30)
@@ -440,6 +495,10 @@ INTERACTIVE CONTROLS:
     parser.add_argument("--dataset-root", default=None, help="Local LeRobot dataset root")
     parser.add_argument("--episode", type=int, default=0, help="Episode index to play")
     parser.add_argument("--video-key", action="append", help="Video feature key to display. Repeat for multiple cameras")
+    parser.add_argument(
+        "--view", choices=["both", "rgb", "depth"], default="both",
+        help="Filter auto-discovered video streams to RGB only, depth only, or both (default)",
+    )
     parser.add_argument("--data-key", default="observation.state", help="Joint state column to display")
     parser.add_argument("--action-key", default="action", help="Action column to display beside state")
     parser.add_argument("--fps", type=float, default=None, help="Override playback FPS")

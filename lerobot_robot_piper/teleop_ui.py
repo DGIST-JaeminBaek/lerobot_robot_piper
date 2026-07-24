@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, ttk
 
 import cv2
 import pandas as pd
@@ -35,6 +35,16 @@ from .config_piper import PiperFollowerConfig
 from .piper_follower import PiperFollower
 
 from piper_sdk import C_PiperInterface_V2
+
+# lerobot-record의 keyboard listener(lerobot.utils.control_utils.init_keyboard_listener,
+# pynput 기반 OS 전역 리스너로 추정)로 가상 키 입력을 보내 "에피소드 조기 종료(저장)"를
+# 트리거하는 데 씀. 정확한 단축키 매핑(오른쪽 화살표 = exit_early)은 설치된 lerobot
+# 버전 소스로 재확인 필요 — 미검증이라 소프트 임포트로 둠(docs/roadmap.md 체크리스트 참고).
+try:
+    from pynput.keyboard import Controller as _KeyboardController, Key as _Key
+except Exception:
+    _KeyboardController = None
+    _Key = None
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +111,35 @@ def _replace_last_path_segment(path: str, replacement: str) -> str:
     if "/" in path:
         return path.rsplit("/", 1)[0] + "/" + replacement
     return replacement
+
+
+def save_recording_env(updates: dict[str, str], path: pathlib.Path = RECORDING_ENV_PATH) -> None:
+    """GUI에서 바꾼 값을 configs/recording.env에 반영. 기존 KEY=VALUE 줄이 있으면
+    그 줄의 값만 바꾸고(주석/순서 보존), 없는 키는 파일 끝에 추가. 공백이 섞인 값
+    (TASK 등)은 기존 파일 컨벤션대로 큰따옴표로 감쌈."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+
+    def fmt(value: str) -> str:
+        return f'"{value}"' if " " in value else value
+
+    remaining = dict(updates)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in remaining:
+            lines[i] = f"{key}={fmt(remaining.pop(key))}"
+
+    if remaining:
+        lines.append("")
+        lines.append("# GUI에서 저장한 값")
+        lines.extend(f"{key}={fmt(value)}" for key, value in remaining.items())
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def dataset_scan_root(recording_env: dict[str, str]) -> pathlib.Path:
@@ -360,9 +399,17 @@ class PiperMonitorUI:
         # Play 버튼이 piper_replay_player.py 대신 piper_replay_player_rviz.py(RViz 동기화 재생)를 씀 —
         # 터미널에서 직접 띄운 RViz는 감지 대상이 아님(이 프로세스 핸들 기준으로만 판정).
         self.rviz_proc: subprocess.Popen | None = None
+        # last_launch.log를 실시간으로 tail하는 터미널 창 — "Log Terminal" 토글 버튼으로
+        # on/off (RViz와 동일 패턴). GUI 시작 시 자동으로 한 번 켜짐(__init__ 끝부분 참고).
+        self.log_terminal_proc: subprocess.Popen | None = None
         self.leader_mon: CANMonitor | None = None
         self.follower_mon: CANMonitor | None = None
         self.monitoring = False
+
+        # Parking 근접 자동 종료용 상태 — "Capture Parking Pose"로 잡은 기준 자세(raw 단위,
+        # CANMonitor.read_joints()와 동일)와 에피소드당 한 번만 트리거하기 위한 guard.
+        self._parking_reference: dict[str, float] | None = None
+        self._parking_triggered_episode = False
 
         # configs/recording.env 값 (없거나 읽기 실패해도 빈 dict — 각 필드는 fallback 기본값 사용)
         self.recording_env: dict[str, str] = load_recording_env()
@@ -384,6 +431,8 @@ class PiperMonitorUI:
 
         self._build_ui()
         self.root.update_idletasks()
+
+        self._start_log_terminal()
 
         self._update_ui()
 
@@ -458,43 +507,109 @@ class PiperMonitorUI:
         self.fps_var = tk.StringVar(value=self.recording_env.get("FPS") or "30")
         ttk.Entry(timing_row, textvariable=self.fps_var, width=6).pack(side="left", padx=2)
 
+        self.push_to_hub_var = tk.BooleanVar(value=(self.recording_env.get("PUSH_TO_HUB") or "false").lower() == "true")
+        ttk.Checkbutton(timing_row, text="Push to Hub", variable=self.push_to_hub_var).pack(side="left", padx=(12, 2))
+
+        # 껐을 때는 dataset repo_id/root에 타임스탬프를 안 붙임 (RESUME=true일 때와
+        # 동일하게 base 이름을 그대로 씀) — _dataset_args() 참고. 타임스탬프 자체는
+        # 항상 Launch를 누른 순간 기준으로 새로 계산됨(_on_launch()가 Launch 직전에
+        # _refresh_command()를 한 번 더 호출해서 Command 미리보기가 미리 만들어진
+        # 옛날 시각으로 굳어 있는 걸 막음).
+        self.timestamp_enabled_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(timing_row, text="Timestamp Folder", variable=self.timestamp_enabled_var).pack(
+            side="left", padx=(12, 2)
+        )
+
+        # 녹화 초반 프레임을 parking 시작으로 자동 보정하는 smooth start on/off
+        # (로직 자체는 이미 있었음 — _smooth_config()/_run_smooth_start() 참고, GUI 스위치만 추가).
+        smooth_enabled, smooth_frames = self._initial_smooth_config()
+        self.smooth_enabled_var = tk.BooleanVar(value=smooth_enabled)
+        ttk.Checkbutton(timing_row, text="Smooth Start", variable=self.smooth_enabled_var).pack(side="left", padx=(12, 2))
+        self.smooth_frames_var = tk.StringVar(value=str(smooth_frames or SMOOTH_START_FRAMES_DEFAULT))
+        ttk.Entry(timing_row, textvariable=self.smooth_frames_var, width=5).pack(side="left", padx=2)
+        ttk.Label(timing_row, text="frames").pack(side="left", padx=(0, 4))
+
+        # Dataset Root 수동 지정 — 비어 있으면 기존 방식(recording.env DATASET_ROOT + task
+        # slug 치환)을 그대로 씀. Browse로 직접 고르면 이 값을 최우선으로 씀
+        # (_dataset_args 참고). 우분투에서도 GTK 네이티브 폴더 선택 다이얼로그로 뜸.
+        dataset_row = ttk.Frame(script_frame)
+        dataset_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        ttk.Label(dataset_row, text="Dataset Root override:").pack(side="left", padx=4)
+        self.dataset_root_override_var = tk.StringVar(value="")
+        ttk.Entry(dataset_row, textvariable=self.dataset_root_override_var, width=36).pack(side="left", padx=2)
+        ttk.Button(dataset_row, text="Browse...", command=self._on_browse_dataset_root, width=9).pack(side="left", padx=2)
+        ttk.Button(dataset_row, text="Clear", command=lambda: self.dataset_root_override_var.set(""), width=6).pack(
+            side="left", padx=2
+        )
+
+        ttk.Button(dataset_row, text="Save as Default", command=self._on_save_settings).pack(side="right", padx=4)
+
+        # 녹화 중 조기 종료(End Episode)/parking 근접 자동 종료 컨트롤. 둘 다 lerobot-record의
+        # keyboard listener에 가상 오른쪽-화살표 입력(exit_early)을 보내는 방식이라 미검증
+        # 부분(_send_lerobot_hotkey 주석 참고) — 실물에서 "End Episode (Save)" 버튼 하나로
+        # 먼저 확인한 뒤에 Auto-stop을 켜서 쓸 것.
+        record_ctrl_row = ttk.Frame(script_frame)
+        record_ctrl_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        self.parking_auto_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            record_ctrl_row, text="Auto-stop at Parking", variable=self.parking_auto_var
+        ).pack(side="left", padx=(4, 2))
+
+        ttk.Label(record_ctrl_row, text="threshold(raw):").pack(side="left", padx=(8, 2))
+        self.parking_threshold_var = tk.StringVar(value="3000")
+        ttk.Entry(record_ctrl_row, textvariable=self.parking_threshold_var, width=7).pack(side="left", padx=2)
+
+        ttk.Button(
+            record_ctrl_row, text="Capture Parking Pose", command=self._on_capture_parking
+        ).pack(side="left", padx=(8, 2))
+        self.parking_captured_var = tk.StringVar(value="(not captured)")
+        ttk.Label(record_ctrl_row, textvariable=self.parking_captured_var, foreground="#888888").pack(
+            side="left", padx=(4, 2)
+        )
+
         # Policy Path — Infer 프리셋의 --policy.path로 반영 (체크포인트 로컬 경로 또는 HF repo id).
         # Teleoperate/Record에서는 안 쓰이지만 항상 보이게 둠 (프리셋 전환 시 값 유지).
         policy_row = ttk.Frame(script_frame)
-        policy_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        policy_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 4))
 
         ttk.Label(policy_row, text="Policy Path:").pack(side="left", padx=4)
         self.policy_path_var = tk.StringVar(value=self.recording_env.get("POLICY_PRETRAINED_PATH") or "")
         ttk.Entry(policy_row, textvariable=self.policy_path_var, width=40).pack(side="left", padx=2)
 
         # Preset + custom command
-        ttk.Label(script_frame, text="Preset:").grid(row=4, column=0, padx=4, sticky="e")
+        ttk.Label(script_frame, text="Preset:").grid(row=6, column=0, padx=4, sticky="e")
         self.preset_var = tk.StringVar(value="Teleoperate")
         preset_combo = ttk.Combobox(
             script_frame, textvariable=self.preset_var,
             values=PRESET_NAMES, state="readonly", width=14,
         )
-        preset_combo.grid(row=4, column=1, padx=4, sticky="w")
+        preset_combo.grid(row=6, column=1, padx=4, sticky="w")
         preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
 
         btn_row2 = ttk.Frame(script_frame)
-        btn_row2.grid(row=4, column=2, sticky="e")
+        btn_row2.grid(row=6, column=2, sticky="e")
         self.btn_launch = ttk.Button(btn_row2, text="Launch", command=self._on_launch)
         self.btn_launch.pack(side="left", padx=4)
+        self.btn_end_episode = ttk.Button(
+            btn_row2, text="End Episode (Save)", command=self._on_end_episode_now, state="disabled"
+        )
+        self.btn_end_episode.pack(side="left", padx=4)
         self.btn_kill = ttk.Button(btn_row2, text="Stop", command=self._on_kill, state="disabled")
         self.btn_kill.pack(side="left", padx=4)
 
-        ttk.Label(script_frame, text="Command:").grid(row=5, column=0, padx=4, sticky="e")
+        ttk.Label(script_frame, text="Command:").grid(row=7, column=0, padx=4, sticky="e")
         self.cmd_var = tk.StringVar()
         self._on_preset_selected(None)  # fill initial command
         cmd_entry = ttk.Entry(script_frame, textvariable=self.cmd_var)
-        cmd_entry.grid(row=5, column=1, columnspan=2, padx=4, sticky="ew", pady=(4, 0))
+        cmd_entry.grid(row=7, column=1, columnspan=2, padx=4, sticky="ew", pady=(4, 0))
 
         # 실행 중인 lerobot-record의 stdout에서 "Recording episode N" 로그를 파싱해서
         # 진행 상황을 표시 (Rerun 창을 안 보고 있어도 상태 파악 가능). 녹화 중이 아니면 빈 문자열.
         self.progress_var = tk.StringVar(value="")
         ttk.Label(script_frame, textvariable=self.progress_var, foreground="#2a9d5c").grid(
-            row=6, column=0, columnspan=3, padx=4, sticky="w", pady=(2, 0)
+            row=8, column=0, columnspan=3, padx=4, sticky="w", pady=(2, 0)
         )
 
         # 입력값이 바뀔 때마다 Command를 자동으로 다시 조립 — Preset을 재선택 안 해도
@@ -503,6 +618,8 @@ class PiperMonitorUI:
             self.leader_port_var, self.follower_port_var,
             self.task_var, self.num_episodes_var, self.policy_path_var,
             self.episode_time_var, self.reset_time_var, self.fps_var,
+            self.push_to_hub_var, self.dataset_root_override_var,
+            self.timestamp_enabled_var,
         ):
             var.trace_add("write", self._refresh_command)
 
@@ -617,6 +734,11 @@ class PiperMonitorUI:
         self.btn_rviz = ttk.Button(btn_row, text="RViz Start", command=self._on_rviz_toggle)
         self.btn_rviz.pack(side="right", padx=4)
         self.rviz_status_var = tk.StringVar(value="RViz: off")
+
+        # Log Terminal — last_launch.log를 실시간 tail하는 터미널 창 on/off. RViz와
+        # 동일한 순수 토글 패턴, GUI 시작 시 자동으로 한 번 켜짐.
+        self.btn_log_terminal = ttk.Button(btn_row, text="Log Terminal Start", command=self._on_log_terminal_toggle)
+        self.btn_log_terminal.pack(side="right", padx=4)
         ttk.Label(btn_row, textvariable=self.rviz_status_var).pack(side="right", padx=(4, 8))
 
         self.can_rows_frame = ttk.Frame(can_frame)
@@ -757,6 +879,17 @@ class PiperMonitorUI:
         self.play_button = ttk.Button(frame, text="▶ Play", command=self._on_play_episode, width=8)
         self.play_button.pack(side="left", padx=(8, 2))
 
+        # RGB/Depth 카메라가 둘 다 녹화된 dataset을 재생할 때, 창에 4개(RGB 2 + Depth 2)가
+        # 한꺼번에 쌓이면 답답하니 Both/RGB only/Depth only로 필터링 — piper_replay_player.py/
+        # piper_replay_player_rviz.py에 --view로 그대로 전달됨(_on_play_episode 참고).
+        ttk.Label(frame, text="View:").pack(side="left", padx=(12, 4))
+        self.replay_view_var = tk.StringVar(value="both")
+        self.view_combo = ttk.Combobox(
+            frame, textvariable=self.replay_view_var, state="readonly", width=6,
+            values=["both", "rgb", "depth"],
+        )
+        self.view_combo.pack(side="left", padx=2)
+
         self.dataset_status_var = tk.StringVar(value="Click 'Refresh' to scan")
         ttk.Label(frame, textvariable=self.dataset_status_var).pack(side="left", padx=12)
 
@@ -817,9 +950,11 @@ class PiperMonitorUI:
         """RViz Start로 띄운 RViz가 살아있으면 piper_replay_player_rviz.py(RViz 동기화
         재생 + 자체 영상/패널 창)를, 없으면 기존 piper_replay_player.py(영상/패널
         창만, ROS2 불필요)를 띄움 — 두 스크립트 다 화면 구성이 동일한 스타일이라
-        RViz 유무로 창이 하나 더 늘지 않고 자연스럽게 바뀜."""
+        RViz 유무로 창이 하나 더 늘지 않고 자연스럽게 바뀜.
+        View 콤보박스(both/rgb/depth)는 두 스크립트 다 --view로 그대로 전달함."""
         dataset_root = self.replay_dataset_root_var.get().strip()
         episode = self.replay_episode_var.get().strip()
+        view = self.replay_view_var.get().strip() or "both"
 
         if not dataset_root or not episode:
             # 데이터셋이나 에피소드가 선택되지 않았으면 아무것도 하지 않음
@@ -833,6 +968,7 @@ class PiperMonitorUI:
                 sys.executable, str(script_path),
                 "--dataset_root", dataset_root,
                 "--episode", episode,
+                "--view", view,
             ]
         else:
             script_path = REPO_ROOT / "scripts" / "tools" / "piper_replay_player.py"
@@ -840,6 +976,7 @@ class PiperMonitorUI:
                 sys.executable, str(script_path),
                 "--dataset-root", dataset_root,
                 "--episode", episode,
+                "--view", view,
             ]
 
         # 윈도우에서는 CREATE_NEW_PROCESS_GROUP을, 다른 OS에서는 preexec_fn을 사용합니다.
@@ -1000,6 +1137,44 @@ class PiperMonitorUI:
         if builder_name:
             self.cmd_var.set(getattr(self, builder_name)())
 
+    # ---------------------------------------------------------- Dataset root / 설정 저장
+    def _on_browse_dataset_root(self):
+        """우분투 GTK 파일 다이얼로그로 dataset 저장 폴더를 직접 선택 (Dataset Root override)."""
+        initial = self.dataset_root_override_var.get().strip() or str(REPO_ROOT / "records")
+        initial_path = pathlib.Path(initial)
+        if not initial_path.is_absolute():
+            initial_path = REPO_ROOT / initial_path
+        chosen = filedialog.askdirectory(
+            initialdir=str(initial_path if initial_path.exists() else REPO_ROOT),
+            title="Select dataset root folder",
+        )
+        if chosen:
+            self.dataset_root_override_var.set(chosen)
+
+    def _on_save_settings(self):
+        """지금 GUI에 입력된 값들을 configs/recording.env의 기본값으로 저장."""
+        updates = {
+            "LEADER_PORT": self.leader_port_var.get().strip(),
+            "FOLLOWER_PORT": self.follower_port_var.get().strip(),
+            "TASK": self.task_var.get().strip(),
+            "NUM_EPISODES": self.num_episodes_var.get().strip(),
+            "FPS": self.fps_var.get().strip(),
+            "EPISODE_TIME_S": self.episode_time_var.get().strip(),
+            "RESET_TIME_S": self.reset_time_var.get().strip(),
+            "PUSH_TO_HUB": "true" if self.push_to_hub_var.get() else "false",
+            "SMOOTH_START_FRAMES": self.smooth_frames_var.get().strip() if self.smooth_enabled_var.get() else "0",
+        }
+        if self.dataset_root_override_var.get().strip():
+            updates["DATASET_ROOT"] = self.dataset_root_override_var.get().strip()
+        try:
+            save_recording_env(updates)
+        except OSError as e:
+            self.bottom_var.set(f"설정 저장 실패: {e}")
+            return
+        self.recording_env = load_recording_env()
+        self.env_status_var.set(self._describe_recording_env())
+        self.bottom_var.set(f"설정 저장 완료: {RECORDING_ENV_PATH}")
+
     def _build_teleoperate_command(self) -> str:
         leader_port = self.leader_port_var.get().strip()
         follower_port = self.follower_port_var.get().strip()
@@ -1074,9 +1249,12 @@ class PiperMonitorUI:
     def _dataset_args(self, fps: str) -> list[str]:
         """5__record.sh의 dataset.* 인자와 동일한 fallback. Task/Num Episodes/Episode
         Time/Reset Time은 UI 입력값 사용(recording.env는 초기값으로만 씀).
-        scripts/5__record.sh와 동일하게, resume이 아니면 매번 월일-시분초 타임스탬프를
-        붙여서 이전 녹화 폴더를 덮어쓰지 않게 함. Task 텍스트는 repo_id/폴더명의
-        프로젝트명 세그먼트로도 반영됨(네임스페이스는 유지) — _task_slug() 참고."""
+        scripts/5__record.sh와 동일하게, resume이 아니고 "Timestamp Folder" 체크박스가
+        켜져 있으면 매번 월일-시분초 타임스탬프를 붙여서 이전 녹화 폴더를 덮어쓰지
+        않게 함(체크 해제 시 base 이름을 그대로 씀 — resume과 동일한 동작). 타임스탬프는
+        이 메서드가 실제로 호출되는 시점(Launch 클릭 직전, _on_launch() 참고) 기준.
+        Task 텍스트는 repo_id/폴더명의 프로젝트명 세그먼트로도 반영됨(네임스페이스는
+        유지) — _task_slug() 참고."""
         env = self.recording_env
         task = self.task_var.get().strip()
         num_episodes = self.num_episodes_var.get().strip()
@@ -1091,7 +1269,14 @@ class PiperMonitorUI:
             dataset_repo_id_base = _replace_last_path_segment(dataset_repo_id_base, task_slug)
             dataset_root_base = _replace_last_path_segment(dataset_root_base, task_slug)
 
-        if resume == "true":
+        # "Dataset Root override"(Browse로 직접 고른 폴더)가 있으면 위 task-slug 기반
+        # 자동 경로 대신 그 절대경로를 그대로 씀 — 사용자가 명시적으로 고른 위치라
+        # task slug로 재해석하지 않음.
+        override = self.dataset_root_override_var.get().strip()
+        if override:
+            dataset_root_base = override
+
+        if resume == "true" or not self.timestamp_enabled_var.get():
             dataset_repo_id = dataset_repo_id_base
             dataset_root = dataset_root_base
         else:
@@ -1106,7 +1291,7 @@ class PiperMonitorUI:
             f"--dataset.episode_time_s={episode_time_s}",
             f"--dataset.reset_time_s={reset_time_s}",
             f"--dataset.single_task={shlex.quote(task)}",
-            f"--dataset.push_to_hub={env.get('PUSH_TO_HUB') or 'false'}",
+            f"--dataset.push_to_hub={'true' if self.push_to_hub_var.get() else 'false'}",
             f"--resume={resume}",
         ]
 
@@ -1249,6 +1434,10 @@ class PiperMonitorUI:
         return " ".join(args)
 
     def _on_launch(self):
+        # Command 미리보기는 마지막으로 필드가 바뀐 시점 기준이라 그 뒤로 시간이
+        # 지나면 타임스탬프가 낡을 수 있음 — Launch 클릭 순간 기준으로 한 번 더
+        # 재조립해서 dataset 폴더명의 타임스탬프가 실제 실행 시점과 맞게 함.
+        self._refresh_command()
         cmd = self.cmd_var.get().strip()
         if not cmd:
             self.bottom_var.set("No command to run")
@@ -1276,6 +1465,9 @@ class PiperMonitorUI:
 
         self.btn_launch.config(state="disabled")
         self.btn_kill.config(state="normal")
+        # 조기 종료(exit_early 핫키)는 lerobot-record가 떠 있을 때만 의미가 있음 (Record/Infer 프리셋).
+        self.btn_end_episode.config(state="normal" if "lerobot-record" in cmd else "disabled")
+        self._parking_triggered_episode = False
         self.bottom_var.set(f"Running (PID {self.script_proc.pid}): {cmd}")
         self.progress_var.set("")
 
@@ -1290,6 +1482,62 @@ class PiperMonitorUI:
             rc = self.script_proc.returncode
             self.script_proc = None
             self.root.after(0, self._proc_finished, rc)
+
+    # ---------------------------------------------------------- Log Terminal
+    def _on_log_terminal_toggle(self):
+        """RViz 토글과 동일한 패턴 — 순수 on/off라 버튼 하나로 토글."""
+        if self.log_terminal_proc is None:
+            self._start_log_terminal()
+        else:
+            self._stop_log_terminal()
+
+    def _start_log_terminal(self):
+        """last_launch.log를 tail -F로 실시간으로 보여주는 터미널 창을 띄움. GUI 자체는
+        subprocess stdout을 pipe로 읽어서 진행률 파싱에 써야 하는 구조라(_read_proc_output
+        참고) 콘솔을 직접 못 띄우는데, 그래서 실패 스택트레이스 같은 걸 실시간으로 못 보는
+        불편함이 있었음 — 이 창으로 그 로그를 그대로 보여줌. GUI 시작 시 자동으로 한 번
+        켜지고, 이 버튼으로 껐다 켤 수 있음.
+
+        `-n +1`(처음부터) 대신 `tail` 기본 동작(마지막 몇 줄부터 시작)을 그대로 써서
+        껐다 켤 때마다 항상 로그 맨 밑(최신 내용)부터 보이게 함. `--retry`는 아직
+        last_launch.log가 없어도(첫 Launch 전) 기다리게 함.
+
+        `gnome-terminal --wait`로 띄워서(자식이 끝날 때까지 대기) self.log_terminal_proc의
+        poll()로 창이 열려있는지 판단할 수 있게 함(RViz의 self.rviz_proc과 동일 패턴) —
+        `exec bash` 같은 걸로 셸을 안 남겨둬야 _stop_log_terminal()이 tail을 죽였을 때
+        창이 실제로 닫힘."""
+        log_path = REPO_ROOT / "last_launch.log"
+        tail_cmd = f"tail --retry -F {shlex.quote(str(log_path))}"
+        for terminal_args in (
+            ["gnome-terminal", "--wait", "--", "bash", "-c", tail_cmd],
+            ["x-terminal-emulator", "-e", "bash", "-c", tail_cmd],
+        ):
+            try:
+                self.log_terminal_proc = subprocess.Popen(
+                    terminal_args,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    preexec_fn=os.setsid if sys.platform != "win32" else None,
+                )
+                break
+            except FileNotFoundError:
+                continue
+        else:
+            self.bottom_var.set("로그 터미널 실행 실패 — gnome-terminal/x-terminal-emulator 없음")
+            return
+
+        self._log_terminal_tail_marker = str(log_path)
+        self.btn_log_terminal.config(text="Log Terminal Stop")
+
+    def _stop_log_terminal(self):
+        """실제 창(gnome-terminal-server가 띄운 것)은 이 프로세스 핸들로 직접 못 죽이므로
+        (client-server 구조라 self.log_terminal_proc은 --wait로 대기만 함), 창 안에서
+        돌아가는 tail 프로세스를 pkill로 죽여서 셸이 자연 종료 -> 창이 닫히게 함."""
+        if self.log_terminal_proc is None:
+            return
+        marker = getattr(self, "_log_terminal_tail_marker", None)
+        if marker:
+            subprocess.run(["pkill", "-f", marker], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.btn_log_terminal.config(state="disabled")
 
     def _read_proc_output(self, proc: subprocess.Popen):
         """실행 중인 subprocess의 stdout(stderr merge됨)을 계속 읽으면서
@@ -1311,6 +1559,7 @@ class PiperMonitorUI:
                     current = int(m.group(1)) + 1  # 0-indexed 누적 카운트 -> 1부터 보여줌
                     text = f"Recording episode {current}/{target}"
                     self.root.after(0, self.progress_var.set, text)
+                    self._parking_triggered_episode = False  # 새 에피소드 시작 -> auto-stop 다시 무장
 
     def _proc_finished(self, rc: int):
         # 프로세스는 완전히 죽었지만, 카메라 디바이스가 아직 release 안 됐을 수 있음
@@ -1319,6 +1568,7 @@ class PiperMonitorUI:
         # release 사이클을 먼저 돌린 뒤 켬. Stop 버튼은 이미 끌 게 없으니 비활성화.
         self.btn_launch.config(state="disabled")
         self.btn_kill.config(state="disabled")
+        self.btn_end_episode.config(state="disabled")
         self.bottom_var.set(f"Script exited (code {rc}) — releasing cameras...")
         threading.Thread(target=self._release_cameras_then_ready, args=(rc,), daemon=True).start()
 
@@ -1423,9 +1673,10 @@ class PiperMonitorUI:
                 return tok.split("=", 1)[1]
         return None
 
-    def _smooth_config(self) -> tuple[bool, int]:
-        """recording.env의 SMOOTH_START_FRAMES로 (활성화 여부, 프레임 수) 결정.
-        미설정이면 기본 활성화 + SMOOTH_START_FRAMES_DEFAULT. 0/false/off면 비활성화."""
+    def _initial_smooth_config(self) -> tuple[bool, int]:
+        """recording.env의 SMOOTH_START_FRAMES로 (활성화 여부, 프레임 수) 결정 — GUI의
+        Smooth Start 체크박스/프레임 수 Entry 초기값을 채우는 데만 씀. 미설정이면
+        기본 활성화 + SMOOTH_START_FRAMES_DEFAULT. 0/false/off면 비활성화."""
         raw = (self.recording_env.get("SMOOTH_START_FRAMES") or "").strip().lower()
         if raw in ("0", "false", "off", "no"):
             return False, 0
@@ -1433,6 +1684,17 @@ class PiperMonitorUI:
             return True, SMOOTH_START_FRAMES_DEFAULT
         try:
             n = int(raw)
+        except ValueError:
+            return True, SMOOTH_START_FRAMES_DEFAULT
+        return (n > 0), max(n, 0)
+
+    def _smooth_config(self) -> tuple[bool, int]:
+        """녹화 종료 후 실제로 쓰이는 (활성화 여부, 프레임 수) — Smooth Start
+        체크박스/프레임 수 Entry의 현재 값 기준."""
+        if not self.smooth_enabled_var.get():
+            return False, 0
+        try:
+            n = int(self.smooth_frames_var.get().strip())
         except ValueError:
             return True, SMOOTH_START_FRAMES_DEFAULT
         return (n > 0), max(n, 0)
@@ -1466,6 +1728,79 @@ class PiperMonitorUI:
             except ProcessLookupError:
                 pass
             self.bottom_var.set("Sending SIGINT to script...")
+
+    # ---------------------------------------------------------- 조기 종료 / Parking 자동 종료
+    def _send_lerobot_hotkey(self, key_name: str) -> bool:
+        """lerobot-record가 여는 keyboard listener(lerobot.utils.control_utils.
+        init_keyboard_listener, pynput 기반 OS 전역 리스너로 추정)에 가상 키 입력을 합성해서
+        보냄. 물리 키보드로 오른쪽 화살표를 누르는 것과 동일한 효과를 노림 —
+        "현재 에피소드를 지금까지 녹화분만 저장하고 조기 종료(exit_early)".
+
+        미검증 지점(실물 로봇에서 한 번 확인 필요, docs/roadmap.md 체크리스트 참고):
+        1) 설치된 lerobot 버전에서 실제로 exit_early 단축키가 오른쪽 화살표가 맞는지
+        2) pynput 전역 리스너가 GUI 창에 포커스가 없어도 이 합성 입력을 받는지
+           (X11 세션 기준 가정 — Wayland면 안 될 수 있음)
+        둘 다 맞으면 그대로 쓰면 되고, 아니면 이 메서드만 실제 방식에 맞게 바꾸면 됨 —
+        호출부(End Episode 버튼, parking 자동 종료)는 안 건드려도 됨."""
+        if _KeyboardController is None:
+            self.bottom_var.set("pynput 미설치 — 'pip install pynput' 필요 (조기종료 버튼 사용 불가)")
+            return False
+        try:
+            controller = _KeyboardController()
+            key = {"right": _Key.right, "esc": _Key.esc}[key_name]
+            controller.press(key)
+            controller.release(key)
+            return True
+        except Exception as e:
+            logger.exception("Failed to send lerobot hotkey")
+            self.bottom_var.set(f"키 입력 전송 실패: {e}")
+            return False
+
+    def _on_end_episode_now(self):
+        """"여기까지만 저장" 버튼 — 현재 에피소드를 지금까지 녹화된 만큼만 저장하고
+        조기 종료. 실물 검증 전까지는 결과를 GUI에서 눈으로 확인(진행률/로그)할 것."""
+        if not self.script_proc:
+            return
+        if self._send_lerobot_hotkey("right"):
+            self.bottom_var.set("현재 에피소드 조기 종료 요청 전송 — 로그/진행률로 실제 저장 확인하세요.")
+
+    def _on_capture_parking(self):
+        """CAN Monitor가 켜져 있고 '리더' 팔을 손으로 parking 자세 근처(follower의
+        Go Parking 자세와 맞춰서)로 옮겨둔 상태에서 눌러서, 지금 읽히는 leader의
+        raw joint 값을 '기준 parking 자세'로 저장. leader는 사람이 손으로 움직이는
+        팔이라 follower처럼 자동으로 parking에 보낼 수 없음 — 그래서 리더를 손으로
+        follower Go Parking과 비슷한 자세로 맞춘 뒤 이 버튼으로 캡처."""
+        if not self.leader_pos:
+            self.bottom_var.set("Capture 실패 — CAN Monitor를 먼저 Start하고 리더 팔을 parking 자세로 맞추세요")
+            return
+        self._parking_reference = dict(self.leader_pos)
+        self.parking_captured_var.set(
+            "captured: " + ", ".join(f"{k}={v:.0f}" for k, v in self._parking_reference.items())
+        )
+        self.bottom_var.set("Parking 기준 자세(리더) 캡처 완료")
+
+    def _check_parking_auto_stop(self):
+        """_update_ui(메인 스레드, ~20Hz)에서 매 tick 호출. Record 실행 중 +
+        Auto-stop 켜짐 + 기준 자세 캡처됨 + 이번 에피소드에서 아직 안 쐈으면,
+        현재 leader_pos(리더 팔)가 기준 자세에 threshold 이내로 들어온 순간
+        조기 종료 핫키를 쏨."""
+        if not (self.script_proc and self.parking_auto_var.get() and self._parking_reference):
+            return
+        if self._parking_triggered_episode or not self.leader_pos:
+            return
+        try:
+            threshold = float(self.parking_threshold_var.get().strip())
+        except ValueError:
+            threshold = 3000.0
+        diffs = [
+            abs(self.leader_pos[j] - v)
+            for j, v in self._parking_reference.items()
+            if j in self.leader_pos
+        ]
+        if diffs and max(diffs) <= threshold:
+            self._parking_triggered_episode = True
+            if self._send_lerobot_hotkey("right"):
+                self.bottom_var.set("리더 팔이 parking 근접 — 에피소드 자동 종료 요청 전송")
 
     # ---------------------------------------------------------- CAN Monitor
     def _on_mon_start(self):
@@ -1572,6 +1907,8 @@ class PiperMonitorUI:
         if self.monitoring and self.mon_hz > 0:
             self.mon_hz_var.set(f"{self.mon_hz:.0f} Hz")
 
+        self._check_parking_auto_stop()
+
         # Check if script is still running
         if self.script_proc and self.script_proc.poll() is not None:
             self._proc_finished(self.script_proc.returncode)
@@ -1582,6 +1919,11 @@ class PiperMonitorUI:
             self.rviz_proc = None
             self.btn_rviz.config(text="RViz Start", state="normal")
             self.rviz_status_var.set("RViz: off")
+
+        # Log Terminal 창을 X로 직접 닫은 경우(버튼을 안 거친 경우)에도 상태를 맞춤
+        if self.log_terminal_proc and self.log_terminal_proc.poll() is not None:
+            self.log_terminal_proc = None
+            self.btn_log_terminal.config(text="Log Terminal Start", state="normal")
 
         self.root.after(50, self._update_ui)
 
@@ -1597,6 +1939,8 @@ class PiperMonitorUI:
         if self.rviz_proc:
             self._stop_rviz()
             time.sleep(0.5)
+        if self.log_terminal_proc:
+            self._stop_log_terminal()
         self.root.destroy()
 
     def run(self):
@@ -1612,6 +1956,12 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
+
+    # 데스크톱 아이콘(피퍼실행.sh)으로 실행하면 cwd가 REPO_ROOT가 아닐 수 있음
+    # (스크립트가 REPO_DIR을 절대경로로 호출만 하고 cd는 안 함) — DATASET_ROOT 등
+    # recording.env의 상대경로 값들이 엉뚱한 곳(예: ~/Desktop/records/...)에
+    # 만들어지는 걸 막기 위해 여기서 명시적으로 REPO_ROOT로 고정.
+    os.chdir(REPO_ROOT)
 
     app = PiperMonitorUI()
     app.leader_port_var.set(args.leader_port)
