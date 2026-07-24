@@ -399,6 +399,9 @@ class PiperMonitorUI:
         # Play 버튼이 piper_replay_player.py 대신 piper_replay_player_rviz.py(RViz 동기화 재생)를 씀 —
         # 터미널에서 직접 띄운 RViz는 감지 대상이 아님(이 프로세스 핸들 기준으로만 판정).
         self.rviz_proc: subprocess.Popen | None = None
+        # last_launch.log를 실시간으로 tail하는 터미널 창 — "Log Terminal" 토글 버튼으로
+        # on/off (RViz와 동일 패턴). GUI 시작 시 자동으로 한 번 켜짐(__init__ 끝부분 참고).
+        self.log_terminal_proc: subprocess.Popen | None = None
         self.leader_mon: CANMonitor | None = None
         self.follower_mon: CANMonitor | None = None
         self.monitoring = False
@@ -428,6 +431,8 @@ class PiperMonitorUI:
 
         self._build_ui()
         self.root.update_idletasks()
+
+        self._start_log_terminal()
 
         self._update_ui()
 
@@ -504,6 +509,16 @@ class PiperMonitorUI:
 
         self.push_to_hub_var = tk.BooleanVar(value=(self.recording_env.get("PUSH_TO_HUB") or "false").lower() == "true")
         ttk.Checkbutton(timing_row, text="Push to Hub", variable=self.push_to_hub_var).pack(side="left", padx=(12, 2))
+
+        # 껐을 때는 dataset repo_id/root에 타임스탬프를 안 붙임 (RESUME=true일 때와
+        # 동일하게 base 이름을 그대로 씀) — _dataset_args() 참고. 타임스탬프 자체는
+        # 항상 Launch를 누른 순간 기준으로 새로 계산됨(_on_launch()가 Launch 직전에
+        # _refresh_command()를 한 번 더 호출해서 Command 미리보기가 미리 만들어진
+        # 옛날 시각으로 굳어 있는 걸 막음).
+        self.timestamp_enabled_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(timing_row, text="Timestamp Folder", variable=self.timestamp_enabled_var).pack(
+            side="left", padx=(12, 2)
+        )
 
         # 녹화 초반 프레임을 parking 시작으로 자동 보정하는 smooth start on/off
         # (로직 자체는 이미 있었음 — _smooth_config()/_run_smooth_start() 참고, GUI 스위치만 추가).
@@ -604,6 +619,7 @@ class PiperMonitorUI:
             self.task_var, self.num_episodes_var, self.policy_path_var,
             self.episode_time_var, self.reset_time_var, self.fps_var,
             self.push_to_hub_var, self.dataset_root_override_var,
+            self.timestamp_enabled_var,
         ):
             var.trace_add("write", self._refresh_command)
 
@@ -718,6 +734,11 @@ class PiperMonitorUI:
         self.btn_rviz = ttk.Button(btn_row, text="RViz Start", command=self._on_rviz_toggle)
         self.btn_rviz.pack(side="right", padx=4)
         self.rviz_status_var = tk.StringVar(value="RViz: off")
+
+        # Log Terminal — last_launch.log를 실시간 tail하는 터미널 창 on/off. RViz와
+        # 동일한 순수 토글 패턴, GUI 시작 시 자동으로 한 번 켜짐.
+        self.btn_log_terminal = ttk.Button(btn_row, text="Log Terminal Start", command=self._on_log_terminal_toggle)
+        self.btn_log_terminal.pack(side="right", padx=4)
         ttk.Label(btn_row, textvariable=self.rviz_status_var).pack(side="right", padx=(4, 8))
 
         self.can_rows_frame = ttk.Frame(can_frame)
@@ -858,6 +879,17 @@ class PiperMonitorUI:
         self.play_button = ttk.Button(frame, text="▶ Play", command=self._on_play_episode, width=8)
         self.play_button.pack(side="left", padx=(8, 2))
 
+        # RGB/Depth 카메라가 둘 다 녹화된 dataset을 재생할 때, 창에 4개(RGB 2 + Depth 2)가
+        # 한꺼번에 쌓이면 답답하니 Both/RGB only/Depth only로 필터링 — piper_replay_player.py/
+        # piper_replay_player_rviz.py에 --view로 그대로 전달됨(_on_play_episode 참고).
+        ttk.Label(frame, text="View:").pack(side="left", padx=(12, 4))
+        self.replay_view_var = tk.StringVar(value="both")
+        self.view_combo = ttk.Combobox(
+            frame, textvariable=self.replay_view_var, state="readonly", width=6,
+            values=["both", "rgb", "depth"],
+        )
+        self.view_combo.pack(side="left", padx=2)
+
         self.dataset_status_var = tk.StringVar(value="Click 'Refresh' to scan")
         ttk.Label(frame, textvariable=self.dataset_status_var).pack(side="left", padx=12)
 
@@ -918,9 +950,11 @@ class PiperMonitorUI:
         """RViz Start로 띄운 RViz가 살아있으면 piper_replay_player_rviz.py(RViz 동기화
         재생 + 자체 영상/패널 창)를, 없으면 기존 piper_replay_player.py(영상/패널
         창만, ROS2 불필요)를 띄움 — 두 스크립트 다 화면 구성이 동일한 스타일이라
-        RViz 유무로 창이 하나 더 늘지 않고 자연스럽게 바뀜."""
+        RViz 유무로 창이 하나 더 늘지 않고 자연스럽게 바뀜.
+        View 콤보박스(both/rgb/depth)는 두 스크립트 다 --view로 그대로 전달함."""
         dataset_root = self.replay_dataset_root_var.get().strip()
         episode = self.replay_episode_var.get().strip()
+        view = self.replay_view_var.get().strip() or "both"
 
         if not dataset_root or not episode:
             # 데이터셋이나 에피소드가 선택되지 않았으면 아무것도 하지 않음
@@ -934,6 +968,7 @@ class PiperMonitorUI:
                 sys.executable, str(script_path),
                 "--dataset_root", dataset_root,
                 "--episode", episode,
+                "--view", view,
             ]
         else:
             script_path = REPO_ROOT / "scripts" / "tools" / "piper_replay_player.py"
@@ -941,6 +976,7 @@ class PiperMonitorUI:
                 sys.executable, str(script_path),
                 "--dataset-root", dataset_root,
                 "--episode", episode,
+                "--view", view,
             ]
 
         # 윈도우에서는 CREATE_NEW_PROCESS_GROUP을, 다른 OS에서는 preexec_fn을 사용합니다.
@@ -1213,9 +1249,12 @@ class PiperMonitorUI:
     def _dataset_args(self, fps: str) -> list[str]:
         """5__record.sh의 dataset.* 인자와 동일한 fallback. Task/Num Episodes/Episode
         Time/Reset Time은 UI 입력값 사용(recording.env는 초기값으로만 씀).
-        scripts/5__record.sh와 동일하게, resume이 아니면 매번 월일-시분초 타임스탬프를
-        붙여서 이전 녹화 폴더를 덮어쓰지 않게 함. Task 텍스트는 repo_id/폴더명의
-        프로젝트명 세그먼트로도 반영됨(네임스페이스는 유지) — _task_slug() 참고."""
+        scripts/5__record.sh와 동일하게, resume이 아니고 "Timestamp Folder" 체크박스가
+        켜져 있으면 매번 월일-시분초 타임스탬프를 붙여서 이전 녹화 폴더를 덮어쓰지
+        않게 함(체크 해제 시 base 이름을 그대로 씀 — resume과 동일한 동작). 타임스탬프는
+        이 메서드가 실제로 호출되는 시점(Launch 클릭 직전, _on_launch() 참고) 기준.
+        Task 텍스트는 repo_id/폴더명의 프로젝트명 세그먼트로도 반영됨(네임스페이스는
+        유지) — _task_slug() 참고."""
         env = self.recording_env
         task = self.task_var.get().strip()
         num_episodes = self.num_episodes_var.get().strip()
@@ -1237,7 +1276,7 @@ class PiperMonitorUI:
         if override:
             dataset_root_base = override
 
-        if resume == "true":
+        if resume == "true" or not self.timestamp_enabled_var.get():
             dataset_repo_id = dataset_repo_id_base
             dataset_root = dataset_root_base
         else:
@@ -1395,6 +1434,10 @@ class PiperMonitorUI:
         return " ".join(args)
 
     def _on_launch(self):
+        # Command 미리보기는 마지막으로 필드가 바뀐 시점 기준이라 그 뒤로 시간이
+        # 지나면 타임스탬프가 낡을 수 있음 — Launch 클릭 순간 기준으로 한 번 더
+        # 재조립해서 dataset 폴더명의 타임스탬프가 실제 실행 시점과 맞게 함.
+        self._refresh_command()
         cmd = self.cmd_var.get().strip()
         if not cmd:
             self.bottom_var.set("No command to run")
@@ -1439,6 +1482,62 @@ class PiperMonitorUI:
             rc = self.script_proc.returncode
             self.script_proc = None
             self.root.after(0, self._proc_finished, rc)
+
+    # ---------------------------------------------------------- Log Terminal
+    def _on_log_terminal_toggle(self):
+        """RViz 토글과 동일한 패턴 — 순수 on/off라 버튼 하나로 토글."""
+        if self.log_terminal_proc is None:
+            self._start_log_terminal()
+        else:
+            self._stop_log_terminal()
+
+    def _start_log_terminal(self):
+        """last_launch.log를 tail -F로 실시간으로 보여주는 터미널 창을 띄움. GUI 자체는
+        subprocess stdout을 pipe로 읽어서 진행률 파싱에 써야 하는 구조라(_read_proc_output
+        참고) 콘솔을 직접 못 띄우는데, 그래서 실패 스택트레이스 같은 걸 실시간으로 못 보는
+        불편함이 있었음 — 이 창으로 그 로그를 그대로 보여줌. GUI 시작 시 자동으로 한 번
+        켜지고, 이 버튼으로 껐다 켤 수 있음.
+
+        `-n +1`(처음부터) 대신 `tail` 기본 동작(마지막 몇 줄부터 시작)을 그대로 써서
+        껐다 켤 때마다 항상 로그 맨 밑(최신 내용)부터 보이게 함. `--retry`는 아직
+        last_launch.log가 없어도(첫 Launch 전) 기다리게 함.
+
+        `gnome-terminal --wait`로 띄워서(자식이 끝날 때까지 대기) self.log_terminal_proc의
+        poll()로 창이 열려있는지 판단할 수 있게 함(RViz의 self.rviz_proc과 동일 패턴) —
+        `exec bash` 같은 걸로 셸을 안 남겨둬야 _stop_log_terminal()이 tail을 죽였을 때
+        창이 실제로 닫힘."""
+        log_path = REPO_ROOT / "last_launch.log"
+        tail_cmd = f"tail --retry -F {shlex.quote(str(log_path))}"
+        for terminal_args in (
+            ["gnome-terminal", "--wait", "--", "bash", "-c", tail_cmd],
+            ["x-terminal-emulator", "-e", "bash", "-c", tail_cmd],
+        ):
+            try:
+                self.log_terminal_proc = subprocess.Popen(
+                    terminal_args,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    preexec_fn=os.setsid if sys.platform != "win32" else None,
+                )
+                break
+            except FileNotFoundError:
+                continue
+        else:
+            self.bottom_var.set("로그 터미널 실행 실패 — gnome-terminal/x-terminal-emulator 없음")
+            return
+
+        self._log_terminal_tail_marker = str(log_path)
+        self.btn_log_terminal.config(text="Log Terminal Stop")
+
+    def _stop_log_terminal(self):
+        """실제 창(gnome-terminal-server가 띄운 것)은 이 프로세스 핸들로 직접 못 죽이므로
+        (client-server 구조라 self.log_terminal_proc은 --wait로 대기만 함), 창 안에서
+        돌아가는 tail 프로세스를 pkill로 죽여서 셸이 자연 종료 -> 창이 닫히게 함."""
+        if self.log_terminal_proc is None:
+            return
+        marker = getattr(self, "_log_terminal_tail_marker", None)
+        if marker:
+            subprocess.run(["pkill", "-f", marker], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.btn_log_terminal.config(state="disabled")
 
     def _read_proc_output(self, proc: subprocess.Popen):
         """실행 중인 subprocess의 stdout(stderr merge됨)을 계속 읽으면서
@@ -1821,6 +1920,11 @@ class PiperMonitorUI:
             self.btn_rviz.config(text="RViz Start", state="normal")
             self.rviz_status_var.set("RViz: off")
 
+        # Log Terminal 창을 X로 직접 닫은 경우(버튼을 안 거친 경우)에도 상태를 맞춤
+        if self.log_terminal_proc and self.log_terminal_proc.poll() is not None:
+            self.log_terminal_proc = None
+            self.btn_log_terminal.config(text="Log Terminal Start", state="normal")
+
         self.root.after(50, self._update_ui)
 
     # ---------------------------------------------------------- Close
@@ -1835,6 +1939,8 @@ class PiperMonitorUI:
         if self.rviz_proc:
             self._stop_rviz()
             time.sleep(0.5)
+        if self.log_terminal_proc:
+            self._stop_log_terminal()
         self.root.destroy()
 
     def run(self):

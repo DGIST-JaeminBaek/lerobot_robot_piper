@@ -108,11 +108,15 @@ WEGO 원본은 leader action을 그대로 follower goal로 보냅니다. 이 레
 
 **의미**: leader/follower 시작 자세 차이를 자동으로 흡수하고, 프로그램 재시작 후에도 follower가 현재 자세 기준으로 이어서 움직입니다. Offset report로 시작 자세 차이가 큰 joint를 확인할 수 있습니다.
 
+**기록되는 값**(2026-07-24): lerobot의 `lerobot_record.py`는 원래 이 offset이 적용되기 전의 teleop 원본 값을 데이터셋 `action` 컬럼에 저장하고 있었다(`robot.send_action()`이 실제로 리턴하는, offset 적용 완료된 값을 무시). 이 레포가 쓰는 로컬 lerobot clone에서는 이를 고쳐서, 이제 `action` 컬럼에는 offset이 적용된 뒤 follower에 실제로 내려간 절대 목표값이 저장된다. 이 수정 이전에 녹화된 데이터셋은 여전히 leader raw 기준이라 섞어서 학습하지 않도록 주의(자세한 내용은 [docs/depth/README.md](depth/README.md) 8번 항목 참고 — depth 백포트와 같은 lerobot clone에 적용된 패치라 같이 문서화함).
+
 ## 5. RealSense 동시 사용 안정화
 
 WEGO 원본은 camera별 기본 `connect()`를 그대로 호출합니다. 이 레포는 warmup 여부와 post-connect wait를 설정으로 제어합니다(`camera_connect_warmup`, `camera_post_connect_wait_s`, `realsense_warmup_s`).
 
 **의미**: RealSense 두 대를 동시에 쓸 때 stream 시작 순서/warmup으로 인한 timeout 문제를 줄입니다.
+
+**병렬 connect() 재검증**(2026-07-24): 카메라 2대를 순차로 `connect()`하면 `warmup_s`(기본 10초)가 카메라 수만큼 곱해져 20초 이상 걸린다. 예전에 병렬 연결을 시도했다가 실제 하드웨어에서 실패해 순차로 되돌렸었는데, 그 원인이 USB 대역폭 경합이 아니라 당시 CPU 쿨링 문제였을 가능성이 있어 `scripts/tools/camera_parallel_connect_test.py`(로봇 없이 카메라만 테스트)로 재검증했다. 3회 연속 성공(~10.3~10.4초, 카메라 1대 warmup_s와 거의 동일 — 실제로 병렬로 겹쳐서 도는 것 확인)해서 `PiperFollower.connect()`를 다시 병렬로 되돌렸다. 나중에 같은 실패가 재현되면 `piper_follower.py`의 해당 부분을 순차 for 루프로 되돌릴 것.
 
 ## 6. Bimanual(양팔) Piper 지원 — WEGO 원본에 없는 기능
 
