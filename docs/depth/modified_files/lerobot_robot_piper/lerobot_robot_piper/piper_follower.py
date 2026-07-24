@@ -230,7 +230,8 @@ class PiperFollower(Robot):
                     self._report_action_offset(goal_pos, present_pos, self._action_offset)
                     self._action_offset_start_time = None
 
-            # follower 현재 자세 기준 상대 추종
+            # follower 현재 자세 기준 상대 추종:
+            # leader 절대 자세로 점프하지 않고, leader의 이동 변화량을 follower 현재 자세에 얹는다.
             goal_pos = {key: val + self._action_offset.get(key, 0.0) for key, val in goal_pos.items()}
 
         # Cap goal position when too far away from present position.

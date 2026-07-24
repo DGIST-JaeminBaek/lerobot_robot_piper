@@ -1,6 +1,12 @@
-# FK/IK 검증 — 로봇 켜고 간단히 확인하는 법
+# FK/IK 검증 — 완료 기록과 재확인 방법
 
-## 배경 (오늘 소프트웨어만으로 이미 확인한 것)
+## 검증 결과
+
+`scripts/tools/kinematics_check.py`로 팔 펌웨어가 CAN으로 직접 보고하는 EEF 피드백(`GetArmEndPoseMsgs()`)과 SDK 계산(`CalFK`/`GetFK`)을 실물 로봇에서 비교했고, 검증을 완료했다.
+
+따라서 현재 컨벤션에서는 `CalFK()`/`GetFK()` 계산값을 EEF state/action 계산에 사용해도 된다. 자세한 오차 수치는 별도 실험 로그가 있으면 이 문서에 추가한다.
+
+## 배경 (소프트웨어만으로 먼저 확인했던 것)
 
 RViz/EEF 관련 논의에서 확인된 것들 — 전부 **하드웨어 없이** 소스/문서 대조로 검증됨:
 
@@ -10,9 +16,9 @@ RViz/EEF 관련 논의에서 확인된 것들 — 전부 **하드웨어 없이**
 4. RViz가 쓰는 URDF(`agx_arm_urdf`의 `piper_description.urdf`)로 `ikpy` FK를 돌린 결과가 `piper_sdk`의 `CalFK`와 zero-config 기준 0.1mm 이하 오차로 일치함
 5. `GetFK(mode="feedback"/"control")`은 각각 `GetArmJointMsgs`/`GetArmJointCtrl` 값을 받아 `CalFK()`를 호출하는 것뿐임(소스로 확인)
 
-**아직 확인 안 된 것**: 팔 펌웨어가 CAN으로 직접 보고하는 EEF 피드백(`GetArmEndPoseMsgs()`)이 위 SDK 계산(`CalFK`/`GetFK`)과 실제로 같은 값을 주는지. 이론상(시리얼 로봇팔은 EEF 위치 센서가 없어 펌웨어도 내부적으로 joint encoder → FK 계산을 할 수밖에 없음) 같아야 하지만, 펌웨어 내부 구현은 소스로 볼 수 없어서 **실측으로만 확인 가능**.
+이후 팔 펌웨어가 CAN으로 직접 보고하는 EEF 피드백(`GetArmEndPoseMsgs()`)도 실측으로 확인했다.
 
-## 사용법
+## 재확인 방법
 
 **GUI(`teleop_ui.py`/`piper-teleop`)는 안 켜도 됨** — 이 스크립트는 `piper_sdk`로 CAN 포트에 직접 연결하는 독립 스크립트라, GUI/`lerobot-record`/`lerobot-teleoperate` 등 다른 프로세스가 안 떠 있어도 그대로 실행 가능함.
 

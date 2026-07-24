@@ -12,15 +12,15 @@
 - **CAN Bus Communication**: `piper_sdk`, `wego_piper` 기반 하드웨어 제어
 - **Safety Limits**: `max_relative_target`으로 timestep별 joint 이동량 제한
 - **Camera Integration**: OpenCV/Intel RealSense 카메라를 follower observation으로 기록
-- **Depth Recording**: Intel RealSense depth 스트림을 12-bit 로그 양자화 + HEVC lossless로 LeRobotDataset에 함께 기록 (LeRobot 0.6.0의 공식 depth 지원을 0.4.x 저장 구조에 맞게 백포트, [docs/depth/README.md](docs/depth/README.md) 참고)
+- **Depth Recording**: Intel RealSense depth 스트림을 12-bit 로그 양자화 + HEVC lossless로 LeRobotDataset에 함께 기록 (LeRobot 0.6.0의 공식 depth 지원을 현재 검증된 LeRobot v0.4.4 저장 구조에 맞게 백포트, [docs/depth/README.md](docs/depth/README.md) 참고)
 - **통합 GUI**: Teleoperation, 녹화, RViz 연동, 데이터셋 뷰어를 하나의 GUI로 통합 (`0__launch_gui.sh`)
 - **GUI Tools**: `piper-ui`, `piper-teleop`, `piper-calibrate` 제공
 - **Experiment Scripts**: CAN 초기화부터 record/train/async 실행까지 번호형 스크립트 제공
 
 ## 요구 사항
 
-- **Ubuntu 22.04 (Jammy) + Python 3.10** — ROS2 Humble의 공식 타겟 플랫폼 조합이자 `piper_sdk` 공식 저장소가 지원을 확인한 조합. RViz 연동 도구(`rclpy`)가 시스템 Python 3.10 빌드에 묶여 있어 다른 Python 버전으로는 동작하지 않음
-- LeRobot 0.4.x (0.4.0~0.4.4 전부 `Requires-Python: >=3.10`, 0.5.0부터 `>=3.12`로 올라가 3.10 환경엔 설치 자체가 안 됨 — PyPI 메타데이터로 확인)
+- **Ubuntu 22.04 (Jammy) + Python 3.10** — 현재 실제 동작을 확인한 Python 버전은 3.10뿐입니다. ROS2 Humble의 공식 타겟 플랫폼 조합이자 `piper_sdk` 공식 저장소가 지원을 확인한 조합이며, RViz 연동 도구(`rclpy`)도 시스템 Python 3.10 빌드에 묶여 있어 다른 Python 버전은 검증 대상이 아닙니다.
+- **LeRobot v0.4.4** — 현재 코드와 depth 백포트는 로컬 LeRobot clone v0.4.4에 맞춰 검증된 상태입니다. 0.4.x의 다른 버전은 구조가 비슷하더라도 별도 diff 검토와 재검증이 필요하며, 0.5.0부터는 Python 3.12 요구로 이 프로젝트의 Python 3.10 환경과 맞지 않습니다.
 - [`piper_sdk`](https://github.com/agilexrobotics/piper_sdk)
 - [`wego_piper`](https://github.com/agilexrobotics/wego_piper)
 - Piper arm 및 CAN-USB interface
@@ -219,28 +219,6 @@ python -m lerobot.teleoperate \
     --teleop.discover_packages_path=lerobot_robot_piper
 ```
 
-## Bimanual LeRobot CLI
-
-통합 GUI(`piper-teleop`)의 CAN Setup 패널로 네 개의 CAN 포트를 감지/역할 판별하고 이름을 고정한 뒤, bimanual wrapper 타입으로 실행합니다:
-
-```bash
-lerobot-teleoperate \
-    --robot.type=bi_piper_follower \
-    --robot.left_arm_config.port=can_follower1 \
-    --robot.right_arm_config.port=can_follower2 \
-    --robot.id=bimanual_piper_follower \
-    --teleop.type=bi_piper_leader \
-    --teleop.left_arm_config.port=can_leader1 \
-    --teleop.right_arm_config.port=can_leader2 \
-    --teleop.id=bimanual_piper_leader \
-    --display_data=true
-```
-
-Bimanual observations and actions are prefixed with `left_` and `right_`, for
-example `left_joint1.pos` and `right_joint1.pos`.
-
----
-
 ## Configuration
 
 ### `PiperFollowerConfig`
@@ -293,10 +271,6 @@ Parking pose의 normalized 값은 `0, -100, 100, 0, 0, -13.04, 0`입니다 (`mot
 ```text
 .
 ├── lerobot_robot_piper/        # LeRobot plugin source
-│   ├── bi_piper_follower.py     # BiPiperFollower (two follower arms)
-│   ├── bi_piper_leader.py       # BiPiperLeader (two leader arms)
-│   ├── config_bi_piper.py       # BiPiperFollowerConfig
-│   ├── config_bi_piper_leader.py # BiPiperLeaderConfig
 │   ├── config_piper.py          # PiperFollowerConfig
 │   ├── config_piper_leader.py   # PiperLeaderConfig
 │   ├── piper_follower.py        # PiperFollower (Robot)

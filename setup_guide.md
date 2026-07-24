@@ -7,7 +7,7 @@
 권장 환경:
 
 - Ubuntu 22.04 또는 호환 Linux 환경
-- Python >= 3.10
+- Python 3.10 (현재 정상 동작을 확인한 Python 버전은 3.10뿐)
 - CAN-USB adapter 2개
 - Piper leader arm, Piper follower arm
 - 선택: OpenCV camera 또는 Intel RealSense camera
@@ -24,6 +24,9 @@ LeRobot과 플러그인을 설치합니다.
 ```bash
 pip install -e .
 ```
+
+현재 프로젝트는 LeRobot v0.4.4에 맞춰 검증된 상태입니다. 0.4.x의 다른 버전은
+비슷한 저장 구조를 쓰더라도 별도 diff 검토와 재검증이 필요합니다.
 
 설치 확인:
 
