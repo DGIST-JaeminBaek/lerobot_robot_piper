@@ -514,6 +514,23 @@ class PiperMonitorUI:
         ttk.Entry(timing_row, textvariable=self.smooth_frames_var, width=5).pack(side="left", padx=2)
         ttk.Label(timing_row, text="frames").pack(side="left", padx=(0, 4))
 
+        # observation 확장 토글 — 기본 OFF, 데이터셋 스키마가 바뀌므로 같은 데이터셋
+        # 안에서 켰다 껐다 섞지 말 것(_camera_args()에서 --robot.use_effort/
+        # use_depth_observation로 반영). depth는 REALSENSE_USE_DEPTH(카메라 스트림
+        # 자체)가 꺼져 있으면 이 체크박스를 켜도 효과 없음.
+        self.use_effort_var = tk.BooleanVar(
+            value=(self.recording_env.get("USE_EFFORT") or "false").lower() == "true"
+        )
+        ttk.Checkbutton(timing_row, text="Record Effort", variable=self.use_effort_var).pack(
+            side="left", padx=(12, 2)
+        )
+        self.use_depth_var = tk.BooleanVar(
+            value=(self.recording_env.get("USE_DEPTH_OBSERVATION") or "false").lower() == "true"
+        )
+        ttk.Checkbutton(timing_row, text="Record Depth", variable=self.use_depth_var).pack(
+            side="left", padx=(4, 2)
+        )
+
         # Dataset Root 수동 지정 — 비어 있으면 기존 방식(recording.env DATASET_ROOT + task
         # slug 치환)을 그대로 씀. Browse로 직접 고르면 이 값을 최우선으로 씀
         # (_dataset_args 참고). 우분투에서도 GTK 네이티브 폴더 선택 다이얼로그로 뜸.
@@ -1127,6 +1144,8 @@ class PiperMonitorUI:
             "RESET_TIME_S": self.reset_time_var.get().strip(),
             "PUSH_TO_HUB": "true" if self.push_to_hub_var.get() else "false",
             "SMOOTH_START_FRAMES": self.smooth_frames_var.get().strip() if self.smooth_enabled_var.get() else "0",
+            "USE_EFFORT": "true" if self.use_effort_var.get() else "false",
+            "USE_DEPTH_OBSERVATION": "true" if self.use_depth_var.get() else "false",
         }
         if self.dataset_root_override_var.get().strip():
             updates["DATASET_ROOT"] = self.dataset_root_override_var.get().strip()
@@ -1181,7 +1200,26 @@ class PiperMonitorUI:
             f"--robot.camera_post_connect_wait_s={env.get('CAMERA_POST_CONNECT_WAIT_S') or '2.0'}",
             f"--robot.top_realsense_use_depth={env.get('TOP_REALSENSE_USE_DEPTH') or realsense_use_depth}",
             f"--robot.wrist_realsense_use_depth={env.get('WRIST_REALSENSE_USE_DEPTH') or realsense_use_depth}",
+            *self._observation_toggle_args(),
         ]
+
+    def _observation_toggle_args(self) -> list[str]:
+        """effort/depth observation 확장 토글. Record preset 체크박스가 recording.env
+        값보다 우선함(Task/Num Episodes 등 다른 GUI 입력값과 동일한 원칙).
+        effort 안전 컷오프(safety_enabled/safety_effort_limit)는 여기가 아니라
+        _robot_safety_args()에 있음 — Teleoperate/Replay도 커버해야 해서 그쪽으로 합침."""
+        env = self.recording_env
+        use_effort = "true" if self.use_effort_var.get() else "false"
+        use_depth = "true" if self.use_depth_var.get() else "false"
+        args = [
+            f"--robot.use_effort={use_effort}",
+            f"--robot.use_depth_observation={use_depth}",
+            f"--robot.depth_min_m={env.get('DEPTH_MIN_M') or '0.20'}",
+            f"--robot.depth_max_m={env.get('DEPTH_MAX_M') or '0.80'}",
+        ]
+        if env.get("DEPTH_RAW_DIR"):
+            args.append(f"--robot.depth_raw_dir={env['DEPTH_RAW_DIR']}")
+        return args
 
     def _action_offset_args(self) -> list[str]:
         """robot_action_offset_args()(run_common.sh)와 동일한 fallback."""
@@ -1203,11 +1241,18 @@ class PiperMonitorUI:
         ]
 
     def _robot_safety_args(self) -> list[str]:
-        """robot_safety_args()(run_common.sh)와 동일한 fallback."""
+        """robot_safety_args()(run_common.sh)와 동일한 fallback.
+        Teleoperate/Record/Infer/Replay 네 커맨드 전부가 이 함수 하나만 공유함 —
+        effort 안전 컷오프(safety_enabled/safety_effort_limit)도 여기 넣어야
+        "지우개 순간 로봇팔이 뻗는" 사고가 난 Replay 경로까지 확실히 적용된다.
+        (이전엔 _observation_toggle_args()에만 있어서 Record/Infer만 커버했음 —
+        Teleoperate/Replay는 PiperFollowerConfig 기본값(ON, 8.0)에만 의존했었다.)"""
         env = self.recording_env
         return [
             f"--robot.max_relative_target={env.get('MAX_RELATIVE_TARGET') or '5.0'}",
             f"--robot.disable_torque_on_disconnect={env.get('DISABLE_TORQUE_ON_DISCONNECT') or 'true'}",
+            f"--robot.safety_enabled={(env.get('SAFETY_ENABLED') or 'true').lower()}",
+            f"--robot.safety_effort_limit={env.get('SAFETY_EFFORT_LIMIT') or '8.0'}",
         ]
 
     def _dataset_args(self, fps: str) -> list[str]:
@@ -1317,14 +1362,6 @@ class PiperMonitorUI:
             "--teleop.discover_packages_path=lerobot_robot_piper",
         ]
         return " ".join(args)
-
-    def _robot_safety_args(self) -> list[str]:
-        """scripts/lib/run_common.sh의 robot_safety_args()와 동일한 fallback."""
-        env = self.recording_env
-        return [
-            f"--robot.max_relative_target={env.get('MAX_RELATIVE_TARGET') or '5.0'}",
-            f"--robot.disable_torque_on_disconnect={env.get('DISABLE_TORQUE_ON_DISCONNECT') or 'true'}",
-        ]
 
     def _build_replay_real_command(self) -> str:
         """Dataset Browser에서 고른 dataset/episode를 lerobot-replay로 실제
@@ -1657,13 +1694,26 @@ class PiperMonitorUI:
             self.bottom_var.set(f"키 입력 전송 실패: {e}")
             return False
 
+    def _send_exit_early_and_skip_reset(self) -> bool:
+        """오른쪽 화살표(exit_early)를 두 번 보냄 — lerobot-record의 에피소드
+        상태 머신은 Episode 녹화 중 오른쪽 화살표 = "지금까지만 저장하고 Reset
+        단계로", Reset 단계 중 오른쪽 화살표 = "남은 Reset 대기 스킵하고 바로
+        다음 Episode 녹화 시작" 이라 두 번 눌러야 "저장하자마자 바로 다음 녹화
+        가능"이 됨. 두 번째 입력이 상태 전환 직후 타이밍에 씹히지 않도록 짧은
+        딜레이를 둠 — 정확한 간격은 실물 검증 후 조정 필요."""
+        if not self._send_lerobot_hotkey("right"):
+            return False
+        self.root.after(800, lambda: self._send_lerobot_hotkey("right"))
+        return True
+
     def _on_end_episode_now(self):
         """"여기까지만 저장" 버튼 — 현재 에피소드를 지금까지 녹화된 만큼만 저장하고
-        조기 종료. 실물 검증 전까지는 결과를 GUI에서 눈으로 확인(진행률/로그)할 것."""
+        조기 종료한 뒤, Reset 대기도 건너뛰고 바로 다음 에피소드 녹화를 시작.
+        실물 검증 전까지는 결과를 GUI에서 눈으로 확인(진행률/로그)할 것."""
         if not self.script_proc:
             return
-        if self._send_lerobot_hotkey("right"):
-            self.bottom_var.set("현재 에피소드 조기 종료 요청 전송 — 로그/진행률로 실제 저장 확인하세요.")
+        if self._send_exit_early_and_skip_reset():
+            self.bottom_var.set("현재 에피소드 조기 종료 + 다음 에피소드 즉시 시작 요청 전송 — 로그/진행률로 확인하세요.")
 
     def _on_capture_parking(self):
         """CAN Monitor가 켜져 있고 '리더' 팔을 손으로 parking 자세 근처(follower의
@@ -1700,8 +1750,9 @@ class PiperMonitorUI:
         ]
         if diffs and max(diffs) <= threshold:
             self._parking_triggered_episode = True
-            if self._send_lerobot_hotkey("right"):
-                self.bottom_var.set("리더 팔이 parking 근접 — 에피소드 자동 종료 요청 전송")
+            # parking에 왔다는 건 이미 리셋된 상태로 볼 수 있어서 Reset 대기도 같이 스킵.
+            if self._send_exit_early_and_skip_reset():
+                self.bottom_var.set("리더 팔이 parking 근접 — 에피소드 종료 + 다음 에피소드 즉시 시작 요청 전송")
 
     # ---------------------------------------------------------- CAN Monitor
     def _on_mon_start(self):

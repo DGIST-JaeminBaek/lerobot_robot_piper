@@ -40,6 +40,34 @@ class PiperFollowerConfig(RobotConfig):
     top_realsense_use_depth: bool = False
     wrist_realsense_use_depth: bool = False
 
+    # observation에 관절별 effort(전류 기반 추정 토크, N·m) 포함 여부.
+    # piper_sdk의 current-derived 값이라 자세에 따른 중력/마찰 성분이 섞여 있음(진짜 토크 센서 아님).
+    use_effort: bool = False
+
+    # observation에 depth(turbo 컬러맵) 이미지 포함 여부. 카메라별 RealSense
+    # use_depth(realsense_use_depth 등)가 켜진 카메라에 한해서만 적용됨 —
+    # 이게 꺼져 있으면 depth 스트림 자체가 없어서 무시된다.
+    use_depth_observation: bool = False
+    depth_min_m: float = 0.20
+    depth_max_m: float = 0.80
+    # RealSense depth unit. D400 계열 기본 0.001(=1mm) — 실제 장비에서 재확인 필요.
+    depth_scale: float = 0.001
+    # turbo 컬러맵(8bit, dmax-dmin 범위를 256단계로 양자화)은 Evo-Depth IDEM의 보조
+    # supervision으로 쓰기엔 정밀도가 부족할 수 있음(예: 0.6m 범위면 계단당 ~2.3mm).
+    # 채워두면 raw uint16 depth(미터 변환 전, depth_scale 곱하기 전 원본)를 프레임마다
+    # <depth_raw_dir>/<cam>/<session-global index>_<unix time>.npy로 추가 저장.
+    # 세션 전체에 걸친 순번이라 에피소드별 frame_index와 정확히 대응하진 않음 —
+    # 나중에 매칭하려면 파일명의 unix time을 데이터셋 타임스탬프와 맞출 것. 재수집이
+    # 어려운 1회성 촬영이라 정밀도 부족이 드러난 뒤엔 늦으므로 미리 켜두는 걸 권장.
+    depth_raw_dir: str = ""
+
+    # 실시간 안전 컷오프(NEXT와 무관, use_effort OFF여도 항상 독립 동작).
+    # 리플레이/정책 출력이 관절 명령으로 변환되어 로봇에 나가기 직전(send_action)에 검사.
+    safety_enabled: bool = True
+    # N·m. get_effort()가 current 기반 추정치라 절대 토크값이 아니므로, 처음엔 보수적으로
+    # 잡고 랩 PC에서 자유운동(무접촉) 시 관측되는 effort 노이즈 상한을 본 뒤 튜닝할 것.
+    safety_effort_limit: float = 8.0
+
     # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
     # Set this to a positive scalar to have the same value for all motors, or a dictionary that maps motor
     # names to the max_relative_target value for that motor.

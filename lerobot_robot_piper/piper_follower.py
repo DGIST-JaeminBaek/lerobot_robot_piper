@@ -5,6 +5,8 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from lerobot.cameras import Camera
 from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.utils.errors import DeviceNotConnectedError
@@ -13,6 +15,7 @@ from lerobot.robots import Robot
 from lerobot.robots.utils import ensure_safe_goal_position
 
 from .config_piper import PiperFollowerConfig
+from .depth_utils import depth_to_colormap
 from .motors import PiperMotorsBus
 
 logger = logging.getLogger(__name__)
@@ -66,14 +69,39 @@ class PiperFollower(Robot):
         return {f"{motor}.pos": float for motor in self.bus.motors}
 
     @property
+    def _effort_ft(self) -> dict[str, type]:
+        if not self.config.use_effort:
+            return {}
+        return {f"{motor}.effort": float for motor in self.bus.motors}
+
+    @property
+    def _velocity_ft(self) -> dict[str, type]:
+        # NEXT(외력 추정)는 effort와 같은 타임스탬프의 속도가 필요 — 별도 플래그를
+        # 늘리지 않고 use_effort에 묶어서 같이 켠다. 그리퍼는 SDK에 motor_speed가 없음.
+        if not self.config.use_effort:
+            return {}
+        return {f"{motor}.vel": float for motor in self.bus.motors if motor != "gripper"}
+
+    @property
+    def _depth_cam_keys(self) -> list[str]:
+        # RealSense depth 스트림 자체(realsense_use_depth 등)가 켜진 카메라만 대상.
+        # use_depth_observation이 꺼져 있으면 스트림이 있어도 observation엔 안 넣음.
+        if not self.config.use_depth_observation:
+            return []
+        return [cam for cam, obj in self.cameras.items() if getattr(obj, "use_depth", False)]
+
+    @property
     def _cameras_ft(self) -> dict[str, tuple]:
-        return {
-            cam: (self.cameras[cam].height, self.cameras[cam].width, 3) for cam in self.cameras
-        }
+        ft = {cam: (self.cameras[cam].height, self.cameras[cam].width, 3) for cam in self.cameras}
+        for cam in self._depth_cam_keys:
+            ft[f"{cam}_depth"] = (self.cameras[cam].height, self.cameras[cam].width, 3)
+        return ft
 
     @cached_property
     def observation_features(self) -> dict:
-        return {**self._motors_ft, **self._cameras_ft}
+        # lerobot의 hw_to_dataset_features()가 float 타입 키를 전부 observation.state로
+        # 합치므로, effort는 별도 스키마 배선 없이 .pos 옆에 얹히기만 하면 됨(TA-VLA STATE/DePre와 동일 취급).
+        return {**self._motors_ft, **self._effort_ft, **self._velocity_ft, **self._cameras_ft}
 
     @cached_property
     def action_features(self) -> dict:
@@ -132,6 +160,34 @@ class PiperFollower(Robot):
         self.bus.connect()
         self.bus.set_slave()
 
+    def _read_depth_colormap(self, cam_key: str, cam) -> Any:
+        # lerobot RealSenseCamera는 async_read()가 color만 반환하고 depth용 공개 API가
+        # 없음(코어 소스에 "Missing implementation for depth for now" 표시됨) — background
+        # read thread가 채워두는 latest_depth_frame을 frame_lock으로 직접 읽는다.
+        # lerobot 코어가 depth API를 추가하면 이 부분을 그쪽으로 교체할 것.
+        with cam.frame_lock:
+            depth_raw = cam.latest_depth_frame
+        if depth_raw is None:
+            raise RuntimeError(f"{cam} has no depth frame yet (warmup 중이거나 use_depth 미설정).")
+        if self.config.depth_raw_dir:
+            self._save_raw_depth(cam_key, depth_raw)
+        return depth_to_colormap(
+            depth_raw,
+            depth_scale=self.config.depth_scale,
+            dmin=self.config.depth_min_m,
+            dmax=self.config.depth_max_m,
+        )
+
+    def _save_raw_depth(self, cam_key: str, depth_raw) -> None:
+        # 세션 전체(에피소드 무관) 단조 증가 인덱스 + wall-clock time으로 저장.
+        # dataset의 frame_index와 정확히 대응하지 않으니, 나중에 맞출 땐 파일명의
+        # unix time을 데이터셋 타임스탬프 쪽과 매칭할 것.
+        idx = getattr(self, "_depth_raw_idx", 0)
+        out_dir = Path(self.config.depth_raw_dir) / cam_key
+        out_dir.mkdir(parents=True, exist_ok=True)
+        np.save(out_dir / f"{idx:08d}_{time.time():.6f}.npy", depth_raw)
+        self._depth_raw_idx = idx + 1
+
     def get_observation(self) -> dict[str, Any]:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
@@ -145,6 +201,12 @@ class PiperFollower(Robot):
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
+        if self.config.use_effort:
+            effort = self.bus.get_effort()
+            obs_dict.update({f"{motor}.effort": val for motor, val in effort.items()})
+            velocity = self.bus.get_velocity()
+            obs_dict.update({f"{motor}.vel": val for motor, val in velocity.items()})
+
         # Capture images from cameras (parallel)
         if self.cameras:
             futures = {
@@ -155,6 +217,9 @@ class PiperFollower(Robot):
                 obs_dict[cam_key] = future.result()
                 dt_ms = (time.perf_counter() - start) * 1e3
                 logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+
+                if cam_key in self._depth_cam_keys:
+                    obs_dict[f"{cam_key}_depth"] = self._read_depth_colormap(cam_key, self.cameras[cam_key])
 
         return obs_dict
 
@@ -202,7 +267,23 @@ class PiperFollower(Robot):
             goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
             goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
 
+        # 실시간 안전 컷오프. use_effort(데이터셋 로깅 플래그)와 무관하게 항상 동작 —
+        # get_effort()를 여기서 직접 읽는다. 리플레이/정책 출력이 관절 명령으로 바뀌어
+        # 로봇에 나가는 지점이 바로 이 set_action 직전이라 여기서 끊는다.
+        # 컴플라이언스(MIT 모드) 전환 대신 우선은 이 스텝의 명령을 그냥 보류(마지막으로
+        # 실제 전송된 목표를 유지) — 컴플라이언스 kp/kd 튜닝은 다음 단계.
+        if self.config.safety_enabled:
+            effort = self.bus.get_effort()
+            if self.bus.is_overloaded(effort, self.config.safety_effort_limit):
+                logger.warning(
+                    f"{self} safety cutoff: effort {effort} exceeds "
+                    f"{self.config.safety_effort_limit} N·m, holding last commanded position"
+                )
+                held_pos = getattr(self, "_last_sent_goal_pos", None) or self.bus.get_action()
+                return {f"{motor}.pos": val for motor, val in held_pos.items()}
+
         self.bus.set_action(goal_pos, is_conv=True)
+        self._last_sent_goal_pos = goal_pos
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
 
     def _manual_action_offset(self, goal_pos: dict[str, float]) -> dict[str, float]:
