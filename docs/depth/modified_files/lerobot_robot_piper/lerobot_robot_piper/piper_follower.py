@@ -79,20 +79,6 @@ class PiperFollower(Robot):
         return {f"{motor}.pos": float for motor in self.bus.motors}
 
     @property
-    def _effort_ft(self) -> dict[str, type]:
-        if not self.config.use_effort:
-            return {}
-        return {f"{motor}.effort": float for motor in self.bus.motors}
-
-    @property
-    def _velocity_ft(self) -> dict[str, type]:
-        # NEXT(외력 추정)는 effort와 같은 타임스탬프의 속도가 필요 — 별도 플래그를
-        # 늘리지 않고 use_effort에 묶어서 같이 켠다. 그리퍼는 SDK에 motor_speed가 없음.
-        if not self.config.use_effort:
-            return {}
-        return {f"{motor}.vel": float for motor in self.bus.motors if motor != "gripper"}
-
-    @property
     def _cameras_ft(self) -> dict[str, tuple]:
         features = {}
         for cam_key, cam in self.cameras.items():
@@ -103,9 +89,7 @@ class PiperFollower(Robot):
 
     @cached_property
     def observation_features(self) -> dict:
-        # lerobot의 hw_to_dataset_features()가 float 타입 키를 전부 observation.state로
-        # 합치므로, effort는 별도 스키마 배선 없이 .pos 옆에 얹히기만 하면 됨(TA-VLA STATE/DePre와 동일 취급).
-        return {**self._motors_ft, **self._effort_ft, **self._velocity_ft, **self._cameras_ft}
+        return {**self._motors_ft, **self._cameras_ft}
 
     @cached_property
     def action_features(self) -> dict:
@@ -187,12 +171,6 @@ class PiperFollower(Robot):
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
-        if self.config.use_effort:
-            effort = self.bus.get_effort()
-            obs_dict.update({f"{motor}.effort": val for motor, val in effort.items()})
-            velocity = self.bus.get_velocity()
-            obs_dict.update({f"{motor}.vel": val for motor, val in velocity.items()})
-
         # Capture images from cameras (parallel) — RGB와 depth를 각각 순차 단계로
         # 나눠 제출하면 (RGB 전부 끝날 때까지 depth를 시작조차 안 해서) 두 단계
         # 시간이 그대로 더해짐(실측 25ms+33ms≈58ms, 목표 33ms의 거의 2배) —
@@ -263,25 +241,9 @@ class PiperFollower(Robot):
             goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
             goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
 
-        # 실시간 안전 컷오프. use_effort(데이터셋 로깅 플래그)와 무관하게 항상 동작 —
-        # get_effort()를 여기서 직접 읽는다. 리플레이/정책 출력이 관절 명령으로 바뀌어
-        # 로봇에 나가는 지점이 바로 이 set_action 직전이라 여기서 끊는다.
-        # 컴플라이언스(MIT 모드) 전환 대신 우선은 이 스텝의 명령을 그냥 보류(마지막으로
-        # 실제 전송된 목표를 유지) — 컴플라이언스 kp/kd 튜닝은 다음 단계.
-        if self.config.safety_enabled:
-            effort = self.bus.get_effort()
-            if self.bus.is_overloaded(effort, self.config.safety_effort_limit):
-                logger.warning(
-                    f"{self} safety cutoff: effort {effort} exceeds "
-                    f"{self.config.safety_effort_limit} N·m, holding last commanded position"
-                )
-                held_pos = getattr(self, "_last_sent_goal_pos", None) or self.bus.get_action()
-                return {f"{motor}.pos": val for motor, val in held_pos.items()}
-
         _t0 = time.perf_counter()
         self.bus.set_action(goal_pos, is_conv=True)
         logger.debug(f"{self} set_action: {(time.perf_counter() - _t0) * 1e3:.1f}ms")
-        self._last_sent_goal_pos = goal_pos
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
 
     def _manual_action_offset(self, goal_pos: dict[str, float]) -> dict[str, float]:

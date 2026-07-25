@@ -7,7 +7,7 @@ import threading
 import time
 import sys
 
-CELL_W, CELL_H = 320, 240
+CELL_W, CELL_H = 1280, 720
 MAX_INDEX = 18  # scan video0..video17
 
 

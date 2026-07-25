@@ -48,22 +48,11 @@ class PiperFollowerConfig(RobotConfig):
     # 7차원으로 학습한 옛 체크포인트를 돌릴 때만 false로 내릴 것.
     use_effort: bool = True
 
-    # observation에 depth(turbo 컬러맵) 이미지 포함 여부. 카메라별 RealSense
-    # use_depth(realsense_use_depth 등)가 켜진 카메라에 한해서만 적용됨 —
-    # 이게 꺼져 있으면 depth 스트림 자체가 없어서 무시된다.
-    use_depth_observation: bool = False
-    depth_min_m: float = 0.20
-    depth_max_m: float = 0.80
-    # RealSense depth unit. D400 계열 기본 0.001(=1mm) — 실제 장비에서 재확인 필요.
-    depth_scale: float = 0.001
-    # turbo 컬러맵(8bit, dmax-dmin 범위를 256단계로 양자화)은 Evo-Depth IDEM의 보조
-    # supervision으로 쓰기엔 정밀도가 부족할 수 있음(예: 0.6m 범위면 계단당 ~2.3mm).
-    # 채워두면 raw uint16 depth(미터 변환 전, depth_scale 곱하기 전 원본)를 프레임마다
-    # <depth_raw_dir>/<cam>/<session-global index>_<unix time>.npy로 추가 저장.
-    # 세션 전체에 걸친 순번이라 에피소드별 frame_index와 정확히 대응하진 않음 —
-    # 나중에 매칭하려면 파일명의 unix time을 데이터셋 타임스탬프와 맞출 것. 재수집이
-    # 어려운 1회성 촬영이라 정밀도 부족이 드러난 뒤엔 늦으므로 미리 켜두는 걸 권장.
-    depth_raw_dir: str = ""
+    # depth는 jmbaek의 12-bit 로그 양자화 + HEVC lossless 경로가 담당한다
+    # (lerobot.datasets.depth_utils.DepthFeature). 카메라의 use_depth(=realsense_use_depth
+    # 계열)만 보고 depth feature가 만들어지므로, 예전의 turbo 컬러맵 전용 필드
+    # (use_depth_observation / depth_min_m / depth_max_m / depth_scale / depth_raw_dir)는
+    # 아무것도 제어하지 않게 되어 제거했다. 자세한 내용은 docs/depth/README.md 참고.
 
     # 실시간 안전 컷오프(NEXT와 무관, use_effort OFF여도 항상 독립 동작).
     # 리플레이/정책 출력이 관절 명령으로 변환되어 로봇에 나가기 직전(send_action)에 검사.

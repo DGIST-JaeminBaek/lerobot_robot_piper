@@ -8,8 +8,18 @@ use_effort(데이터셋 로깅용)가 꺼져 있어도 안전 체크는 독립 �
 
 from types import SimpleNamespace
 
-from lerobot_robot_piper.motors.piper_motors_bus import PiperMotorsBus
-from lerobot_robot_piper.piper_follower import PiperFollower
+try:
+    from lerobot_robot_piper.motors.piper_motors_bus import PiperMotorsBus
+    from lerobot_robot_piper.piper_follower import PiperFollower
+except ModuleNotFoundError as e:
+    if "depth_utils" not in str(e):
+        raise
+    # jmbaek의 depth 백포트가 적용된 lerobot clone에서만 import된다
+    # (stock pip lerobot 0.4.4에는 lerobot.datasets.depth_utils가 없음).
+    # 랩 PC에서는 정상 실행되고, 그 외 환경에서는 조용히 건너뛴다.
+    import sys
+    print("SKIP: 패치된 lerobot(depth 백포트)이 필요합니다 — docs/depth/README.md 참고")
+    sys.exit(0)
 
 
 def test_is_overloaded():

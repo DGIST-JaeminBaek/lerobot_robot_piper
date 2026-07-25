@@ -33,6 +33,13 @@
 - [x] **joint 이름/좌표계 컨벤션 검증 완료** — `piper_sdk`의 `CalFK`(DH 파라미터 기반 순수 계산, 하드웨어 불필요)가 존재함을 확인하고, `dh_is_offset=0x01`(기본값)이 Agilex 공식 User Manual DH 표와 정확히 일치함을 수치로 확인. RViz용 URDF(`piper_description.urdf`)로 `ikpy` FK를 돌려 zero-config 결과가 `piper_sdk` `CalFK`와 0.1mm 이하 오차로 일치함을 검증. 우리 팔 펌웨어(`S-V1.8-2`, `configs/config.json`)가 이 컨벤션에 해당하는 신형(J2/J3 좌표계 2° 이동)임도 확인 — **RViz 표시와 SDK FK 계산이 어긋날 걱정 없음**
 - [x] `GetFK(mode="feedback"/"control")`이 각각 `GetArmJointMsgs`/`GetArmJointCtrl`(state/action) 값을 받아 `CalFK`를 호출하는 것뿐임을 소스로 확인 — EEF state/action을 추가로 기록하려면 이 함수를 그대로 쓰면 됨(구현은 아직 안 함)
 
+### 카메라 / 녹화 성능 (2026-07-24, 실물 하드웨어)
+- [x] **RealSense RGB+depth read 병목 발견+수정** — `get_observation()`이 RGB 다 읽고 나서야 depth를 읽기 시작하는 순차 2단계 구조라 실측 25.5ms+33.3ms≈59ms/프레임(15Hz, 목표 30Hz의 절반)까지 떨어짐을 확인. 카메라당 RGB+depth 요청을 한 번에 다 같이 제출하도록 합치고 `ThreadPoolExecutor` worker 수도 늘려서 수정
+- [x] **카메라 `connect()` 병렬화 재검증** — 예전엔 RealSense 2대 동시 초기화 시 "read failed"를 실제 하드웨어에서 확인해서 순차로 되돌렸었는데, 그 원인이 USB 대역폭 경합이 아니라 당시 CPU 쿨링 문제였을 가능성이 제기돼 `scripts/tools/camera_parallel_connect_test.py`(로봇 없이 카메라만)로 재검증 — 3회 연속 성공(20초→~10초로 단축), 병렬로 되돌림
+- [x] **depth 포함 실제 hardware record 다회 성공** — `erase_the_circle_*`, `true_last_record_*` 등 여러 데이터셋을 실제 두 팔 + RealSense 2대(RGB+depth)로 녹화, action offset report/RViz replay까지 확인
+- [x] **action 기록 방식 버그 발견+수정** — 데이터셋 `action` 컬럼이 leader raw 값이었고 실제 follower에 보낸 offset 보정값이 아니었음을 발견, `lerobot_record.py` 수정(자세한 내용 [docs/change.md](change.md) 4번, [docs/depth/README.md](depth/README.md) 8번)
+- [x] lerobot 로컬 clone을 v0.4.0 → v0.4.4로 업그레이드, depth 백포트 재적용 및 실물 검증 완료
+
 ### 확인된 사실 (재검증 불필요)
 - [x] `PiperFollower.get_observation()`/`PiperLeader.get_action()` 반환 dict key는 `f"{motor}.pos"` 형태 (joint1.pos~joint6.pos, gripper.pos)
 - [x] Plugin 등록 이름: `piper_follower`/`piper_leader` — `config_piper.py`/`config_piper_leader.py`의 `register_subclass()`로 확인
@@ -53,7 +60,7 @@
       설치된 lerobot 실제 방식(`lerobot/utils/control_utils.py` 소스로 재확인)에 맞게
       바꾸면 됨, 호출부(버튼, "Auto-stop at Parking")는 안 건드려도 됨
 - [ ] **CAN 연결 기본 동작** — `python scripts/tools/piper_session.py --step joint_check --check_leader`로 follower/leader 둘 다 `[OK]` 뜨는지, 관절값이 실제 팔 자세와 맞는지(부호/방향) 확인
-- [ ] `teleop_ui.py`에서 Teleoperate 프리셋으로 leader→follower 텔레옵 실제 확인, 이후 Record로 짧게 1 episode 녹화 테스트 (RViz Start/Play 버튼 자체는 실물 로봇 없이 이미 동작 확인함 — 남은 건 실제 팔 움직임 확인)
+- [x] (2026-07-24) `teleop_ui.py`에서 Teleoperate/Record로 leader→follower 텔레옵 + 실제 팔 움직임 다회 확인
 - [ ] action offset 자동 보정값이 반복 실행에서 안정적인지 확인
 - [ ] `max_relative_target=5.0`이 작업에 적절한지 확인
 - [ ] **E-STOP 버튼 실동작** — 실제로 `sudo ip link set ... down`이 즉시 먹는지, sudo 비밀번호 프롬프트에 안 막히는지(NOPASSWD 설정 필요 여부 포함)
@@ -62,12 +69,12 @@
 ### 카메라
 - [ ] `scripts/2__find_camera.sh`로 카메라 탐색 확인
 - [ ] `scripts/tools/realsense_view.py`로 top/wrist serial과 화면 방향 확인
-- [ ] RealSense 2대 동시 stream에서 frame 누락 여부 확인
+- [x] (2026-07-24) RealSense 2대 동시 stream — read가 순차 2단계라 프레임레이트가 절반으로 떨어지는 문제 확인+수정(위 "카메라/녹화 성능" 참고)
 - [ ] `configs/recording.env`의 해상도/FPS/warmup 값 확정
 - [ ] "녹화마다 카메라 타임아웃" 현상이 `CAMERA_RELEASE_WAIT_S` 도입 후에도 재현되는지
 
 ### 데이터
-- [ ] `scripts/5__record.sh` 또는 GUI Record로 1 episode smoke recording (Episode Time/Reset Time/FPS 입력창, Task 기반 폴더명 실측 확인 포함)
+- [x] (2026-07-24) `scripts/5__record.sh`/GUI Record로 1 episode smoke recording 다회 확인 (Episode Time/Reset Time/FPS 입력창, Task 기반 폴더명 포함)
 - [ ] `scripts/tools/wego_dataset_check.py`로 action/state/camera feature 확인
 - [ ] `scripts/6__replay.sh` 또는 GUI Replay (Real Robot)로 기록 action replay 확인
 - [ ] gripper 물리 단위 해석(raw→mm→m)이 실제 그리퍼 열림 정도와 맞는지 눈으로 대조

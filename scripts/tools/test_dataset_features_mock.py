@@ -27,7 +27,17 @@ from lerobot.datasets.pipeline_features import (
 from lerobot.datasets.utils import build_dataset_frame, combine_feature_dicts
 from lerobot.processor import make_default_processors
 
-from lerobot_robot_piper.piper_follower import PiperFollower
+try:
+    from lerobot_robot_piper.piper_follower import PiperFollower
+except ModuleNotFoundError as e:
+    if "depth_utils" not in str(e):
+        raise
+    # jmbaek의 depth 백포트가 적용된 lerobot clone에서만 import된다
+    # (stock pip lerobot 0.4.4에는 lerobot.datasets.depth_utils가 없음).
+    # 랩 PC에서는 정상 실행되고, 그 외 환경에서는 조용히 건너뛴다.
+    import sys
+    print("SKIP: 패치된 lerobot(depth 백포트)이 필요합니다 — docs/depth/README.md 참고")
+    sys.exit(0)
 
 MOTORS = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"]
 
@@ -67,7 +77,6 @@ def make_follower(use_effort: bool, use_depth: bool) -> PiperFollower:
     f._camera_executor = ThreadPoolExecutor(max_workers=2)
     f.config = SimpleNamespace(
         use_effort=use_effort,
-        use_depth_observation=use_depth,
         depth_scale=0.001,
         depth_min_m=0.20,
         depth_max_m=0.80,

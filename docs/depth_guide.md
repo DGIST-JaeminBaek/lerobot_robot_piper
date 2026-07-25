@@ -1,11 +1,16 @@
-# depth — 현황 정리 및 도입 판단
+# depth — 조사 기록 (담당 아님)
 
-> 작성 2026-07-25 · **2026-07-25 전면 개정** (jmbaek 구현 반영)
+> 작성 2026-07-25 · **2026-07-25 개정**
 >
-> **⚠️ 이 문서의 이전 판은 우리 자체 구현(turbo 컬러맵)을 "현재 구현"으로 전제했다.**
-> 그러나 jmbaek이 더 나은 방식을 이미 구현해 `upstream/seongil/gui-refactor`
-> (커밋 `13c8b06`, 2026-07-24)에 올려둔 것을 확인했다.
-> **우리 방식은 폐기하고 jmbaek 방식을 따른다.**
+> **⚠️ depth는 조성일 담당이 아니다.** 구현·운영은 jmbaek이 맡고 있으며
+> 1차 출처는 **`docs/depth/README.md`(583줄)**다. 이 문서는 내가 effort 작업 중
+> depth를 조사하면서 남긴 **참고 기록**일 뿐이고, 코드에 대한 권한을 주장하지 않는다.
+>
+> **우리(seongil) 브랜치는 depth 코드를 일절 건드리지 않는다.** 초기에 자체
+> turbo 컬러맵 구현을 시도했으나, jmbaek의 12-bit 로그 양자화 구현이 모든 면에서
+> 우월해 **우리 구현은 전부 제거하고 upstream 것을 그대로 따른다.**
+> 이 문서에 남은 실측치는 그 판단 근거이자, 나중에 dataloader 단계에서 쓸 수 있는
+> 자료로만 보존한다.
 
 ---
 
@@ -296,15 +301,15 @@ jmbaek 실측: **1280×720, 4스트림, 16코어 RTX 5090 워크스테이션 →
 
 ---
 
-## 8. ⚠️ 병합 미완 — 충돌 3곳
+## 8. 병합 완료 — 충돌 3곳 해결 내역
 
-`13c8b06`은 **아직 우리 브랜치에 병합되지 않았다.** 시험 병합 결과 충돌 3곳:
+`13c8b06`을 우리 브랜치에 병합했다. 충돌 3곳은 아래와 같이 해결했다 — **depth는 전부 jmbaek 것을 그대로 채택**했고, 우리 쪽은 effort/안전 컷오프만 남겼다:
 
 | # | 위치 | 우리 | jmbaek | 판단 |
 |---|---|---|---|---|
-| 1 | `_cameras_ft` | turbo 컬러맵 3채널 | `DepthFeature` 전용 타입 | **jmbaek 채택** |
-| 2 | `get_observation` | effort/vel 블록 | 카메라 병렬 읽기 재구성 (59 ms → 목표 33 ms) | **양쪽 다 살림** |
-| 3 | `send_action` | **effort 안전 컷오프** | `set_action` 타이밍 로깅 | ⚠️ **양쪽 다 살려야 함** |
+| 1 | `_cameras_ft` | turbo 컬러맵 3채널 | `DepthFeature` 전용 타입 | ✅ **jmbaek 그대로 채택**, 우리 것 폐기 |
+| 2 | `get_observation` | effort/vel 블록 | 카메라 병렬 읽기 재구성 (59 ms → 목표 33 ms) | ✅ 카메라는 jmbaek 그대로, effort 블록만 앞에 유지 |
+| 3 | `send_action` | **effort 안전 컷오프** | `set_action` 타이밍 로깅 | ✅ 타이밍 로깅 유지 + **안전 컷오프 생존** |
 
 **3번을 특히 주의해야 한다.** jmbaek 쪽 코드에는 안전 컷오프가 없다. 기계적으로
 병합하면 **"팔이 뻗는" 사고를 막던 로직이 사라진다.** 의도적으로 뺀 것인지
@@ -321,13 +326,15 @@ teleop raw 값을 저장하고 있었다. 이제 보정된 값이 저장된다.
 
 **depth를 안 켜더라도 이 수정은 반드시 들어가야 한다.**
 
-### 폐기 대상 (병합 시 정리)
+### 폐기 완료 — 우리 depth 구현 전량 제거
 
 - `lerobot_robot_piper/depth_utils.py` (turbo 컬러맵)
 - `config_piper.py`의 `depth_min_m` / `depth_max_m` / `depth_scale` / `depth_raw_dir`
 - `DEPTH_RAW_DIR` raw `.npy` 사이드카 — **완전히 무의미해짐.** 본 경로가 이미
   near-lossless인데 1.11 GB/분을 따로 쓸 이유가 없다
-- `scripts/tools/test_depth_mock.py` — 재작성 필요
+- `scripts/tools/test_depth_mock.py` — 삭제 (컬러맵 경로 전용 테스트였음)
+
+결과적으로 **upstream 대비 우리 브랜치의 코드 차이는 effort/안전 컷오프뿐이다.**
 
 ---
 

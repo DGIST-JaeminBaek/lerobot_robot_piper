@@ -12,6 +12,7 @@
 - **CAN Bus Communication**: `piper_sdk`, `wego_piper` 기반 하드웨어 제어
 - **Safety Limits**: `max_relative_target`으로 timestep별 joint 이동량 제한
 - **Camera Integration**: OpenCV/Intel RealSense 카메라를 follower observation으로 기록
+- **Depth Recording**: Intel RealSense depth 스트림을 12-bit 로그 양자화 + HEVC lossless로 LeRobotDataset에 함께 기록 (LeRobot 0.6.0의 공식 depth 지원을 0.4.x 저장 구조에 맞게 백포트, [docs/depth/README.md](docs/depth/README.md) 참고)
 - **통합 GUI**: Teleoperation, 녹화, RViz 연동, 데이터셋 뷰어를 하나의 GUI로 통합 (`0__launch_gui.sh`)
 - **GUI Tools**: `piper-ui`, `piper-teleop`, `piper-calibrate` 제공
 - **Experiment Scripts**: CAN 초기화부터 record/train/async 실행까지 번호형 스크립트 제공
@@ -285,6 +286,7 @@ Parking pose의 normalized 값은 `0, -100, 100, 0, 0, -13.04, 0`입니다 (`mot
 | [docs/data_collection_protocol.md](docs/data_collection_protocol.md) | 데이터 수집 프로토콜 |
 | [docs/roadmap.md](docs/roadmap.md) | 남은 작업 |
 | [docs/change.md](docs/change.md) | WEGO 원본 대비 변경 사항 |
+| [docs/depth/README.md](docs/depth/README.md) | RealSense depth 녹화 백포트 상세 설명 |
 
 ## Project Structure
 

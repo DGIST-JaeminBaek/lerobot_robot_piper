@@ -7,7 +7,17 @@ _effort_ft / observation_features / get_observation()의 effort 분기를 검증
 
 from types import SimpleNamespace
 
-from lerobot_robot_piper.piper_follower import PiperFollower
+try:
+    from lerobot_robot_piper.piper_follower import PiperFollower
+except ModuleNotFoundError as e:
+    if "depth_utils" not in str(e):
+        raise
+    # jmbaek의 depth 백포트가 적용된 lerobot clone에서만 import된다
+    # (stock pip lerobot 0.4.4에는 lerobot.datasets.depth_utils가 없음).
+    # 랩 PC에서는 정상 실행되고, 그 외 환경에서는 조용히 건너뛴다.
+    import sys
+    print("SKIP: 패치된 lerobot(depth 백포트)이 필요합니다 — docs/depth/README.md 참고")
+    sys.exit(0)
 
 
 class FakeBus:
@@ -30,7 +40,7 @@ def make_follower(use_effort: bool) -> PiperFollower:
     follower.id = "test_follower"
     follower.bus = FakeBus()
     follower.cameras = {}
-    follower.config = SimpleNamespace(use_effort=use_effort, use_depth_observation=False)
+    follower.config = SimpleNamespace(use_effort=use_effort)
     return follower
 
 

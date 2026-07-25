@@ -53,7 +53,38 @@ import av
 import cv2
 import numpy as np
 import pandas as pd
+from lerobot.datasets.depth_utils import dequantize_depth
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+
+DEPTH_MIN_MM = 100.0
+DEPTH_MAX_MM = 3000.0
+
+
+def _is_depth_key(meta: LeRobotDatasetMetadata, key: str) -> bool:
+    return bool(meta.features.get(key, {}).get("info", {}).get("is_depth_map"))
+
+
+def _depth_params(meta: LeRobotDatasetMetadata, key: str) -> dict:
+    info = meta.features.get(key, {}).get("info", {})
+    return {
+        "depth_min": info.get("video.depth_min", 0.0),
+        "depth_max": info.get("video.depth_max", 10.0),
+        "shift": info.get("video.shift", 3.5),
+        "use_log": info.get("video.use_log", True),
+        "output_tensor": False,
+    }
+
+
+def _colorize_depth_frame(quantized: np.ndarray, params: dict) -> np.ndarray:
+    """양자화된 12-bit depth code(uint16, HxW)를 실측 mm로 복원한 뒤 사람이 보기
+    좋은 컬러맵 BGR로 변환 — docs/depth/tools/depth_video_viewer.py와 동일한 방식.
+    저장된 MP4/데이터 자체는 건드리지 않고 미리보기에서만 씀."""
+    depth_mm = dequantize_depth(quantized, **params).squeeze()
+    clipped = np.clip(depth_mm, DEPTH_MIN_MM, DEPTH_MAX_MM)
+    normalized = ((clipped - DEPTH_MIN_MM) * (255.0 / (DEPTH_MAX_MM - DEPTH_MIN_MM))).astype(np.uint8)
+    colored = cv2.applyColorMap(normalized, cv2.COLORMAP_TURBO)
+    colored[depth_mm <= DEPTH_MIN_MM] = 0
+    return colored
 
 
 class C:
@@ -183,28 +214,45 @@ def load_meta(dataset_root: pathlib.Path) -> LeRobotDatasetMetadata:
 
 
 def load_video_frames(
-    meta: LeRobotDatasetMetadata, episode: int, video_keys: list[str] | None
+    meta: LeRobotDatasetMetadata, episode: int, video_keys: list[str] | None, view: str = "both"
 ) -> dict[str, list[np.ndarray] | None]:
     """episode의 카메라 영상을 전부 디코딩해서 {video_key: [frame, ...]}로 반환.
-    video_keys가 None이면 info.json에서 dtype=video인 feature를 전부 자동으로 찾음.
+    video_keys가 None이면 info.json에서 dtype=video인 feature를 전부 자동으로 찾고,
+    이때만 --view(both/rgb/depth)로 필터링함(video_keys를 직접 지정했으면 그대로 씀).
     영상을 못 열면 값이 None — 화면에는 "video not found" placeholder로 표시됨
     (해당 카메라만 빠지는 게 아니라 레이아웃은 그대로 유지).
 
     cv2.VideoCapture(ffmpeg 내장 AV1 디코더)는 이 프로젝트의 mp4(AV1/libdav1d 인코딩)를
     seek할 때 'Missing Sequence Header'로 깨져서 프레임을 못 읽어옴 — 대신 PyAV(av)로
     처음부터 순차 디코딩해서 메모리에 전부 올려놓음(재생 순서가 항상 0..N-1 순차라
-    seek이 필요 없음, episode 길이가 짧아서 메모리도 부담 없음)."""
+    seek이 필요 없음, episode 길이가 짧아서 메모리도 부담 없음).
+
+    depth feature(is_depth_map)는 gray12le 12-bit code를 그대로 디코딩한 뒤
+    _colorize_depth_frame()으로 mm 단위 컬러맵 BGR로 변환함 — RGB와 동일한 배열
+    형태라 이후 화면 구성 코드는 카메라 종류를 신경 쓸 필요 없음."""
     keys = video_keys or [k for k, v in meta.features.items() if v.get("dtype") == "video"]
     if not keys:
         warn("영상 feature 없음 — RViz만 재생")
         return {}
 
+    if not video_keys and view != "both":
+        filtered = [k for k in keys if _is_depth_key(meta, k) == (view == "depth")]
+        if filtered:
+            keys = filtered
+        else:
+            warn(f"--view {view}에 맞는 스트림이 없어 전체 카메라를 표시함")
+
     videos: dict[str, list[np.ndarray] | None] = {}
     for key in keys:
+        is_depth = _is_depth_key(meta, key)
         path = pathlib.Path(meta.root) / meta.get_video_file_path(episode, key)
         try:
             container = av.open(str(path))
-            frames = [f.to_ndarray(format="bgr24") for f in container.decode(video=0)]
+            if is_depth:
+                params = _depth_params(meta, key)
+                frames = [_colorize_depth_frame(f.to_ndarray(format="gray12le"), params) for f in container.decode(video=0)]
+            else:
+                frames = [f.to_ndarray(format="bgr24") for f in container.decode(video=0)]
             container.close()
         except Exception as e:
             warn(f"영상을 못 엶: {path} ({e})")
@@ -479,6 +527,8 @@ def main():
                    help="publish할 JointState 토픽 (robot_state_publisher가 구독하는 토픽과 일치해야 함)")
     p.add_argument("--video_key", action="append", default=None,
                    help="표시할 video feature 이름, 반복 가능 (기본: 전부 자동 탐색)")
+    p.add_argument("--view", choices=["both", "rgb", "depth"], default="both",
+                   help="자동 탐색된 영상을 RGB만/Depth만/둘 다(기본)로 필터링")
     p.add_argument("--video_height", type=int, default=300, help="영상 표시 높이(px)")
     p.add_argument("--panel_width", type=int, default=360, help="오른쪽 정보 패널 너비(px)")
     args = p.parse_args()
@@ -499,7 +549,7 @@ def main():
 
     meta = load_meta(root)
     rate = args.rate if args.rate is not None else 1.0 / float(meta.fps or 30)
-    video_frames = load_video_frames(meta, args.episode, args.video_key)
+    video_frames = load_video_frames(meta, args.episode, args.video_key, args.view)
 
     run(
         seq, rate, args.loop, args.joint_state_topic, video_frames, args.video_height,
