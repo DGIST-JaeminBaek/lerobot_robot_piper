@@ -1,5 +1,11 @@
 # TA-VLA / Depth / Effort 통합 — 진행 상황 및 다음 방향
 
+> ⚠️ **낡은 기록 (2026-07-24 시점).** 이후 depth 구현이 jmbaek의 12-bit 로그 양자화
+> 방식으로 교체되면서 여기 적힌 turbo 컬러맵 관련 내용(`depth_utils.py`,
+> `USE_DEPTH_OBSERVATION`, `DEPTH_MIN_M/MAX_M`, "Record Depth" 체크박스,
+> `test_depth_mock.py`)은 전부 제거됐다. 현재 상태는 `docs/depth_guide.md`와
+> `docs/effort_guide.md`를 볼 것. 이 문서는 당시 판단 근거로만 남긴다.
+>
 > 최종 갱신: 2026-07-24. 관련 선행 자료: `tavla-depth-force-integration.md`(다운로드 원본 가이드).
 > 이 문서는 그 가이드의 `TODO(확인)` 항목들을 실제 리포 + 랩 PC 기준으로 검증하고,
 > 이후 진행한 코드 작업과 앞으로 남은 일을 정리한다.

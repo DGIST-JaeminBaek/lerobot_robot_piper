@@ -3,6 +3,7 @@
 > 담당: 조성일 · 작성 2026-07-25 · 기준 코드 `seongil/gui-refactor` · lerobot 0.4.4
 >
 > **이 문서의 범위** — 내 담당 과제 두 가지 중 첫 번째다.
+>
 > 1. 로봇 팔 effort를 활용하는 논문 조사 및 effort 녹화 기능 구현 ← **이 문서**
 > 2. 대표 VLA 모델의 FPS/이미지 해상도 조사 → `docs/vla_fps_resolution.md`
 >
@@ -203,7 +204,7 @@ GUI 체크박스("Record Effort")로도 켜고 끌 수 있다.
 |---|---|---|---|
 | 1 | `5__record.sh`로 녹화하면 effort 없음 | `run_common.sh`가 `--robot.use_effort`를 안 넘겨 config 기본값(`False`)이 쓰임 | `robot_observation_args()` 추가 → `5__record.sh`·`9__run_client.sh`에 배선 |
 | 2 | 에피소드 초반 100프레임 effort 손상 | `smooth_start_frames.py`가 이름을 `.`으로 잘라 매칭 → `joint2.effort` → `parking["joint2"]=-100` 이 써짐 | `.pos` 컬럼만 보간하도록 마스크 적용 |
-| 3 | 체크박스를 켜도 effort 없음 | `use_effort_var`가 Command 자동 갱신(`trace_add`) 대상에서 빠져 옛 커맨드로 Launch됨 | `trace_add` 목록에 `use_effort_var`/`use_depth_var` 추가 |
+| 3 | 체크박스를 켜도 effort 없음 | `use_effort_var`가 Command 자동 갱신(`trace_add`) 대상에서 빠져 옛 커맨드로 Launch됨 | `trace_add` 목록에 `use_effort_var` 추가 |
 
 **2번이 특히 위험했다.** Smooth Start는 기본 ON(100프레임)이라 effort를 켜기만 하면
 30fps 기준 **모든 에피소드의 초반 3.3초**가 오염됐다. 지금은 `.pos`만 보간하므로
@@ -224,7 +225,7 @@ effort/vel은 원본 그대로다 (`scripts/tools/test_smooth_start_mock.py`가 
 
 ```bash
 USE_EFFORT=true              # 기본값이 true라 없어도 되지만 명시가 안전
-USE_DEPTH_OBSERVATION=false  # 검증에서는 변수 줄이기
+REALSENSE_USE_DEPTH=false    # 검증에서는 depth OFF (변수 줄이기)
 NUM_EPISODES=2
 EPISODE_TIME_S=20
 RESET_TIME_S=10

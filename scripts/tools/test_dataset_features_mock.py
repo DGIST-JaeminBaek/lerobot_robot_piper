@@ -1,6 +1,6 @@
 """effort/vel/depth가 LeRobotDataset 스키마에 실제로 어떻게 들어가는지 검증 (하드웨어 불필요).
 
-test_effort_mock.py / test_depth_mock.py는 PiperFollower가 내보내는 observation dict까지만
+test_effort_mock.py는 PiperFollower가 내보내는 observation dict까지만
 확인한다. 이 테스트는 그 뒤 단계 — lerobot_record.record()가 쓰는 실제 함수
 (aggregate_pipeline_dataset_features / combine_feature_dicts / build_dataset_frame)를
 그대로 태워서, 녹화된 파케이가 갖게 될 컬럼 구조를 확정한다.
@@ -9,7 +9,8 @@ test_effort_mock.py / test_depth_mock.py는 PiperFollower가 내보내는 observ
   - effort/vel은 별도 컬럼이 아니라 observation.state 벡터 안에 pos 뒤로 이어 붙는다.
   - 어느 인덱스가 무엇인지는 features["observation.state"]["names"]에 남으므로
     meta/info.json만 보면 나중에 슬라이싱해서 뽑아 쓸 수 있다.
-  - depth는 observation.images.<cam>_depth 라는 별도 video 스트림이 된다.
+  - depth는 observation.images.<cam>_depth 라는 별도 스트림이라 state를 안 건드린다
+    (depth 자체의 저장 형식은 jmbaek 백포트 담당이라 여기서 단정하지 않는다).
 lerobot 버전을 올렸을 때 이 계약이 깨지면 여기서 먼저 실패한다.
 
 실행: PYTHONPATH=. python scripts/tools/test_dataset_features_mock.py
@@ -53,6 +54,10 @@ class FakeCamera:
 
     def async_read(self):
         return np.zeros((self.height, self.width, 3), dtype=np.uint8)
+
+    def read_depth(self, timeout_ms: int = 0):
+        # jmbaek의 12-bit depth 경로가 호출하는 API. uint16 mm 원본을 돌려준다.
+        return np.full((self.height, self.width), 500, dtype=np.uint16)
 
 
 class FakeBus:
@@ -138,22 +143,33 @@ def test_effort_on_appends_to_observation_state_with_names():
     assert state[names.index("joint3.effort")] == 12.0
 
 
-def test_depth_on_adds_separate_video_stream():
-    robot = make_follower(use_effort=False, use_depth=True)
+def test_depth_does_not_pollute_observation_state():
+    """depth를 켜도 effort/state 스키마가 그대로인지만 확인한다.
+
+    depth 자체의 저장 형식(12-bit 로그 양자화, DepthFeature의 shape/dtype)은
+    jmbaek의 백포트 담당이라 여기서 단정하지 않는다 — 그쪽 구현이 바뀌어도
+    이 테스트가 헛되이 깨지면 안 되기 때문이다.
+    우리가 지켜야 하는 계약은 하나: **depth는 이미지 쪽으로 가고
+    observation.state(=effort가 사는 곳)를 건드리지 않는다.**
+    """
+    robot = make_follower(use_effort=True, use_depth=True)
     feats = dataset_features(robot)
 
-    assert feats["observation.images.top_depth"]["dtype"] == "video"
-    assert feats["observation.images.top_depth"]["shape"] == (4, 4, 3)
-    assert "observation.images.wrist_depth" not in feats  # use_depth 꺼진 카메라는 제외
-    assert "observation.images.top" in feats  # color는 그대로
+    # ① effort 스키마가 depth 유무와 무관하게 동일
+    assert feats["observation.state"]["shape"] == (7 + 7 + 6,)
+    assert feats["observation.state"]["names"][7].endswith(".effort")
 
-    frame = build_dataset_frame(feats, robot.get_observation(), prefix="observation")
-    assert frame["observation.images.top_depth"].shape == (4, 4, 3)
-    assert frame["observation.images.top_depth"].dtype == np.uint8
+    # ② depth는 별도 이미지 피처로 존재하고, state에 섞이지 않는다
+    assert "observation.images.top_depth" in feats
+    assert not any("depth" in n for n in feats["observation.state"]["names"])
+
+    # ③ use_depth 꺼진 카메라는 depth 스트림이 없다
+    assert "observation.images.wrist_depth" not in feats
+    assert "observation.images.top" in feats  # color는 그대로
 
 
 if __name__ == "__main__":
     test_effort_off_keeps_state_pos_only()
     test_effort_on_appends_to_observation_state_with_names()
-    test_depth_on_adds_separate_video_stream()
+    test_depth_does_not_pollute_observation_state()
     print("OK: dataset feature 스키마 테스트 통과 (effort -> observation.state, depth -> 별도 video)")
