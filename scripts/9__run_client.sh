@@ -32,6 +32,7 @@ if [[ -z "${PRETRAINED_NAME_OR_PATH}" && "${DRY_RUN:-false}" != "true" ]]; then
 fi
 PRETRAINED_NAME_OR_PATH="${PRETRAINED_NAME_OR_PATH:-your_hf_or_local_policy_path}"
 mapfile -t CAMERA_ARGS < <(robot_camera_args)
+mapfile -t OBS_ARGS < <(robot_observation_args)
 
 cmd=(
   python -m lerobot.async_inference.robot_client
@@ -39,6 +40,7 @@ cmd=(
   "--robot.type=piper_follower"
   "--robot.port=${FOLLOWER_PORT}"
   "${CAMERA_ARGS[@]}"
+  "${OBS_ARGS[@]}"
   "--robot.discover_packages_path=lerobot_robot_piper"
   "--pretrained_name_or_path=${PRETRAINED_NAME_OR_PATH}"
   "--policy_type=${POLICY_TYPE}"

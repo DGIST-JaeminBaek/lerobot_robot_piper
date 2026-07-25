@@ -40,9 +40,13 @@ class PiperFollowerConfig(RobotConfig):
     top_realsense_use_depth: bool = False
     wrist_realsense_use_depth: bool = False
 
-    # observation에 관절별 effort(전류 기반 추정 토크, N·m) 포함 여부.
+    # observation에 관절별 effort(전류 기반 추정 토크, N·m) + velocity 포함 여부.
     # piper_sdk의 current-derived 값이라 자세에 따른 중력/마찰 성분이 섞여 있음(진짜 토크 센서 아님).
-    use_effort: bool = False
+    # 기본 ON — 안 찍은 effort는 되살릴 수 없는 반면, 켜는 비용은 프레임당 52바이트에
+    # 비디오 인코딩과 무관하다(observation.state가 pos7+effort7+vel6=20차원이 됨).
+    # 주의: 학습한 데이터셋과 추론 시 이 값이 다르면 state 차원이 안 맞는다 —
+    # 7차원으로 학습한 옛 체크포인트를 돌릴 때만 false로 내릴 것.
+    use_effort: bool = True
 
     # observation에 depth(turbo 컬러맵) 이미지 포함 여부. 카메라별 RealSense
     # use_depth(realsense_use_depth 등)가 켜진 카메라에 한해서만 적용됨 —

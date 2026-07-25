@@ -518,8 +518,10 @@ class PiperMonitorUI:
         # 안에서 켰다 껐다 섞지 말 것(_camera_args()에서 --robot.use_effort/
         # use_depth_observation로 반영). depth는 REALSENSE_USE_DEPTH(카메라 스트림
         # 자체)가 꺼져 있으면 이 체크박스를 켜도 효과 없음.
+        # effort는 기본 ON (PiperFollowerConfig.use_effort와 같은 방침) — 안 찍은 건
+        # 되살릴 수 없고, 켜는 비용은 프레임당 52바이트에 인코딩 시간과 무관하다.
         self.use_effort_var = tk.BooleanVar(
-            value=(self.recording_env.get("USE_EFFORT") or "false").lower() == "true"
+            value=(self.recording_env.get("USE_EFFORT") or "true").lower() == "true"
         )
         ttk.Checkbutton(timing_row, text="Record Effort", variable=self.use_effort_var).pack(
             side="left", padx=(12, 2)
@@ -616,11 +618,17 @@ class PiperMonitorUI:
 
         # 입력값이 바뀔 때마다 Command를 자동으로 다시 조립 — Preset을 재선택 안 해도
         # 항상 최신 값 기준 커맨드가 보이게 해서, 옛날 커맨드로 Launch 누르는 실수를 막음.
+        # use_effort_var/use_depth_var도 반드시 포함할 것 — 이 둘은 커맨드에
+        # --robot.use_effort / --robot.use_depth_observation로 반영되는데, 여기 빠져
+        # 있으면 체크박스를 켜도 Command 문자열이 그대로라 옛 커맨드로 Launch된다
+        # (Launch는 cmd_var 문자열을 그대로 실행). effort 없이 녹화되고도 에러가 안 나서
+        # 데이터를 열어보기 전까지 모른다.
         for var in (
             self.leader_port_var, self.follower_port_var,
             self.task_var, self.num_episodes_var, self.policy_path_var,
             self.episode_time_var, self.reset_time_var, self.fps_var,
             self.push_to_hub_var, self.dataset_root_override_var,
+            self.use_effort_var, self.use_depth_var,
         ):
             var.trace_add("write", self._refresh_command)
 

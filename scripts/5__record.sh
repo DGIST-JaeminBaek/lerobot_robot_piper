@@ -46,6 +46,7 @@ fi
 
 mapfile -t DISCOVERY_ARGS < <(plugin_discovery_args)
 mapfile -t CAMERA_ARGS < <(robot_camera_args)
+mapfile -t OBS_ARGS < <(robot_observation_args)
 mapfile -t OFFSET_ARGS < <(robot_action_offset_args)
 mapfile -t SAFETY_ARGS < <(robot_safety_args)
 
@@ -57,6 +58,7 @@ cmd=(
   "--robot.type=piper_follower"
   "--robot.port=${FOLLOWER_PORT}"
   "${CAMERA_ARGS[@]}"
+  "${OBS_ARGS[@]}"
   "${OFFSET_ARGS[@]}"
   "${SAFETY_ARGS[@]}"
   "--teleop.type=piper_leader"

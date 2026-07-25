@@ -66,6 +66,25 @@ robot_camera_args() {
     "--robot.wrist_realsense_use_depth=${WRIST_REALSENSE_USE_DEPTH:-${realsense_use_depth}}"
 }
 
+robot_observation_args() {
+  # observation 확장(effort/velocity, depth) 인자.
+  # teleop_ui.py의 _observation_toggle_args()와 같은 값을 내보내야 한다 —
+  # GUI로 찍은 데이터셋과 셸로 찍은 데이터셋의 features가 다르면 나중에 머지가 안 된다
+  # (lerobot/datasets/aggregate.py의 validate_all_metadata가 ValueError를 던짐).
+  #
+  # USE_EFFORT는 기본 true. 안 찍은 effort는 되살릴 수 없고, 켜도 프레임당 52바이트에
+  # 비디오 인코딩과 무관하므로 "일단 항상 찍는다"가 기본 방침이다.
+  # 7차원 state로 학습한 옛 체크포인트를 돌릴 때만 false로 내릴 것.
+  printf '%s\n' \
+    "--robot.use_effort=$(bool_default "${USE_EFFORT:-}" true)" \
+    "--robot.use_depth_observation=$(bool_default "${USE_DEPTH_OBSERVATION:-}" false)" \
+    "--robot.depth_min_m=${DEPTH_MIN_M:-0.20}" \
+    "--robot.depth_max_m=${DEPTH_MAX_M:-0.80}"
+  if [[ -n "${DEPTH_RAW_DIR:-}" ]]; then
+    printf '%s\n' "--robot.depth_raw_dir=${DEPTH_RAW_DIR}"
+  fi
+}
+
 robot_action_offset_args() {
   # leader/follower 시작 자세 차이 보정 인자
   printf '%s\n' \
