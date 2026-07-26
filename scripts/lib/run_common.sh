@@ -103,8 +103,19 @@ robot_safety_args() {
   # DISABLE_TORQUE_ON_DISCONNECT=false로 두면 disconnect() 시 parking 자세로는
   # 이동하되 torque는 자동으로 풀지 않음 — scripts/tools/safe_release_torque.py로
   # 사람이 팔을 잡은 상태에서 수동으로 torque를 해제하는 루틴과 짝을 이룸.
+  #
+  # MAX_RELATIVE_TARGET=off(또는 none/null/disabled, 대소문자 무관)로 두면 상대
+  # 이동량 제한을 완전히 끔(draccus에 --robot.max_relative_target=null로 전달 —
+  # 이 필드가 float | dict | None이라 파이썬 문자열 "None"은 안 먹히고 YAML
+  # null/~ 표기만 None으로 디코딩됨). 리더-팔로워 괴리감이 큰 상황에서 5.0이
+  # 너무 자주 걸릴 때 임시로 끄고 조심스럽게 테스트할 용도 — 상시 끄기보다는
+  # 필요할 때만 켰다 끄는 걸 권장.
+  local max_rel="${MAX_RELATIVE_TARGET:-5.0}"
+  case "${max_rel,,}" in
+    off | none | null | disabled) max_rel="null" ;;
+  esac
   printf '%s\n' \
-    "--robot.max_relative_target=${MAX_RELATIVE_TARGET:-5.0}" \
+    "--robot.max_relative_target=${max_rel}" \
     "--robot.disable_torque_on_disconnect=$(bool_default "${DISABLE_TORQUE_ON_DISCONNECT:-}" true)"
 }
 

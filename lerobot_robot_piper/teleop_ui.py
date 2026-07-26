@@ -381,6 +381,7 @@ _DISCOVERY_ARGS = (
 PRESET_BUILDERS: dict[str, str] = {
     "Teleoperate": "_build_teleoperate_command",
     "Record": "_build_record_command",
+    "Record (only 1)": "_build_record_one_command",
     "Infer": "_build_infer_command",
     "Replay (Real Robot)": "_build_replay_real_command",
     "Infer Preview (RViz)": "_build_infer_preview_command",
@@ -1241,8 +1242,11 @@ class PiperMonitorUI:
     def _robot_safety_args(self) -> list[str]:
         """robot_safety_args()(run_common.sh)와 동일한 fallback."""
         env = self.recording_env
+        max_rel = (env.get("MAX_RELATIVE_TARGET") or "5.0").strip()
+        if max_rel.lower() in ("off", "none", "null", "disabled"):
+            max_rel = "null"
         return [
-            f"--robot.max_relative_target={env.get('MAX_RELATIVE_TARGET') or '5.0'}",
+            f"--robot.max_relative_target={max_rel}",
             f"--robot.disable_torque_on_disconnect={env.get('DISABLE_TORQUE_ON_DISCONNECT') or 'true'}",
         ]
 
@@ -1283,7 +1287,7 @@ class PiperMonitorUI:
             timestamp = time.strftime("%m%d-%H%M%S")
             dataset_repo_id = f"{dataset_repo_id_base}_{timestamp}"
             dataset_root = f"{dataset_root_base}_{timestamp}"
-        return [
+        args = [
             f"--dataset.repo_id={dataset_repo_id}",
             f"--dataset.root={dataset_root}",
             f"--dataset.fps={fps}",
@@ -1294,6 +1298,12 @@ class PiperMonitorUI:
             f"--dataset.push_to_hub={'true' if self.push_to_hub_var.get() else 'false'}",
             f"--resume={resume}",
         ]
+        # RGB 인코딩 codec — 비워두면 lerobot 기본값(libsvtav1, CPU) 그대로. depth는
+        # 이 값과 무관하게 항상 CPU(hevc/gray12le/lossless) — docs/depth/README.md 8번.
+        vcodec = env.get("VCODEC", "").strip()
+        if vcodec:
+            args.append(f"--dataset.vcodec={vcodec}")
+        return args
 
     def _build_record_command(self) -> str:
         """scripts/5__record.sh(lib/run_common.sh)와 동등한 lerobot-record 커맨드 조립."""
@@ -1304,6 +1314,35 @@ class PiperMonitorUI:
 
         args = [
             "lerobot-record",
+            "--robot.type=piper_follower",
+            f"--robot.port={follower_port}",
+            *self._camera_args(),
+            *self._action_offset_args(),
+            *self._robot_safety_args(),
+            "--teleop.type=piper_leader",
+            f"--teleop.port={leader_port}",
+            f"--display_data={env.get('DISPLAY_DATA') or 'true'}",
+            *self._dataset_args(fps),
+            "--robot.discover_packages_path=lerobot_robot_piper",
+            "--teleop.discover_packages_path=lerobot_robot_piper",
+        ]
+        return " ".join(args)
+
+    def _build_record_one_command(self) -> str:
+        """scripts/tools/piper_record_one.py로 에피소드 딱 1개만 녹화.
+
+        lerobot-record와 인자는 100% 동일(같은 _dataset_args()/_camera_args() 등
+        재사용) — 다른 건 "End Episode 핫키로 조기 종료하면 parking 생략, 타이머
+        자연 종료면 parking"이라는 동작뿐. Num Episodes/Reset Time 입력값은 이
+        스크립트가 안 써서 무시됨(에피소드 1개, reset 구간 자체가 없음)."""
+        env = self.recording_env
+        follower_port = self.follower_port_var.get().strip()
+        leader_port = self.leader_port_var.get().strip()
+        fps = self.fps_var.get().strip() or "30"
+        script_path = REPO_ROOT / "scripts" / "tools" / "piper_record_one.py"
+
+        args = [
+            sys.executable, str(script_path),
             "--robot.type=piper_follower",
             f"--robot.port={follower_port}",
             *self._camera_args(),
@@ -1360,8 +1399,11 @@ class PiperMonitorUI:
     def _robot_safety_args(self) -> list[str]:
         """scripts/lib/run_common.sh의 robot_safety_args()와 동일한 fallback."""
         env = self.recording_env
+        max_rel = (env.get("MAX_RELATIVE_TARGET") or "5.0").strip()
+        if max_rel.lower() in ("off", "none", "null", "disabled"):
+            max_rel = "null"
         return [
-            f"--robot.max_relative_target={env.get('MAX_RELATIVE_TARGET') or '5.0'}",
+            f"--robot.max_relative_target={max_rel}",
             f"--robot.disable_torque_on_disconnect={env.get('DISABLE_TORQUE_ON_DISCONNECT') or 'true'}",
         ]
 
@@ -1465,8 +1507,12 @@ class PiperMonitorUI:
 
         self.btn_launch.config(state="disabled")
         self.btn_kill.config(state="normal")
-        # 조기 종료(exit_early 핫키)는 lerobot-record가 떠 있을 때만 의미가 있음 (Record/Infer 프리셋).
-        self.btn_end_episode.config(state="normal" if "lerobot-record" in cmd else "disabled")
+        # 조기 종료(exit_early 핫키)는 lerobot-record/piper_record_one.py가 떠 있을 때만
+        # 의미가 있음 (Record/Record (only 1)/Infer 프리셋). Record (only 1)에서는 이
+        # 핫키가 곧 "parking 없이 지금 조기 종료"를 뜻함(piper_record_one.py 참고).
+        self.btn_end_episode.config(
+            state="normal" if ("lerobot-record" in cmd or "piper_record_one.py" in cmd) else "disabled"
+        )
         self._parking_triggered_episode = False
         self.bottom_var.set(f"Running (PID {self.script_proc.pid}): {cmd}")
         self.progress_var.set("")
@@ -1661,8 +1707,9 @@ class PiperMonitorUI:
 
     # ---- 녹화 후 초반 프레임 보정 (smooth start) ----
     def _record_dataset_root_from_cmd(self, cmd: str) -> str | None:
-        """실행 커맨드가 lerobot-record면 --dataset.root 값을 뽑아 반환, 아니면 None."""
-        if "lerobot-record" not in cmd:
+        """실행 커맨드가 lerobot-record/piper_record_one.py면 --dataset.root 값을
+        뽑아 반환, 아니면 None."""
+        if "lerobot-record" not in cmd and "piper_record_one.py" not in cmd:
             return None
         try:
             tokens = shlex.split(cmd)

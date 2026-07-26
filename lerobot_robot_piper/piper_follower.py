@@ -304,11 +304,13 @@ class PiperFollower(Robot):
             except Exception as exc:
                 logger.warning(f"{self} failed to disconnect camera '{cam_name}': {exc}")
 
-    def disconnect(self, disable_torque: bool | None = None) -> None:
+    def disconnect(self, disable_torque: bool | None = None, park: bool | None = None) -> None:
         if disable_torque is None:
             disable_torque = self.config.disable_torque_on_disconnect
         self._disconnect_cameras()
-        # torque 자동 해제 여부와 무관하게 follower는 항상 parking 자세로 이동.
+        # 기본값(park=None)은 기존과 동일하게 항상 parking. park=False를 명시하면
+        # (예: 사람이 녹화를 조기 종료했을 때) parking 이동 없이 그 자리에서 바로
+        # disconnect — scripts/tools/piper_record_one.py 참고.
         # DISABLE_TORQUE_ON_DISCONNECT=false로 두면 parking만 하고 torque는
         # 켜진 채로 남아 scripts/tools/safe_release_torque.py로 수동 해제 가능.
-        self.bus.disconnect(disable_torque, park=True)
+        self.bus.disconnect(disable_torque, park=True if park is None else park)

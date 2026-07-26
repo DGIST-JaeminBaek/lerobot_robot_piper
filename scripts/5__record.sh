@@ -18,6 +18,10 @@ TASK="${TASK:-write AIIII}"
 PUSH_TO_HUB="$(bool_default "${PUSH_TO_HUB:-}" false)"
 DISPLAY_DATA="$(bool_default "${DISPLAY_DATA:-}" true)"
 RESUME="$(bool_default "${RESUME:-}" false)"
+# RGB 영상 인코딩 codec — 비워두면 lerobot 기본값(libsvtav1, CPU)을 그대로 씀.
+# depth는 이 값과 무관하게 항상 hevc/gray12le/lossless(CPU)로 인코딩됨(NVENC가
+# 단일채널 입력을 지원 안 해서) — docs/depth/README.md 8번 항목 참고.
+VCODEC="${VCODEC:-}"
 
 DATASET_REPO_ID_BASE="${DATASET_REPO_ID:-local/piper_write_light}"
 DATASET_ROOT_BASE="${DATASET_ROOT:-${REPO_DIR}/records/${DATASET_REPO_ID_BASE}}"
@@ -73,5 +77,9 @@ cmd=(
   "--resume=${RESUME}"
   "${DISCOVERY_ARGS[@]}"
 )
+
+if [[ -n "${VCODEC}" ]]; then
+  cmd+=("--dataset.vcodec=${VCODEC}")
+fi
 
 run_or_print "${cmd[@]}" "$@"
