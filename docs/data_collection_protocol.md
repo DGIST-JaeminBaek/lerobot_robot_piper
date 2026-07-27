@@ -1,6 +1,9 @@
 # Data Collection Protocol
 
-이 문서는 특정 task에 묶이지 않는 LeRobotDataset 수집 기준을 정리합니다. 실제 task 문장, episode 길이, 카메라 구성, dataset 이름은 `configs/recording.env`에서 실험마다 정합니다.
+이 문서는 특정 task에 묶이지 않는 LeRobotDataset 수집 및 품질 판정 기준을
+정리합니다. 스크립트 실행과 dataset 검사 명령은
+[operations.md](operations.md)를 참고합니다. 실제 task 문장, episode 길이,
+카메라 구성, dataset 이름은 `configs/recording.env`에서 실험마다 정합니다.
 
 ## 1. Task 정의
 
@@ -33,7 +36,7 @@ press the button once and return to the neutral pose
 3. 작업 공간의 물체, 도구, fixture 위치가 task 기준에 맞게 배치되어 있다.
 4. 상방 카메라가 전체 작업 공간과 follower 움직임을 볼 수 있다.
 5. 팔목 카메라가 접촉 지점, gripper, 조작 대상 중 중요한 영역을 볼 수 있다.
-6. `scripts/4__teleoperate.sh`로 짧게 반응을 확인했다.
+6. 본 수집 전에 짧은 teleoperation으로 leader/follower 반응을 확인했다.
 7. episode 시작 전 화면, 조명, 케이블, 장애물이 수집을 방해하지 않는다.
 
 ## 3. Episode 수행 기준
@@ -81,22 +84,8 @@ press the button once and return to the neutral pose
 5. 문제가 없으면 3-5 episode로 확장
 6. 최종 설정이 안정되면 본 수집 진행
 
-녹화:
-
-```bash
-bash scripts/5__record.sh
-```
-
-Dataset 확인:
-
-```bash
-python3 scripts/tools/wego_dataset_check.py \
-  --dataset-repo-id <DATASET_REPO_ID> \
-  --dataset-root <DATASET_ROOT> \
-  --episode 0
-```
-
-확인할 항목:
+녹화와 dataset 검사 명령은 [operations.md](operations.md)의 `실행 순서`와
+`Dataset 검사 실행` 절을 따릅니다. 검사 결과에서 확인할 항목:
 
 - `observation.state` 저장 여부
 - `action` 저장 여부

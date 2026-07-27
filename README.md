@@ -33,6 +33,10 @@
 pip install -e .
 ```
 
+새 PC의 Python, LeRobot, CAN, 카메라 환경 준비는
+[설치 및 환경 설정 가이드](docs/setup_guide.md)를 먼저 따릅니다. RViz를 사용할
+경우 [ROS 2/RViz/URDF 재현 절차](docs/rviz_setup.md)도 함께 확인합니다.
+
 ## 빠른 시작
 
 먼저 설정 파일을 만듭니다.
@@ -259,8 +263,9 @@ Parking pose의 normalized 값은 `0, -100, 100, 0, 0, -13.04, 0`입니다 (`mot
 
 | 문서 | 내용 |
 |---|---|
+| [docs/setup_guide.md](docs/setup_guide.md) | 새 PC 환경 준비와 기본 설정 |
 | [docs/operations.md](docs/operations.md) | 실행 절차 |
-| [setup_guide.md](setup_guide.md) | 환경 준비와 설정 방법 |
+| [docs/rviz_setup.md](docs/rviz_setup.md) | ROS 2, RViz, AgileX URDF 재현 절차 |
 | [docs/data_collection_protocol.md](docs/data_collection_protocol.md) | 데이터 수집 프로토콜 |
 | [docs/roadmap.md](docs/roadmap.md) | 남은 작업 |
 | [docs/change.md](docs/change.md) | WEGO 원본 대비 변경 사항 |

@@ -40,6 +40,21 @@ class PiperFollowerConfig(RobotConfig):
     top_realsense_use_depth: bool = False
     wrist_realsense_use_depth: bool = False
 
+    # observation에 관절별 effort(전류 기반 추정 토크, N·m) + velocity 포함 여부.
+    # piper_sdk의 current-derived 값이라 자세에 따른 중력/마찰 성분이 섞여 있음(진짜 토크 센서 아님).
+    # 기본 ON — 안 찍은 effort는 되살릴 수 없는 반면, 켜는 비용은 프레임당 52바이트에
+    # 비디오 인코딩과 무관하다(observation.state가 pos7+effort7+vel6=20차원이 됨).
+    # 주의: 학습한 데이터셋과 추론 시 이 값이 다르면 state 차원이 안 맞는다 —
+    # 7차원으로 학습한 옛 체크포인트를 돌릴 때만 false로 내릴 것.
+    use_effort: bool = True
+
+    # 실시간 안전 컷오프(use_effort OFF여도 항상 독립 동작).
+    # 리플레이/정책 출력이 관절 명령으로 변환되어 로봇에 나가기 직전(send_action)에 검사.
+    safety_enabled: bool = True
+    # N·m. get_effort()가 current 기반 추정치라 절대 토크값이 아니므로, 처음엔 보수적으로
+    # 잡고 랩 PC에서 자유운동(무접촉) 시 관측되는 effort 노이즈 상한을 본 뒤 튜닝할 것.
+    safety_effort_limit: float = 8.0
+
     # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
     # Set this to a positive scalar to have the same value for all motors, or a dictionary that maps motor
     # names to the max_relative_target value for that motor.

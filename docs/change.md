@@ -76,13 +76,15 @@ top_cam_type: str = ""
 wrist_cam_type: str = ""
 top_cam: str = ""
 wrist_cam: str = ""
-cam_width: int = 640
-cam_height: int = 480
-camera_fps: int = 30
-realsense_use_depth: bool = False
-realsense_warmup_s: float = 5.0
-camera_connect_warmup: bool = False
-camera_post_connect_wait_s: float = 2.0
+    cam_width: int = 640
+    cam_height: int = 480
+    camera_fps: int = 30
+    realsense_use_depth: bool = False
+    top_realsense_use_depth: bool = False
+    wrist_realsense_use_depth: bool = False
+    realsense_warmup_s: float = 5.0
+    camera_connect_warmup: bool = False
+    camera_post_connect_wait_s: float = 2.0
 ```
 
 **의미**: `--robot.cameras={...}` 같은 복잡한 dict CLI 인자 없이, `configs/recording.env`에서 카메라 값을 단순 문자열로 관리할 수 있게 됩니다. OpenCV index와 RealSense serial을 같은 설정 경로로 처리합니다.
@@ -108,30 +110,63 @@ WEGO 원본은 leader action을 그대로 follower goal로 보냅니다. 이 레
 
 **의미**: leader/follower 시작 자세 차이를 자동으로 흡수하고, 프로그램 재시작 후에도 follower가 현재 자세 기준으로 이어서 움직입니다. 실제 teleop에서 이 변화량 기반 추종이 정상 동작함을 확인했습니다. Offset report로 시작 자세 차이가 큰 joint를 확인할 수 있습니다.
 
-**기록되는 값**(2026-07-24): lerobot의 `lerobot_record.py`는 원래 이 offset이 적용되기 전의 teleop 원본 값을 데이터셋 `action` 컬럼에 저장하고 있었다(`robot.send_action()`이 실제로 리턴하는, offset 적용 완료된 값을 무시). 이 레포가 쓰는 로컬 lerobot clone에서는 이를 고쳐서, 이제 `action` 컬럼에는 offset이 적용된 뒤 follower에 실제로 내려간 절대 목표값이 저장된다. 이 수정 이전에 녹화된 데이터셋은 여전히 leader raw 기준이라 섞어서 학습하지 않도록 주의(자세한 내용은 [docs/depth/README.md](depth/README.md) 8번 항목 참고 — depth 백포트와 같은 lerobot clone에 적용된 패치라 같이 문서화함).
+로컬 LeRobot clone의 `lerobot_record.py`도 `robot.send_action()`이 반환한 값을
+데이터셋 `action`에 저장하도록 수정했습니다. 따라서 현재 데이터셋에는 offset 적용 후
+follower에 실제로 전달된 절대 목표값이 기록됩니다. Replay에서는 offset을 다시
+적용하지 않아 이중 보정을 방지합니다.
 
 ## 5. RealSense 동시 사용 안정화
 
-WEGO 원본은 camera별 기본 `connect()`를 그대로 호출합니다. 이 레포는 warmup 여부와 post-connect wait를 설정으로 제어합니다(`camera_connect_warmup`, `camera_post_connect_wait_s`, `realsense_warmup_s`).
+WEGO 원본은 camera별 기본 `connect()`를 그대로 호출합니다. 이 레포는 warmup 여부와
+post-connect wait를 설정으로 제어하고, 두 카메라의 연결과 읽기를 병렬로 처리합니다
+(`camera_connect_warmup`, `camera_post_connect_wait_s`, `realsense_warmup_s`).
 
 **의미**: RealSense 두 대를 동시에 쓸 때 stream 시작 순서/warmup으로 인한 timeout 문제를 줄입니다.
 
-**병렬 connect() 재검증**(2026-07-24): 카메라 2대를 순차로 `connect()`하면 `warmup_s`(기본 10초)가 카메라 수만큼 곱해져 20초 이상 걸린다. 예전에 병렬 연결을 시도했다가 실제 하드웨어에서 실패해 순차로 되돌렸었는데, 그 원인이 USB 대역폭 경합이 아니라 당시 CPU 쿨링 문제였을 가능성이 있어 `scripts/tools/camera_parallel_connect_test.py`(로봇 없이 카메라만 테스트)로 재검증했다. 3회 연속 성공(~10.3~10.4초, 카메라 1대 warmup_s와 거의 동일 — 실제로 병렬로 겹쳐서 도는 것 확인)해서 `PiperFollower.connect()`를 다시 병렬로 되돌렸다. 나중에 같은 실패가 재현되면 `piper_follower.py`의 해당 부분을 순차 for 루프로 되돌릴 것.
+카메라 연결 실패 시 RealSense hardware reset 후 한 번 재시도하는 복구 경로도
+추가했습니다. RGB-D 동기화와 Depth 저장에 관한 세부사항은
+[Depth 문서](depth/README.md)를 참고합니다.
 
-## 6. `teleop_ui.py` — 원본의 launcher 골격을 유지한 채 대폭 확장
+## 6. Depth 녹화 지원
+
+WEGO 원본은 RealSense depth stream을 켤 수 있지만 LeRobotDataset에 저장하지
+않았습니다. 이 레포는 LeRobot v0.6.0의 Depth 지원을 로컬 LeRobot v0.4.4 구조에
+백포트해 다음 경로를 추가했습니다.
+
+- RealSense RGB-D paired read
+- Depth quantize/dequantize
+- HEVC `gray12le` lossless 저장
+- Dataset 재로드, 통계, replay 및 viewer
+
+외부 LeRobot clone의 수정 파일과 적용 방법은
+[Depth 문서](depth/README.md)에 따로 보관합니다.
+
+## 7. Effort 및 Velocity 녹화
+
+Piper SDK의 전류 기반 effort와 관절 velocity를 observation에 추가했습니다.
+`USE_EFFORT=true`일 때 `observation.state`는 position 7개, effort 7개,
+velocity 6개로 구성됩니다. GUI와 셸 녹화 경로 모두에서 실제 데이터 저장을
+확인했습니다.
+
+Effort 녹화 구현은 [Effort 문서](effort/effort.md), 실물 확인 상태는
+[검증 문서](effort/verification_effort.md)를 참고합니다. 현재 effort 안전
+임계값과 안전 컷오프의 물리적 동작은 실물에서 검증하지 않았습니다.
+
+## 8. `teleop_ui.py` — 원본의 launcher 골격을 유지한 채 대폭 확장
 
 WEGO 원본의 `teleop_ui.py`(엔트리포인트 `piper-monitor`)도 이미 "CAN 인터페이스 감지/초기화 + 미리 구성된 원격조종/기록 명령 실행 + 관절 위치·팔로워 상태 실시간 표시"라는 기본 골격을 갖고 있었습니다. 이 레포는 그 골격(subprocess launcher + CAN monitor) 자체는 그대로 두고, 그 위에 다음을 추가했습니다:
 
 - Record/Infer/Replay(Real Robot)/Infer Preview(RViz) 프리셋과 Dataset Browser, Recording History
 - E-STOP 버튼(follower+leader CAN 즉시 차단), RViz Start/Stop 토글, Play 버튼의 RViz 유무 자동 분기 재생
-- 녹화 종료 후 카메라 release 처리, 녹화 초반 프레임 parking 자동 보정(`smooth_start_frames.py`)
+- 녹화 종료 후 카메라 release 처리
 - Task 텍스트를 dataset 폴더명에 반영, Episode Time/Reset Time/FPS를 GUI에서 직접 조절
+- Depth view와 `Record Effort` 설정을 Record/Infer 명령에 반영
 
 엔트리포인트 이름도 `piper-monitor`에서 `piper-teleop`으로 바꿨습니다.
 
 **의미**: CAN 신호를 보내는 각 도구를 따로 실행하지 않고, GUI 하나에서 텔레옵→녹화→재생→추론 미리보기까지 이어지는 실험 흐름을 처리할 수 있습니다.
 
-## 7. `piper-setup`(`arm_setup_ui.py`) 제거 — WEGO 원본엔 있었지만 이 레포에서 삭제함
+## 9. `piper-setup`(`arm_setup_ui.py`) 제거 — WEGO 원본엔 있었지만 이 레포에서 삭제함
 
 WEGO 원본은 CAN 포트 스캔/역할 지정을 위한 별도 마법사(`arm_setup_ui.py`, `piper-setup`)를 제공합니다. 이 레포는 이 파일을 삭제했습니다 — 같은 기능(CAN 감지, 이름 고정)이 `teleop_ui.py`의 CAN Setup 패널에 이미 있었고, 여기에 `ctrl_mode`를 읽어 leader/follower 역할을 자동 판별하는 기능까지 추가되어 있어 완전히 대체 가능했기 때문입니다.
 
@@ -146,5 +181,7 @@ WEGO 구현을 대체하거나 재작성한 게 아니라, WEGO의 Piper followe
 3. follower 강제 parking으로 인한 시작 자세 틀어짐 방지
 4. leader/follower 시작 자세 차이로 인한 follower jump 방지
 5. RealSense 두 대 사용 시 stream 안정성 확보
-6. `teleop_ui.py`를 녹화/추론/재생/RViz까지 아우르는 통합 콘솔로 확장
-7. 중복되던 `piper-setup` 마법사를 통합 콘솔의 CAN Setup 패널로 흡수
+6. RealSense Depth를 LeRobotDataset에 무손실로 저장
+7. Effort와 velocity를 observation에 추가해 데이터셋에 저장
+8. `teleop_ui.py`를 녹화/추론/재생/RViz까지 아우르는 통합 콘솔로 확장
+9. 중복되던 `piper-setup` 마법사를 통합 콘솔의 CAN Setup 패널로 흡수

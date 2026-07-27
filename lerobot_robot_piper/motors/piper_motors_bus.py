@@ -186,6 +186,53 @@ class PiperMotorsBus(MotorsBus):
         }
         return self._normalize(rlt)
 
+    def get_effort(self) -> dict[str, float]:
+        # GetArmHighSpdInfoMsgs().motor_N.effort: current 기반 고정계수 변환값, 단위 0.001 N·m.
+        # 실제 토크 센서 값이 아니라 자세(중력/마찰)에 따라 접촉 없이도 값이 바뀔 수 있음.
+        msg_hs = self.piper.GetArmHighSpdInfoMsgs()
+        msg_gripr = self.piper.GetArmGripperMsgs()
+        return {
+            "joint1": msg_hs.motor_1.effort * 0.001,
+            "joint2": msg_hs.motor_2.effort * 0.001,
+            "joint3": msg_hs.motor_3.effort * 0.001,
+            "joint4": msg_hs.motor_4.effort * 0.001,
+            "joint5": msg_hs.motor_5.effort * 0.001,
+            "joint6": msg_hs.motor_6.effort * 0.001,
+            "gripper": msg_gripr.gripper_state.grippers_effort * 0.001,
+        }
+
+    def get_velocity(self) -> dict[str, float]:
+        # motor_speed: 0.001 rad/s. 안전 컷오프가 자세/속도로 인한 effort 노이즈를
+        # 걸러내려면 effort와 같은 타임스탬프의 속도가 필요 — get_effort()와 짝지어 로깅.
+        msg_hs = self.piper.GetArmHighSpdInfoMsgs()
+        return {
+            "joint1": msg_hs.motor_1.motor_speed * 0.001,
+            "joint2": msg_hs.motor_2.motor_speed * 0.001,
+            "joint3": msg_hs.motor_3.motor_speed * 0.001,
+            "joint4": msg_hs.motor_4.motor_speed * 0.001,
+            "joint5": msg_hs.motor_5.motor_speed * 0.001,
+            "joint6": msg_hs.motor_6.motor_speed * 0.001,
+        }
+
+    def is_overloaded(self, effort: dict[str, float], limit: float) -> bool:
+        # effort: get_effort()가 반환하는 dict(N·m). 관절 하나라도 임계값을 넘으면 True.
+        return any(abs(val) > limit for val in effort.values())
+
+    def enter_mit_compliance(
+        self,
+        pos_ref: dict[str, float],
+        kp: float = 10.0,
+        kd: float = 0.8,
+    ) -> None:
+        # 위치 유지형 컴플라이언스(t_ref=0)만 구현 — 실제 순응 힘/kp-kd 튜닝은
+        # 실기에서. is_overloaded() 감지 시 우선은 send_action 쪽에서 명령을
+        # 그냥 보류(정지)하는 게 기본 경로이고, 이 메서드는 그다음 단계 확장용.
+        self.piper.MotionCtrl_2(ctrl_mode=0x01, move_mode=0x01, is_mit_mode=0xAD)
+        for motor_num, joint in enumerate(
+            ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"], start=1
+        ):
+            self.piper.JointMitCtrl(motor_num, pos_ref[joint], 0.0, kp, kd, 0.0)
+
     def get_control(self) -> dict[str, Any]:
         msg_joint = self.piper.GetArmJointCtrl()
         msg_gripr = self.piper.GetArmGripperCtrl()

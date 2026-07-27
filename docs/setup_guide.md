@@ -1,6 +1,6 @@
 # Setup Guide
 
-이 문서는 `lerobot_robot_piper` 레포를 실제 Piper leader/follower 실험에 사용하기 위한 환경 준비와 설정 방법을 정리합니다. 실행 순서는 [docs/operations.md](docs/operations.md)를 참고합니다.
+이 문서는 `lerobot_robot_piper` 레포를 실제 Piper leader/follower 실험에 사용하기 위한 환경 준비와 설정 방법을 정리합니다. 실행 순서는 [operations.md](operations.md), ROS 2/RViz/URDF 설치는 [rviz_setup.md](rviz_setup.md)를 참고합니다.
 
 ## 1. 기본 환경
 
@@ -148,7 +148,17 @@ python3 scripts/tools/realsense_view.py --serial 243322071626
 bash scripts/3__set_camera.sh TOP_CAM WRIST_CAM
 ```
 
-## 5. 동작 확인
+## 5. ROS 2 / RViz 설정
+
+RViz는 선택 기능이며 실제 로봇 제어에는 사용하지 않습니다. 녹화 replay와 policy
+action을 Piper URDF로 시각화하려면 [RViz 재현 절차](rviz_setup.md)에 따라
+ROS 2 Humble 최소 패키지, 고정 URDF 커밋과 `agx_arm_description` wrapper를
+준비합니다.
+
+`agx_arm_ros` 전체 제어 스택은 현재 `piper_sdk` 제어 경로와 역할이 중복되므로
+기본 설치 대상이 아닙니다.
+
+## 6. 동작 확인
 
 CAN 초기화:
 
@@ -175,7 +185,7 @@ bash scripts/4__teleoperate.sh
 - action offset report가 과도하지 않음
 - 카메라 preview 또는 display가 의도한 방향을 보여줌
 
-## 6. 녹화 전 최종 확인
+## 7. 녹화 전 최종 확인
 
 - `configs/recording.env`가 실제 장비 값을 가리킴
 - `DATASET_REPO_ID`, `DATASET_ROOT`가 새 실험 이름을 사용함

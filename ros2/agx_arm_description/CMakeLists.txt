@@ -1,0 +1,10 @@
+cmake_minimum_required(VERSION 3.8)
+project(agx_arm_description)
+
+find_package(ament_cmake REQUIRED)
+
+install(DIRECTORY agx_arm_urdf DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY rviz DESTINATION share/${PROJECT_NAME})
+
+ament_package()

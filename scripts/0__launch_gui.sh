@@ -13,6 +13,7 @@ load_recording_env
 SKIP_CAN_INIT="$(bool_default "${SKIP_CAN_INIT:-}" false)"
 SKIP_JOINT_CHECK="$(bool_default "${SKIP_JOINT_CHECK:-}" false)"
 ROS_DISTRO_NAME="${ROS_DISTRO_NAME:-humble}"
+ROS_SETUP_PATH="${ROS_SETUP_PATH:-/opt/ros/${ROS_DISTRO_NAME}/setup.bash}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-ugrp}"
 
 echo "=== [0/3] conda 가상환경 활성화 (${CONDA_ENV_NAME}) ==="
@@ -92,7 +93,7 @@ else
   fi
 fi
 
-ros_setup="/opt/ros/${ROS_DISTRO_NAME}/setup.bash"
+ros_setup="${ROS_SETUP_PATH}"
 if [[ -f "${ros_setup}" ]]; then
   # ROS2 setup.bash 내부가 set -u와 안 맞는 미설정 변수(AMENT_TRACE_SETUP_FILES 등)를
   # 참조해서 죽으므로 conda.sh와 마찬가지로 잠시 해제.

@@ -40,10 +40,49 @@ import argparse
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import sys
 import time
+
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+RECORDING_ENV_PATH = REPO_ROOT / "configs" / "recording.env"
+
+
+def _load_recording_env(path: pathlib.Path = RECORDING_ENV_PATH) -> dict[str, str]:
+    """Load simple KEY=VALUE entries so direct CLI runs use recording.env too."""
+    values: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return values
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key:
+            values[key] = value
+    return values
+
+
+_RECORDING_ENV = _load_recording_env()
+
+
+def _config_value(name: str, default: str) -> str:
+    value = os.environ.get(name) or _RECORDING_ENV.get(name) or default
+    return os.path.expandvars(os.path.expanduser(value))
+
+
+_DEFAULT_WORKSPACE_ROOT = REPO_ROOT.parent
+_ROS_DISTRO = _config_value("ROS_DISTRO_NAME", "humble")
 
 # ───────────────────────────────────────────────
 # 설정값 — 실험 환경에 맞게 수정
@@ -65,12 +104,18 @@ CFG = {
     # 카메라
     "top_serial":       "327122074262",
     "wrist_serial":     "243322071626",
-    # URDF — 주의: 이 PC(ugrp43)엔 /opt/ros/* 자체가 설치돼 있지 않음(확인함, 2026-07-09).
-    # ROS2가 설치되기 전까지 rviz/rviz_preview 스텝은 이 경로값과 무관하게 동작 안 함.
-    "urdf_repo":        "https://github.com/agilexrobotics/agx_arm_urdf.git",
-    "urdf_local_dir":   "/home/ugrp43/UGRP/agx_arm_urdf",
-    "ros2_ws":          "/home/ugrp43/UGRP/ros2_ws",
-    "ros_distro":       "humble",
+    # RViz/URDF — environment > configs/recording.env > portable fallback 순서.
+    "urdf_repo": _config_value(
+        "URDF_REPO", "https://github.com/agilexrobotics/agx_arm_urdf.git"
+    ),
+    "urdf_local_dir": _config_value(
+        "URDF_LOCAL_DIR", str(_DEFAULT_WORKSPACE_ROOT / "agx_arm_urdf")
+    ),
+    "ros2_ws": _config_value("ROS2_WS", str(_DEFAULT_WORKSPACE_ROOT / "ros2_ws")),
+    "ros_distro": _ROS_DISTRO,
+    "ros_setup_path": _config_value(
+        "ROS_SETUP_PATH", f"/opt/ros/{_ROS_DISTRO}/setup.bash"
+    ),
     # 데이터셋 — 레포 내 records/ 컨벤션(configs/recording.env의 DATASET_ROOT)과 맞춤
     "dataset_root":     "/home/ugrp43/lerobot_robot_piper-gui-refactor/records/local/piper-smolvla",
     "dataset_repo_id":  "local/piper-smolvla",
@@ -142,12 +187,12 @@ def source_prefix():
     수정."""
     conda_base = CFG["conda_base"]
     conda_env  = CFG["conda_env"]
-    distro     = CFG["ros_distro"]
     ws         = CFG["ros2_ws"]
+    ros_setup  = CFG["ros_setup_path"]
     return (
         f"source {conda_base}/etc/profile.d/conda.sh 2>/dev/null && conda activate {conda_env} || true; "
-        f"source /opt/ros/{distro}/setup.bash 2>/dev/null || true; "
-        f"source {ws}/install/setup.bash 2>/dev/null || true; "
+        f"source {shlex.quote(ros_setup)} 2>/dev/null || true; "
+        f"source {shlex.quote(str(pathlib.Path(ws) / 'install/setup.bash'))} 2>/dev/null || true; "
     )
 
 def bash(cmd_str, check=True):
@@ -499,7 +544,7 @@ def step_rviz(args):
 
     urdf_dir = pathlib.Path(CFG["urdf_local_dir"])
     ros2_ws  = pathlib.Path(CFG["ros2_ws"])
-    distro   = CFG["ros_distro"]
+    ros_setup = pathlib.Path(CFG["ros_setup_path"])
 
     # 1. agx_arm_urdf 클론
     if not urdf_dir.exists():
@@ -530,8 +575,8 @@ def step_rviz(args):
     # 3. colcon build
     info("colcon build 실행 중...")
     build_cmd = (
-        f"source /opt/ros/{distro}/setup.bash && "
-        f"cd {ros2_ws} && "
+        f"source {shlex.quote(str(ros_setup))} && "
+        f"cd {shlex.quote(str(ros2_ws))} && "
         f"colcon build --packages-select agx_arm_description 2>&1 | tail -20"
     )
     built = run(["bash", "-c", build_cmd])
@@ -545,8 +590,8 @@ def step_rviz(args):
     info("RViz에서 /preview_trajectory (Marker) 토픽을 Add 해야 궤적이 보여")
 
     rviz_cmd = (
-        f"source /opt/ros/{distro}/setup.bash && "
-        f"source {ros2_ws}/install/setup.bash && "
+        f"source {shlex.quote(str(ros_setup))} && "
+        f"source {shlex.quote(str(ros2_ws / 'install/setup.bash'))} && "
         f"ros2 launch agx_arm_description display_piper.launch.py"
     )
     try:
@@ -807,7 +852,10 @@ def step_rviz_preview(args):
         from rclpy.node import Node
         from sensor_msgs.msg import JointState
     except ImportError:
-        err("rclpy/sensor_msgs 없음 — source /opt/ros/humble/setup.bash 후 재실행")
+        err(
+            "rclpy/sensor_msgs 없음 — "
+            f"source {CFG['ros_setup_path']} 후 재실행"
+        )
         return False
 
     joint_msg_names = _RVIZ_JOINT_NAMES + [_RVIZ_GRIPPER_NAME]

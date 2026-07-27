@@ -31,6 +31,24 @@ if os.environ.get("PIPER_LOG_TIMING") == "1":
     logger.propagate = False
 
 
+def _hardware_reset_realsense(serial_number: str) -> bool:
+    """serial_number에 해당하는 RealSense 장치를 hardware_reset()으로 복구.
+
+    RealSense 전용(다른 카메라 타입엔 serial_number 속성 자체가 없어 호출 전에
+    걸러짐) — pyrealsense2가 없거나 장치를 못 찾으면 False를 돌려줘서
+    호출부가 원래 예외를 그대로 올리게 한다.
+    """
+    try:
+        import pyrealsense2 as rs
+    except ImportError:
+        return False
+    for dev in rs.context().query_devices():
+        if dev.get_info(rs.camera_info.serial_number) == str(serial_number):
+            dev.hardware_reset()
+            return True
+    return False
+
+
 class PiperFollower(Robot):
 
     config_class = PiperFollowerConfig
@@ -79,6 +97,21 @@ class PiperFollower(Robot):
         return {f"{motor}.pos": float for motor in self.bus.motors}
 
     @property
+    def _effort_ft(self) -> dict[str, type]:
+        if not self.config.use_effort:
+            return {}
+        return {f"{motor}.effort": float for motor in self.bus.motors}
+
+    @property
+    def _velocity_ft(self) -> dict[str, type]:
+        # 실시간 안전 컷오프/외력 추정은 effort와 같은 타임스탬프의 속도가 필요 —
+        # 별도 플래그를 늘리지 않고 use_effort에 묶어서 같이 켠다. 그리퍼는 SDK에
+        # motor_speed가 없음.
+        if not self.config.use_effort:
+            return {}
+        return {f"{motor}.vel": float for motor in self.bus.motors if motor != "gripper"}
+
+    @property
     def _cameras_ft(self) -> dict[str, tuple]:
         features = {}
         for cam_key, cam in self.cameras.items():
@@ -89,7 +122,9 @@ class PiperFollower(Robot):
 
     @cached_property
     def observation_features(self) -> dict:
-        return {**self._motors_ft, **self._cameras_ft}
+        # lerobot의 hw_to_dataset_features()가 float 타입 키를 전부 observation.state로
+        # 합치므로, effort는 별도 스키마 배선 없이 .pos 옆에 얹히기만 하면 됨.
+        return {**self._motors_ft, **self._effort_ft, **self._velocity_ft, **self._cameras_ft}
 
     @cached_property
     def action_features(self) -> dict:
@@ -126,12 +161,30 @@ class PiperFollower(Robot):
         # 아래를 순차 for 루프로 되돌릴 것.
         if self.cameras:
             with ThreadPoolExecutor(max_workers=len(self.cameras), thread_name_prefix="cam_connect") as executor:
-                futures = [
-                    executor.submit(cam.connect, warmup=self.config.camera_connect_warmup)
-                    for cam in self.cameras.values()
-                ]
-                for future in futures:
-                    future.result()
+                futures = {
+                    cam_key: executor.submit(cam.connect, warmup=self.config.camera_connect_warmup)
+                    for cam_key, cam in self.cameras.items()
+                }
+                for cam_key, future in futures.items():
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        cam = self.cameras[cam_key]
+                        serial = getattr(cam, "serial_number", None)
+                        # depth 켠 상태에서 RealSense가 가끔 "멈춘" 상태로 들어가서
+                        # (color는 살아있는데 depth 프레임이 영영 안 옴) 아무리 오래
+                        # 기다려도(warmup_s를 늘려도) 안 풀리는 걸 실측으로 확인함
+                        # (2026-07-26) — pyrealsense2의 device.hardware_reset()을 부르면
+                        # 즉시 복구됨도 같이 확인. USB 재열거에 몇 초 걸리므로 대기 후
+                        # 딱 한 번만 재시도 — 그래도 안 되면 원래 예외를 그대로 올린다.
+                        if serial is None or not _hardware_reset_realsense(serial):
+                            raise
+                        logger.warning(
+                            f"{self} camera '{cam_key}' connect failed ({exc}); "
+                            "hardware_reset() 후 재시도"
+                        )
+                        time.sleep(6.0)
+                        cam.connect(warmup=self.config.camera_connect_warmup)
 
         if self.cameras and not self.config.camera_connect_warmup:
             # 동시 RealSense stream 안정화 대기
@@ -171,25 +224,36 @@ class PiperFollower(Robot):
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
-        # Capture images from cameras (parallel) — RGB와 depth를 각각 순차 단계로
-        # 나눠 제출하면 (RGB 전부 끝날 때까지 depth를 시작조차 안 해서) 두 단계
-        # 시간이 그대로 더해짐(실측 25ms+33ms≈58ms, 목표 33ms의 거의 2배) —
-        # 카메라당 color/depth 요청을 한 번에 다 같이 제출해서 전부 병렬로 겹치게 함.
+        if self.config.use_effort:
+            effort = self.bus.get_effort()
+            obs_dict.update({f"{motor}.effort": val for motor, val in effort.items()})
+            velocity = self.bus.get_velocity()
+            obs_dict.update({f"{motor}.vel": val for motor, val in velocity.items()})
+
+        # Capture images from cameras (parallel) — 카메라당 요청 하나씩 병렬 제출.
+        # depth 카메라는 async_read()+read_depth()를 따로 안 부르고 async_read_paired()
+        # 하나만 쓴다 — 두 콜을 각자 스레드로 동시에 돌리면 둘 다 같은 new_frame_event를
+        # 기다렸다 지우면서 서로 경쟁해서, color와 depth가 다른 frameset(다른 순간)에서
+        # 나올 수 있었다(RealSenseCamera._read_loop()는 같은 frameset에서 둘을 같이
+        # 락 안에서 갱신하므로 원래는 항상 짝이 맞음 — async_read_paired()가 락 한 번으로
+        # 그 짝을 그대로 보존해서 반환). 병렬 실측 시간(25ms+33ms≈58ms)은 그대로 유지.
         if self.cameras:
             futures = {}
             for cam_key, cam in self.cameras.items():
-                futures[cam_key] = (self._camera_executor.submit(cam.async_read), time.perf_counter())
-                if getattr(cam, "use_depth", False):
-                    futures[f"{cam_key}_depth"] = (
-                        self._camera_executor.submit(cam.read_depth, timeout_ms=0),
-                        time.perf_counter(),
-                    )
+                use_depth = getattr(cam, "use_depth", False)
+                read_fn = cam.async_read_paired if use_depth else cam.async_read
+                futures[cam_key] = (self._camera_executor.submit(read_fn), time.perf_counter(), use_depth)
 
-            for key, (future, start) in futures.items():
+            for cam_key, (future, start, use_depth) in futures.items():
                 result = future.result()
-                obs_dict[key] = result[..., None] if key.endswith("_depth") else result
+                if use_depth:
+                    color, depth = result
+                    obs_dict[cam_key] = color
+                    obs_dict[f"{cam_key}_depth"] = depth[..., None]
+                else:
+                    obs_dict[cam_key] = result
                 dt_ms = (time.perf_counter() - start) * 1e3
-                logger.debug(f"{self} read {key}: {dt_ms:.1f}ms")
+                logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
 
         return obs_dict
 
@@ -242,9 +306,25 @@ class PiperFollower(Robot):
             goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
             goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
 
+        # 실시간 안전 컷오프. use_effort(데이터셋 로깅 플래그)와 무관하게 항상 동작 —
+        # get_effort()를 여기서 직접 읽는다. 리플레이/정책 출력이 관절 명령으로 바뀌어
+        # 로봇에 나가는 지점이 바로 이 set_action 직전이라 여기서 끊는다.
+        # 컴플라이언스(MIT 모드) 전환 대신 우선은 이 스텝의 명령을 그냥 보류(마지막으로
+        # 실제 전송된 목표를 유지) — 컴플라이언스 kp/kd 튜닝은 다음 단계.
+        if self.config.safety_enabled:
+            effort = self.bus.get_effort()
+            if self.bus.is_overloaded(effort, self.config.safety_effort_limit):
+                logger.warning(
+                    f"{self} safety cutoff: effort {effort} exceeds "
+                    f"{self.config.safety_effort_limit} N·m, holding last commanded position"
+                )
+                held_pos = getattr(self, "_last_sent_goal_pos", None) or self.bus.get_action()
+                return {f"{motor}.pos": val for motor, val in held_pos.items()}
+
         _t0 = time.perf_counter()
         self.bus.set_action(goal_pos, is_conv=True)
         logger.debug(f"{self} set_action: {(time.perf_counter() - _t0) * 1e3:.1f}ms")
+        self._last_sent_goal_pos = goal_pos
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
 
     def _manual_action_offset(self, goal_pos: dict[str, float]) -> dict[str, float]:

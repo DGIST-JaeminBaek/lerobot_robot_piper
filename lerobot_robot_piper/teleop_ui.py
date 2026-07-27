@@ -530,6 +530,18 @@ class PiperMonitorUI:
         ttk.Entry(timing_row, textvariable=self.smooth_frames_var, width=5).pack(side="left", padx=2)
         ttk.Label(timing_row, text="frames").pack(side="left", padx=(0, 4))
 
+        # effort observation 토글. 데이터셋 스키마(observation.state 차원)가 바뀌므로
+        # 같은 데이터셋 안에서 켰다 껐다 섞지 말 것 — _observation_toggle_args()에서
+        # --robot.use_effort로 반영된다.
+        # 기본 ON (PiperFollowerConfig.use_effort와 같은 방침) — 안 찍은 건 되살릴 수
+        # 없고, 켜는 비용은 프레임당 52바이트에 인코딩 시간과 무관하다.
+        self.use_effort_var = tk.BooleanVar(
+            value=(self.recording_env.get("USE_EFFORT") or "true").lower() == "true"
+        )
+        ttk.Checkbutton(timing_row, text="Record Effort", variable=self.use_effort_var).pack(
+            side="left", padx=(12, 2)
+        )
+
         # Dataset Root 수동 지정 — 비어 있으면 기존 방식(recording.env DATASET_ROOT + task
         # slug 치환)을 그대로 씀. Browse로 직접 고르면 이 값을 최우선으로 씀
         # (_dataset_args 참고). 우분투에서도 GTK 네이티브 폴더 선택 다이얼로그로 뜸.
@@ -615,11 +627,15 @@ class PiperMonitorUI:
 
         # 입력값이 바뀔 때마다 Command를 자동으로 다시 조립 — Preset을 재선택 안 해도
         # 항상 최신 값 기준 커맨드가 보이게 해서, 옛날 커맨드로 Launch 누르는 실수를 막음.
+        # use_effort_var도 반드시 포함할 것 — 여기 빠져 있으면 체크박스를 켜도 Command
+        # 문자열이 그대로라 옛 커맨드로 Launch된다(effort 없이 녹화되고도 에러가 안 나서
+        # 데이터를 열어보기 전까지 모른다).
         for var in (
             self.leader_port_var, self.follower_port_var,
             self.task_var, self.num_episodes_var, self.policy_path_var,
             self.episode_time_var, self.reset_time_var, self.fps_var,
             self.push_to_hub_var, self.dataset_root_override_var,
+            self.use_effort_var,
             self.timestamp_enabled_var,
         ):
             var.trace_add("write", self._refresh_command)
@@ -810,13 +826,24 @@ class PiperMonitorUI:
     def _start_rviz(self):
         """piper_session.py --step rviz와 동일한 launch 커맨드(source ROS2 humble +
         ros2_ws overlay, ros2 launch agx_arm_description display_piper.launch.py)를
-        이 GUI의 자식 프로세스로 띄움. ROS_DISTRO_NAME/ROS2_WS는 recording.env로
-        덮어쓸 수 있고, 기본값은 이 실험실 PC 기준."""
+        이 GUI의 자식 프로세스로 띄움. ROS_DISTRO_NAME/ROS_SETUP_PATH/ROS2_WS는
+        recording.env로 덮어쓸 수 있음."""
         distro = self.recording_env.get("ROS_DISTRO_NAME") or "humble"
-        ros2_ws = self.recording_env.get("ROS2_WS") or "/home/ugrp43/UGRP/ros2_ws"
+        ros_setup = pathlib.Path(
+            os.path.expandvars(
+                self.recording_env.get("ROS_SETUP_PATH")
+                or f"/opt/ros/{distro}/setup.bash"
+            )
+        ).expanduser()
+        ros2_ws = pathlib.Path(
+            os.path.expandvars(
+                self.recording_env.get("ROS2_WS")
+                or str(REPO_ROOT.parent / "ros2_ws")
+            )
+        ).expanduser()
         cmd = (
-            f"source /opt/ros/{distro}/setup.bash && "
-            f"source {ros2_ws}/install/setup.bash && "
+            f"source {shlex.quote(str(ros_setup))} && "
+            f"source {shlex.quote(str(ros2_ws / 'install/setup.bash'))} && "
             f"ros2 launch agx_arm_description display_piper.launch.py"
         )
 
@@ -1164,6 +1191,7 @@ class PiperMonitorUI:
             "RESET_TIME_S": self.reset_time_var.get().strip(),
             "PUSH_TO_HUB": "true" if self.push_to_hub_var.get() else "false",
             "SMOOTH_START_FRAMES": self.smooth_frames_var.get().strip() if self.smooth_enabled_var.get() else "0",
+            "USE_EFFORT": "true" if self.use_effort_var.get() else "false",
         }
         if self.dataset_root_override_var.get().strip():
             updates["DATASET_ROOT"] = self.dataset_root_override_var.get().strip()
@@ -1218,7 +1246,17 @@ class PiperMonitorUI:
             f"--robot.camera_post_connect_wait_s={env.get('CAMERA_POST_CONNECT_WAIT_S') or '2.0'}",
             f"--robot.top_realsense_use_depth={env.get('TOP_REALSENSE_USE_DEPTH') or realsense_use_depth}",
             f"--robot.wrist_realsense_use_depth={env.get('WRIST_REALSENSE_USE_DEPTH') or realsense_use_depth}",
+            *self._observation_toggle_args(),
         ]
+
+    def _observation_toggle_args(self) -> list[str]:
+        """effort observation 토글. Record/Infer preset 체크박스가 recording.env 값보다
+        우선함(Task/Num Episodes 등 다른 GUI 입력값과 동일한 원칙).
+        depth는 여기가 아니라 위쪽의 realsense_use_depth가 담당한다.
+        effort 안전 컷오프(safety_enabled/safety_effort_limit)는 여기가 아니라
+        _robot_safety_args()에 있음 — Teleoperate/Replay도 커버해야 해서 그쪽에 둠."""
+        use_effort = "true" if self.use_effort_var.get() else "false"
+        return [f"--robot.use_effort={use_effort}"]
 
     def _action_offset_args(self) -> list[str]:
         """robot_action_offset_args()(run_common.sh)와 동일한 fallback."""
@@ -1240,7 +1278,10 @@ class PiperMonitorUI:
         ]
 
     def _robot_safety_args(self) -> list[str]:
-        """robot_safety_args()(run_common.sh)와 동일한 fallback."""
+        """robot_safety_args()(run_common.sh)와 동일한 fallback.
+        Teleoperate/Record/Infer/Replay 네 커맨드 전부가 이 함수 하나만 공유함 —
+        effort 안전 컷오프(safety_enabled/safety_effort_limit)도 여기 있어야
+        Replay 경로("팔이 뻗는" 사고 예방)까지 확실히 적용된다."""
         env = self.recording_env
         max_rel = (env.get("MAX_RELATIVE_TARGET") or "5.0").strip()
         if max_rel.lower() in ("off", "none", "null", "disabled"):
@@ -1248,6 +1289,8 @@ class PiperMonitorUI:
         return [
             f"--robot.max_relative_target={max_rel}",
             f"--robot.disable_torque_on_disconnect={env.get('DISABLE_TORQUE_ON_DISCONNECT') or 'true'}",
+            f"--robot.safety_enabled={(env.get('SAFETY_ENABLED') or 'true').lower()}",
+            f"--robot.safety_effort_limit={env.get('SAFETY_EFFORT_LIMIT') or '8.0'}",
         ]
 
     def _dataset_args(self, fps: str) -> list[str]:
@@ -1396,17 +1439,6 @@ class PiperMonitorUI:
         ]
         return " ".join(args)
 
-    def _robot_safety_args(self) -> list[str]:
-        """scripts/lib/run_common.sh의 robot_safety_args()와 동일한 fallback."""
-        env = self.recording_env
-        max_rel = (env.get("MAX_RELATIVE_TARGET") or "5.0").strip()
-        if max_rel.lower() in ("off", "none", "null", "disabled"):
-            max_rel = "null"
-        return [
-            f"--robot.max_relative_target={max_rel}",
-            f"--robot.disable_torque_on_disconnect={env.get('DISABLE_TORQUE_ON_DISCONNECT') or 'true'}",
-        ]
-
     def _build_replay_real_command(self) -> str:
         """Dataset Browser에서 고른 dataset/episode를 lerobot-replay로 실제
         follower 로봇에 재생 (scripts/6__replay.sh와 동일한 커맨드). RViz
@@ -1423,6 +1455,10 @@ class PiperMonitorUI:
             "lerobot-replay",
             f"--robot.type=piper_follower --robot.port={follower_port}",
             *self._robot_safety_args(),
+            # recorded action은 send_action()이 실제로 follower에 보낸 값(offset 이미
+            # 적용된 절대값) — replay 때 use_action_offset이 켜져 있으면 또 한 번
+            # 보정이 얹혀서 이중 보정이 되므로 꺼야 함(scripts/6__replay.sh와 동일).
+            "--robot.use_action_offset=false",
             f"--dataset.repo_id={repo_id}",
             f"--dataset.root={dataset_root}",
             f"--dataset.episode={episode}",

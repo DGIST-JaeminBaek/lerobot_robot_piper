@@ -61,15 +61,33 @@ def _load_initialize_position() -> dict[str, float]:
     return {k: float(v) for k, v in INITIALIZE_POSITION.items()}
 
 
-def _parking_vector(feature_names: list[str], parking: dict[str, float]) -> np.ndarray:
-    """피처 이름 순서(예: ['joint1.pos', ..., 'gripper.pos'])에 맞춘 parking 벡터."""
-    vec = []
+def _parking_vector(
+    feature_names: list[str], parking: dict[str, float]
+) -> tuple[np.ndarray, np.ndarray]:
+    """피처 이름 순서에 맞춘 parking 벡터와 '보정 대상' 마스크를 함께 반환.
+
+    USE_EFFORT=true로 녹화하면 observation.state가 pos(7) + effort(7) + vel(6) = 20차원이
+    된다(lerobot이 float 피처를 state 한 벡터로 합침 — test_dataset_features_mock.py 참고).
+    effort/vel은 자세가 아니라 측정값이라 parking 자세로 덮어쓰면 안 된다.
+
+    예전엔 이름을 '.'로 잘라서만 매칭해 'joint2.effort' -> parking['joint2'] = -100 처럼
+    관절 정규화 위치값을 effort/vel 칸에 써넣었고, 그 결과 모든 에피소드의 초반 N(기본
+    100 = 30fps에서 3.3초) 프레임 effort/vel이 조용히 망가졌다. 마스크로 .pos만 보간한다.
+    (USE_EFFORT=false면 names가 전부 .pos라 마스크가 전부 True — 기존 동작과 동일.)"""
+    vec, mask = [], []
     for name in feature_names:
+        # 모르는 접미사는 예전처럼 parking 매칭을 시도해서, 못 찾으면 조용히 넘어가지 않고
+        # KeyError로 멈춘다(틀린 값으로 덮어쓰는 것보다 낫다는 기존 방침 유지).
+        if name.endswith((".effort", ".vel")):
+            mask.append(False)
+            vec.append(0.0)
+            continue
         key = name.split(".")[0]  # "joint1.pos" -> "joint1"
         if key not in parking:
             raise KeyError(f"parking position에 '{key}' (from '{name}') 없음: {list(parking)}")
+        mask.append(True)
         vec.append(parking[key])
-    return np.asarray(vec, dtype=np.float32)
+    return np.asarray(vec, dtype=np.float32), np.asarray(mask, dtype=bool)
 
 
 def _table_2d(table: pa.Table, col: str) -> np.ndarray:
@@ -89,11 +107,13 @@ def _set_2d_column(table: pa.Table, col: str, data2d: np.ndarray) -> pa.Table:
 
 
 def _interpolate_start(
-    values: np.ndarray, parking: np.ndarray, num_frames: int
+    values: np.ndarray, parking: np.ndarray, num_frames: int, mask: np.ndarray | None = None
 ) -> np.ndarray:
     """단일 에피소드(프레임 순서대로 정렬된) 값 배열의 초반부를 보간해 새 배열 반환.
 
     values: (L, dim). parking: (dim,). num_frames: 덮어쓸 초반 프레임 수 N.
+    mask: (dim,) bool — True인 컬럼만 덮어씀(None이면 전부). effort/vel 컬럼을
+    자세값으로 오염시키지 않기 위한 것 — _parking_vector 참고.
     타깃 = values[N] (없으면 마지막 프레임). i=0..end-1 을 parking->타깃 선형 보간.
     """
     L = values.shape[0]
@@ -102,9 +122,13 @@ def _interpolate_start(
     n = min(num_frames, L - 1)  # 타깃 인덱스(경계 clamp)
     target = values[n]
     out = values.copy()
+    if mask is None:
+        mask = np.ones(values.shape[1], dtype=bool)
+    if not mask.any():
+        return out
     # i = 0 .. n-1 을 덮어씀. t = i/n -> i=0에서 parking, i=n에서 target(원본 유지)
     ts = (np.arange(n, dtype=np.float32) / float(n))[:, None]
-    out[:n] = parking[None, :] * (1.0 - ts) + target[None, :] * ts
+    out[:n, mask] = parking[mask][None, :] * (1.0 - ts) + target[mask][None, :] * ts
     return out
 
 
@@ -136,7 +160,7 @@ def smooth_start(
         raise ValueError(f"편집 대상 피처가 데이터셋에 없음: {features}")
     parking_vecs = {
         f: _parking_vector(all_features[f]["names"], parking) for f in edit_features
-    }
+    }  # {feature: (parking_vec, mask)}
 
     data_files = sorted((root / "data").glob("chunk-*/file-*.parquet"))
     if not data_files:
@@ -162,7 +186,8 @@ def smooth_start(
             episode_arrays.setdefault(int(e), {})
             for feat in edit_features:
                 orig = cols2d[feat][order]
-                new = _interpolate_start(orig, parking_vecs[feat], num_frames)
+                park_vec, park_mask = parking_vecs[feat]
+                new = _interpolate_start(orig, park_vec, num_frames, park_mask)
                 if not np.array_equal(orig, new):
                     file_changed = True
                 # 원래 행 위치에 되써넣기
