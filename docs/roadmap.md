@@ -45,18 +45,22 @@
 - [ ] Effort 안전 임계값 결정 및 안전 컷오프 실물 검증 ([검증 절차](effort/verification_effort.md))
 
 ### 학습/추론
-- [ ] `scripts/7__train.sh` 학습 명령 dry-run 확인
-- [ ] 작은 dataset으로 학습 실행 확인
-- [ ] 정책 체크포인트 확보 후 Infer/Infer Preview(RViz) 프리셋 실제 검증 (현재까지 체크포인트 없어서 미검증)
-- [ ] `scripts/8__run_server.sh` / `scripts/9__run_client.sh` async 경로 확인 ([Policy 실행 문서](policy_execution.md))
+- [x] `erase_the_shape_512` 60 episodes / 30,545 frames 학습 데이터셋 생성
+- [x] SmolVLA batch 2와 batch 8의 20-step smoke test
+- [x] SmolVLA batch 8, 30,000-step 학습 완료
+- [x] 최종 checkpoint로 60개 episode 첫 chunk FK 분석
+- [x] Dataset observation 기반 RViz-only 인간 승인 preview
+- [x] 구간별 인간 승인 실물 실행 경로 및 mock test 준비
+- [ ] 최종 checkpoint로 full offline rollout 재실행
+- [ ] 구간별 인간 승인 실행의 제한적 실물 검증
+- [ ] `scripts/8__run_server.sh` / `scripts/9__run_client.sh` async 경로 확인 ([Policy 실행 문서](policy/README.md))
 - [ ] 반복 trial 기준 성공률 기록 방식 결정
 
 ## 권장 진행 순서
 
 1. gripper 물리 단위 해석을 실제 열림 정도와 눈으로 대조한다.
 2. Effort 안전 임계값과 안전 컷오프를 실물에서 검증한다.
-3. `scripts/7__train.sh`를 dry-run으로 확인한다.
-4. 작은 dataset으로 학습을 실행한다.
-5. 정책 체크포인트를 확보한 뒤 GUI Infer / Infer Preview(RViz)를 검증한다.
-6. `scripts/8__run_server.sh` / `scripts/9__run_client.sh` async 경로를 검증한다.
-7. 반복 trial의 성공률 기록 방식을 정한다.
+3. 최종 30,000-step checkpoint로 full offline rollout을 재실행한다.
+4. 10-action 구간별 인간 승인 경로를 실물에서 제한적으로 검증한다.
+5. 실제 작업 trial의 성공률을 기록한다.
+6. 필요하면 `scripts/8__run_server.sh` / `scripts/9__run_client.sh` async 경로를 별도로 검증한다.

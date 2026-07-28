@@ -54,6 +54,27 @@ class PiperFollowerConfig(RobotConfig):
     # N·m. get_effort()가 current 기반 추정치라 절대 토크값이 아니므로, 처음엔 보수적으로
     # 잡고 랩 PC에서 자유운동(무접촉) 시 관측되는 effort 노이즈 상한을 본 뒤 튜닝할 것.
     safety_effort_limit: float = 8.0
+    # 임계값을 넘었을 때 무엇을 할지.
+    #   "hold" — 기존 동작. 그 자리에서 명령만 보류(멈춘 채로 계속 서 있음).
+    #   "park" — 즉시 parking 자세로 복귀하고 그 뒤로는 명령을 받지 않음(래치).
+    # 기본 "park": 과부하가 걸린 자세 그대로 굳어 있으면 물체/작업대를 계속 누르고
+    # 있게 되는 경우가 있어서, 일단 안전한 자세로 빼는 쪽을 기본으로 둔다.
+    safety_on_overload: str = "park"
+
+    # torque 해제 방식 (motors/piper_motors_bus.py release_torque_safely 참고).
+    #   "in_place" — 이동 없이 그 자리에서 해제
+    #   "lower"    — 팔은 그대로 두고 손목(joint5)만 미리 내린 뒤 해제 (기본)
+    #   "park"     — 기존 동작: parking 자세로 이동 후 해제
+    # 실기 측정 결과 torque를 풀 때 실제로 떨어지는 건 손목뿐이고(joint1~4/6은
+    # 0.00도) 그 낙차가 24.4도였다 — 미리 내려두면 0.6도로 줄어든다. 팔을 옮기지
+    # 않으므로 lower가 기본값이어도 이동 위험이 없다(tables.py 주석 참고).
+    park_release_mode: str = "lower"
+    park_release_ramp_s: float = 2.0
+    park_release_settle_s: float = 0.5
+    # "lower"에서 손목을 미리 내릴 각도(도). 기본값은 motors/tables.py의
+    # WRIST_RELEASE_DROP_DEG와 동일 — 여기 그대로 적어둔 이유는 config가 piper_sdk를
+    # import하는 motors 패키지에 의존하지 않게 하기 위함(둘을 같이 고칠 것).
+    park_release_wrist_drop_deg: float = 24.4
 
     # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
     # Set this to a positive scalar to have the same value for all motors, or a dictionary that maps motor

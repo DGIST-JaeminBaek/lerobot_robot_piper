@@ -14,3 +14,9 @@ vertex-key.json
 last_launch.log
 .DS_Store
 tmp/
+outputs/
+명령어.txt
+timeline.md
+
+# QC / 구간 자르기 산출물 (scripts/tools/qc_studio.py 등) — 검토 결과는 재생성 가능
+configs/qc_review_*.json

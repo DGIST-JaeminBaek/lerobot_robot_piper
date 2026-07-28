@@ -32,6 +32,7 @@ import pandas as pd
 
 from .ui import _load_geometry, _save_geometry
 from .config_piper import PiperFollowerConfig
+from .motors.tables import WRIST_RELEASE_DROP_DEG
 from .piper_follower import PiperFollower
 
 from piper_sdk import C_PiperInterface_V2
@@ -61,6 +62,8 @@ CAMERA_RELEASE_WAIT_S = 1.5
 # dataset.num_episodes는 목표 episode 수가 아니라 "지금까지 기록된 episode 개수"라서
 # 0부터 시작함 — UI에 보여줄 때는 +1해서 1부터 시작하는 사람이 읽기 편한 번호로 바꿈.
 _RECORD_EPISODE_RE = re.compile(r"Recording episode (\d+)")
+# piper_follower._trip_safety()가 찍는 로그 마커 — 두 곳을 같이 고칠 것.
+_SAFETY_TRIP_MARKER = "SAFETY TRIP"
 
 # repo root (teleop_ui.py 기준 두 단계 위) / configs/recording.env
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -412,6 +415,7 @@ class PiperMonitorUI:
         self._parking_reference: dict[str, float] | None = None
         self._parking_triggered_episode = False
 
+
         # configs/recording.env 값 (없거나 읽기 실패해도 빈 dict — 각 필드는 fallback 기본값 사용)
         self.recording_env: dict[str, str] = load_recording_env()
 
@@ -582,27 +586,87 @@ class PiperMonitorUI:
             side="left", padx=(4, 2)
         )
 
+        # effort 안전 컷오프 + torque 해제 방식. 예전엔 recording.env를 직접 고쳐야
+        # 했는데(SAFETY_EFFORT_LIMIT), 임계값은 작업/자세마다 다시 잡게 되는 값이라
+        # 여기서 바로 바꾸고 Save as Default로 굳힐 수 있게 꺼냄 — _robot_safety_args()가
+        # 이 위젯 값을 recording.env보다 우선해서 커맨드에 넣는다.
+        safety_row = ttk.Frame(script_frame)
+        safety_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        self.safety_enabled_var = tk.BooleanVar(
+            value=(self.recording_env.get("SAFETY_ENABLED") or "true").lower() == "true"
+        )
+        ttk.Checkbutton(safety_row, text="Safety Cutoff", variable=self.safety_enabled_var).pack(
+            side="left", padx=(4, 2)
+        )
+
+        ttk.Label(safety_row, text="Effort limit (N·m):").pack(side="left", padx=(8, 2))
+        self.safety_limit_var = tk.StringVar(value=self.recording_env.get("SAFETY_EFFORT_LIMIT") or "8.0")
+        ttk.Entry(safety_row, textvariable=self.safety_limit_var, width=6).pack(side="left", padx=2)
+
+        # 임계값 초과 시: park(파킹 자세로 복귀 후 명령 차단) / hold(그 자리에서 정지)
+        ttk.Label(safety_row, text="On overload:").pack(side="left", padx=(8, 2))
+        self.safety_action_var = tk.StringVar(value=self.recording_env.get("SAFETY_ON_OVERLOAD") or "park")
+        ttk.Combobox(
+            safety_row, textvariable=self.safety_action_var,
+            values=["park", "hold"], state="readonly", width=6,
+        ).pack(side="left", padx=2)
+
+        # torque를 풀 때 어떤 자세에서 풀지 (piper_motors_bus.release_torque_safely).
+        # in_place=그 자리에서 바로, lower=손목을 미리 내린 뒤, park=기존(파킹 자세로 이동 후).
+        ttk.Label(safety_row, text="Torque release:").pack(side="left", padx=(12, 2))
+        self.release_mode_var = tk.StringVar(value=self.recording_env.get("PARK_RELEASE_MODE") or "lower")
+        ttk.Combobox(
+            safety_row, textvariable=self.release_mode_var,
+            values=["lower", "in_place", "park"], state="readonly", width=9,
+        ).pack(side="left", padx=2)
+
+        ttk.Label(safety_row, text="Wrist drop (deg):").pack(side="left", padx=(8, 2))
+        self.wrist_drop_var = tk.StringVar(
+            value=self.recording_env.get("PARK_RELEASE_WRIST_DROP_DEG") or str(WRIST_RELEASE_DROP_DEG)
+        )
+        ttk.Entry(safety_row, textvariable=self.wrist_drop_var, width=6).pack(side="left", padx=2)
+
+        ttk.Button(safety_row, text="Safe Torque Release", command=self._on_safe_torque_release).pack(
+            side="left", padx=(8, 2)
+        )
+
+        # 종료 자세가 바뀌면 손목에 걸리는 중력 방향도 바뀌므로, 그 자세에서 실제로
+        # 얼마나 떨어지는지 재서 위 값을 갱신하는 버튼 (torque가 풀린 채로 끝남).
+        rest_row = ttk.Frame(script_frame)
+        rest_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        ttk.Button(rest_row, text="Measure Wrist Drop", command=self._on_measure_wrist_drop).pack(
+            side="left", padx=4
+        )
+        self.wrist_drop_info_var = tk.StringVar(
+            value="Torque release: lower = 팔은 그대로 두고 놓기 전에 손목만 미리 내림 "
+                  "(측정: 그냥 놓으면 손목이 24.4도 떨어짐 -> 미리 내리면 0.6도)"
+        )
+        ttk.Label(rest_row, textvariable=self.wrist_drop_info_var, foreground="#888888").pack(
+            side="left", padx=4
+        )
+
         # Policy Path — Infer 프리셋의 --policy.path로 반영 (체크포인트 로컬 경로 또는 HF repo id).
         # Teleoperate/Record에서는 안 쓰이지만 항상 보이게 둠 (프리셋 전환 시 값 유지).
         policy_row = ttk.Frame(script_frame)
-        policy_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        policy_row.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 4))
 
         ttk.Label(policy_row, text="Policy Path:").pack(side="left", padx=4)
         self.policy_path_var = tk.StringVar(value=self.recording_env.get("POLICY_PRETRAINED_PATH") or "")
         ttk.Entry(policy_row, textvariable=self.policy_path_var, width=40).pack(side="left", padx=2)
 
         # Preset + custom command
-        ttk.Label(script_frame, text="Preset:").grid(row=6, column=0, padx=4, sticky="e")
+        ttk.Label(script_frame, text="Preset:").grid(row=8, column=0, padx=4, sticky="e")
         self.preset_var = tk.StringVar(value="Teleoperate")
         preset_combo = ttk.Combobox(
             script_frame, textvariable=self.preset_var,
             values=PRESET_NAMES, state="readonly", width=14,
         )
-        preset_combo.grid(row=6, column=1, padx=4, sticky="w")
+        preset_combo.grid(row=8, column=1, padx=4, sticky="w")
         preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
 
         btn_row2 = ttk.Frame(script_frame)
-        btn_row2.grid(row=6, column=2, sticky="e")
+        btn_row2.grid(row=8, column=2, sticky="e")
         self.btn_launch = ttk.Button(btn_row2, text="Launch", command=self._on_launch)
         self.btn_launch.pack(side="left", padx=4)
         self.btn_end_episode = ttk.Button(
@@ -612,17 +676,17 @@ class PiperMonitorUI:
         self.btn_kill = ttk.Button(btn_row2, text="Stop", command=self._on_kill, state="disabled")
         self.btn_kill.pack(side="left", padx=4)
 
-        ttk.Label(script_frame, text="Command:").grid(row=7, column=0, padx=4, sticky="e")
+        ttk.Label(script_frame, text="Command:").grid(row=9, column=0, padx=4, sticky="e")
         self.cmd_var = tk.StringVar()
         self._on_preset_selected(None)  # fill initial command
         cmd_entry = ttk.Entry(script_frame, textvariable=self.cmd_var)
-        cmd_entry.grid(row=7, column=1, columnspan=2, padx=4, sticky="ew", pady=(4, 0))
+        cmd_entry.grid(row=9, column=1, columnspan=2, padx=4, sticky="ew", pady=(4, 0))
 
         # 실행 중인 lerobot-record의 stdout에서 "Recording episode N" 로그를 파싱해서
         # 진행 상황을 표시 (Rerun 창을 안 보고 있어도 상태 파악 가능). 녹화 중이 아니면 빈 문자열.
         self.progress_var = tk.StringVar(value="")
         ttk.Label(script_frame, textvariable=self.progress_var, foreground="#2a9d5c").grid(
-            row=8, column=0, columnspan=3, padx=4, sticky="w", pady=(2, 0)
+            row=10, column=0, columnspan=3, padx=4, sticky="w", pady=(2, 0)
         )
 
         # 입력값이 바뀔 때마다 Command를 자동으로 다시 조립 — Preset을 재선택 안 해도
@@ -637,6 +701,8 @@ class PiperMonitorUI:
             self.push_to_hub_var, self.dataset_root_override_var,
             self.use_effort_var,
             self.timestamp_enabled_var,
+            self.safety_enabled_var, self.safety_limit_var, self.safety_action_var,
+            self.release_mode_var, self.wrist_drop_var,
         ):
             var.trace_add("write", self._refresh_command)
 
@@ -814,6 +880,45 @@ class PiperMonitorUI:
 
     def _on_go_parking(self):
         self._run_follower_action("Go Parking", lambda f: f.bus.parking())
+
+    def _on_safe_torque_release(self):
+        """Torque release 콤보박스에 고른 방식으로 힘을 뺌.
+        lower=손목만 미리 내린 뒤, in_place=지금 자세 그대로, park=파킹 자세로 이동 후.
+        녹화를 길게 잡아놓고 저장 위치를 맞춘 뒤 Save Episode로 torque를 푸는 기존
+        우회 절차 대신, 녹화와 무관하게 아무 때나 이 버튼 하나로 끝내려고 만든 것."""
+        mode = self.release_mode_var.get().strip() or "lower"
+        drop = self._wrist_drop_deg()
+
+        def action(follower: PiperFollower) -> None:
+            follower.bus.release_torque_safely(
+                mode=mode,
+                wrist_drop_deg=drop,
+                ramp_s=float(self.recording_env.get("PARK_RELEASE_RAMP_S") or 2.0),
+                settle_s=float(self.recording_env.get("PARK_RELEASE_SETTLE_S") or 0.5),
+            )
+
+        self._run_follower_action(f"Safe Torque Release ({mode})", action)
+
+    def _on_measure_wrist_drop(self):
+        """지금 자세에서 torque를 풀고 손목이 실제로 몇 도 떨어지는지 재서
+        Wrist drop 입력칸에 반영. 종료 자세가 바뀌면 손목에 걸리는 중력 방향도
+        바뀌므로 그 자세에서 다시 재는 용도 — 측정이 끝나면 torque는 풀린 채로
+        남는다(다시 잡으려면 Slave Torque ON).
+
+        주의: 이 버튼은 일부러 "그냥 놓는" 동작이라 손목이 뚝 떨어진다."""
+        def action(follower: PiperFollower) -> None:
+            drop = follower.bus.measure_wrist_drop()
+            self.root.after(0, self._apply_measured_wrist_drop, drop)
+
+        self._run_follower_action("Measure Wrist Drop", action)
+
+    def _apply_measured_wrist_drop(self, drop: float) -> None:
+        self.wrist_drop_var.set(f"{drop:.1f}")
+        self.wrist_drop_info_var.set(
+            f"측정됨: 이 자세에서 그냥 놓으면 손목이 {drop:+.1f}도 떨어짐 "
+            "— Save as Default로 저장하면 이후 lower 해제에 쓰임"
+        )
+        self._refresh_command()
 
     # ---------------------------------------------------------- RViz Start/Stop
     def _on_rviz_toggle(self):
@@ -1192,6 +1297,11 @@ class PiperMonitorUI:
             "PUSH_TO_HUB": "true" if self.push_to_hub_var.get() else "false",
             "SMOOTH_START_FRAMES": self.smooth_frames_var.get().strip() if self.smooth_enabled_var.get() else "0",
             "USE_EFFORT": "true" if self.use_effort_var.get() else "false",
+            "SAFETY_ENABLED": "true" if self.safety_enabled_var.get() else "false",
+            "SAFETY_EFFORT_LIMIT": self.safety_limit_var.get().strip() or "8.0",
+            "SAFETY_ON_OVERLOAD": self.safety_action_var.get().strip() or "park",
+            "PARK_RELEASE_MODE": self.release_mode_var.get().strip() or "lower",
+            "PARK_RELEASE_WRIST_DROP_DEG": f"{self._wrist_drop_deg():.1f}",
         }
         if self.dataset_root_override_var.get().strip():
             updates["DATASET_ROOT"] = self.dataset_root_override_var.get().strip()
@@ -1280,18 +1390,42 @@ class PiperMonitorUI:
     def _robot_safety_args(self) -> list[str]:
         """robot_safety_args()(run_common.sh)와 동일한 fallback.
         Teleoperate/Record/Infer/Replay 네 커맨드 전부가 이 함수 하나만 공유함 —
-        effort 안전 컷오프(safety_enabled/safety_effort_limit)도 여기 있어야
-        Replay 경로("팔이 뻗는" 사고 예방)까지 확실히 적용된다."""
+        effort 안전 컷오프(safety_enabled/safety_effort_limit/safety_on_overload)도
+        여기 있어야 Replay 경로("팔이 뻗는" 사고 예방)까지 확실히 적용된다.
+        컷오프/torque 해제 관련 값은 GUI 위젯이 recording.env보다 우선(다른 GUI
+        입력값과 동일한 원칙) — 임계값을 바꿔가며 시험할 때 저장 없이 바로 반영됨."""
         env = self.recording_env
         max_rel = (env.get("MAX_RELATIVE_TARGET") or "5.0").strip()
         if max_rel.lower() in ("off", "none", "null", "disabled"):
             max_rel = "null"
+        limit = self.safety_limit_var.get().strip() or "8.0"
         return [
             f"--robot.max_relative_target={max_rel}",
             f"--robot.disable_torque_on_disconnect={env.get('DISABLE_TORQUE_ON_DISCONNECT') or 'true'}",
-            f"--robot.safety_enabled={(env.get('SAFETY_ENABLED') or 'true').lower()}",
-            f"--robot.safety_effort_limit={env.get('SAFETY_EFFORT_LIMIT') or '8.0'}",
+            f"--robot.safety_enabled={'true' if self.safety_enabled_var.get() else 'false'}",
+            f"--robot.safety_effort_limit={limit}",
+            f"--robot.safety_on_overload={self.safety_action_var.get().strip() or 'park'}",
+            *self._release_args(),
         ]
+
+    def _release_args(self) -> list[str]:
+        """torque 해제 방식 인자. 녹화/텔레옵이 끝나고 disconnect할 때 팔이 어떤
+        자세에서 힘이 풀리는지를 결정한다(piper_follower.disconnect 참고)."""
+        env = self.recording_env
+        return [
+            f"--robot.park_release_mode={self.release_mode_var.get().strip() or 'lower'}",
+            f"--robot.park_release_wrist_drop_deg={self._wrist_drop_deg()}",
+            f"--robot.park_release_ramp_s={env.get('PARK_RELEASE_RAMP_S') or '2.0'}",
+            f"--robot.park_release_settle_s={env.get('PARK_RELEASE_SETTLE_S') or '0.5'}",
+        ]
+
+    def _wrist_drop_deg(self) -> float:
+        """"lower" 모드에서 손목을 미리 내릴 각도(도). 입력이 비었거나 숫자가
+        아니면 실측 기본값(tables.WRIST_RELEASE_DROP_DEG)으로 되돌린다."""
+        try:
+            return float(self.wrist_drop_var.get().strip())
+        except ValueError:
+            return WRIST_RELEASE_DROP_DEG
 
     def _dataset_args(self, fps: str) -> list[str]:
         """5__record.sh의 dataset.* 인자와 동일한 fallback. Task/Num Episodes/Episode
@@ -1636,7 +1770,18 @@ class PiperMonitorUI:
             for line in proc.stdout:
                 logf.write(line)
                 logf.flush()
-                m = _RECORD_EPISODE_RE.search(line.decode(errors="replace") if isinstance(line, bytes) else line)
+                text_line = line.decode(errors="replace") if isinstance(line, bytes) else line
+
+                # effort 컷오프가 걸리면 로봇은 조용히 멈추기만 해서(로그를 안 보고
+                # 있으면) 왜 안 움직이는지 모른 채 계속 조작하게 됨 — 상태줄에 띄움.
+                if _SAFETY_TRIP_MARKER in text_line:
+                    self.root.after(
+                        0, self.bottom_var.set,
+                        "SAFETY TRIP — effort 임계값 초과로 명령이 차단됨 "
+                        "(last_launch.log 확인, 해제하려면 Stop 후 재시작)",
+                    )
+
+                m = _RECORD_EPISODE_RE.search(text_line)
                 if m:
                     current = int(m.group(1)) + 1  # 0-indexed 누적 카운트 -> 1부터 보여줌
                     text = f"Recording episode {current}/{target}"

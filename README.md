@@ -267,6 +267,10 @@ Parking pose의 normalized 값은 `0, -100, 100, 0, 0, -13.04, 0`입니다 (`mot
 | [docs/operations.md](docs/operations.md) | 실행 절차 |
 | [docs/rviz_setup.md](docs/rviz_setup.md) | ROS 2, RViz, AgileX URDF 재현 절차 |
 | [docs/data_collection_protocol.md](docs/data_collection_protocol.md) | 데이터 수집 프로토콜 |
+| [docs/policy/README.md](docs/policy/README.md) | Policy 문서 진입점과 동기/비동기 action chunk 실행 원리 |
+| [docs/policy/offline_chunk_rollout.md](docs/policy/offline_chunk_rollout.md) | 학습 데이터 observation을 이용한 비실물 예측 궤적 검증 |
+| [docs/policy/human_approved_policy_execution.md](docs/policy/human_approved_policy_execution.md) | Action chunk의 구간별 RViz 확인·인간 승인·실물 실행 구현과 검증 상태 |
+| [docs/training/smolvla_finetuning.md](docs/training/smolvla_finetuning.md) | `erase the shape` SmolVLA 학습 설정과 30,000-step 완료 결과 |
 | [docs/roadmap.md](docs/roadmap.md) | 남은 작업 |
 | [docs/change.md](docs/change.md) | WEGO 원본 대비 변경 사항 |
 | [docs/depth/README.md](docs/depth/README.md) | RealSense depth 녹화 백포트 상세 설명 |

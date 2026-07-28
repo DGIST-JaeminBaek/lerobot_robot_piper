@@ -14,6 +14,7 @@ from .tables import (
     MODEL_ENCODING_TABLE,
     MODEL_NUMBER_TABLE,
     MODEL_RESOLUTION_TABLE,
+    WRIST_RELEASE_DROP_DEG,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,17 +60,36 @@ class PiperMotorsBus(MotorsBus):
             raise ConnectionError(f"Failed to open port for {self.id}")
         self._is_connected = True
 
-    def disconnect(self, disable_torque: bool = True, park: bool | None = None) -> None:
+    def disconnect(
+        self,
+        disable_torque: bool = True,
+        park: bool | None = None,
+        release_mode: str | None = None,
+        wrist_drop_deg: float = WRIST_RELEASE_DROP_DEG,
+        release_ramp_s: float = 2.0,
+        release_settle_s: float = 0.5,
+    ) -> None:
         # park과 disable_torque를 분리 — follower는 항상 parking 자세로는 가되
         # torque 자동 해제 여부만 선택하고 싶은 경우(DISABLE_TORQUE_ON_DISCONNECT=false
         # + scripts/tools/safe_release_torque.py 조합)를 지원하기 위함.
         # park을 명시하지 않으면 기존 동작과 동일하게 disable_torque 값을 따름.
         if park is None:
             park = disable_torque
-        if park:
-            self.parking()
+
+        # torque를 풀 때는 "어떤 자세로 가서 풀지"를 release_mode가 결정한다
+        # (release_torque_safely 참고). release_mode를 안 주면 기존 동작 그대로 —
+        # park이면 parking 이동 후 해제, 아니면 그 자리에서 해제.
         if disable_torque:
-            self.piper.DisablePiper()
+            mode = release_mode or ("park" if park else "in_place")
+            self.release_torque_safely(
+                mode=mode,
+                wrist_drop_deg=wrist_drop_deg,
+                ramp_s=release_ramp_s,
+                settle_s=release_settle_s,
+            )
+        elif park:
+            self.parking()
+
         self.port_handler.closePort()
         self._is_connected = False
 
@@ -165,6 +185,79 @@ class PiperMotorsBus(MotorsBus):
             time.sleep(0.1)
             status = self.piper.GetArmStatus()
             timeout -= 1
+
+    def ramp_to(self, target: dict[str, float], ramp_s: float = 2.0, step_s: float = 0.05) -> None:
+        """현재 자세에서 target까지 정규화값을 선형 보간해서 천천히 이동.
+
+        set_action()을 목표값으로 한 번 쏘면 컨트롤러가 알아서 가긴 하지만 속도를
+        우리가 못 정해서(ModeCtrl 고정 speed) 낮은 자세로 내릴 때 훅 떨어지는
+        느낌이 난다 — 여기서 중간 목표를 잘게 쪼개 보내서 감속 이동을 만든다.
+        target에 없는 관절은 현재 값을 그대로 유지한다(예: gripper).
+        """
+        start = self.get_action()
+        steps = max(1, int(round(ramp_s / step_s)))
+        for i in range(1, steps + 1):
+            alpha = i / steps
+            self.set_action(
+                {m: val + (target.get(m, val) - val) * alpha for m, val in start.items()},
+                is_conv=True,
+            )
+            time.sleep(step_s)
+
+    def wrist_drop_target(self, drop_deg: float) -> dict[str, float]:
+        """현재 자세에서 손목(joint5)만 drop_deg만큼 내린 목표 자세(정규화값)."""
+        cal = self.calibration["joint5"]
+        # 정규화 스케일: 전체 범위(raw)가 -100~100(=200)에 대응
+        delta_norm = (drop_deg * 1000.0) / (cal.range_max - cal.range_min) * 200
+        target = {m: v for m, v in self.get_action().items() if m != "gripper"}
+        target["joint5"] += delta_norm
+        return target
+
+    def release_torque_safely(
+        self,
+        mode: str = "in_place",
+        wrist_drop_deg: float = WRIST_RELEASE_DROP_DEG,
+        ramp_s: float = 2.0,
+        settle_s: float = 0.5,
+    ) -> None:
+        """torque를 푸는 세 가지 방식.
+
+        - "in_place": 이동 없이 지금 자세 그대로 해제. 예상 못 한 이동이 아예 없다.
+        - "lower": 팔은 그 자리에 두고 손목(joint5)만 wrist_drop_deg만큼 미리 내린
+          뒤 해제. 실기 측정 결과 torque를 풀 때 실제로 떨어지는 건 손목뿐이라
+          (joint1~4/6은 0.00도) 그 낙차를 미리 없애는 것 — tables.py의
+          WRIST_RELEASE_DROP_DEG 주석 참고. 팔을 옮기지 않으므로 이동 위험이 없다.
+        - "park": 기존 동작 — parking 자세로 이동한 뒤 해제.
+
+        어느 쪽이든 gripper는 건드리지 않는다(뭔가 잡고 있을 때 손/물체가 끼지 않도록).
+        """
+        mode = (mode or "in_place").lower()
+        if mode == "park":
+            self.parking()
+        elif mode == "lower":
+            self.ramp_to(self.wrist_drop_target(wrist_drop_deg), ramp_s=ramp_s)
+            # 마지막 목표에 실제로 도달할 시간을 준 뒤에 풀어야 "거의 다 내려간
+            # 상태"가 아니라 "다 내려간 상태"에서 해제된다.
+            time.sleep(settle_s)
+        elif mode != "in_place":
+            logger.warning(f"{self.id} unknown release mode '{mode}' — in_place로 처리")
+
+        logger.info(f"{self.id} releasing torque (mode={mode}).")
+        self.piper.DisablePiper()
+
+    def measure_wrist_drop(self, settle_s: float = 3.0) -> float:
+        """지금 자세에서 torque를 풀고 손목(joint5)이 얼마나 떨어지는지 측정(도).
+
+        GUI의 "Measure Wrist Drop"이 사용 — 종료 자세가 바뀌면 손목에 걸리는 중력
+        방향도 바뀌므로, 그 자세에서 다시 재서 wrist_drop_deg를 갱신하기 위한 것.
+        측정이 끝나면 torque는 풀린 상태로 남는다(다시 잡으려면 enable_torque).
+        """
+        cal = self.calibration["joint5"]
+        before = self.get_action()["joint5"]
+        self.piper.DisablePiper()
+        time.sleep(settle_s)
+        after = self.get_action()["joint5"]
+        return (after - before) / 200 * (cal.range_max - cal.range_min) / 1000.0
 
     def set_slave(self):
         self.piper.MasterSlaveConfig(0xFC, 0, 0, 0)

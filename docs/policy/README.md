@@ -1,6 +1,54 @@
-# Policy 실행 주기와 Action Chunk
+# Policy 실행
 
-## 1. 문서 범위
+## 문서 구성
+
+이 폴더는 기본 policy 실행 원리부터 비실물 검증과 인간 승인형 실물 실행까지
+단계별로 구분한다.
+
+| 문서 | 범위 |
+|---|---|
+| 이 문서 | LeRobot의 기본 동기/비동기 실행 주기와 action chunk |
+| [Offline Action Chunk Rollout](offline_chunk_rollout.md) | 학습 데이터 observation을 이용한 비실물 예측 궤적 검사 |
+| [인간 승인형 Policy 실행](human_approved_policy_execution.md) | Action chunk를 구간별로 RViz 확인하고 승인 후 실행하는 구현 |
+
+권장 확인 순서는 다음과 같다.
+
+```text
+기본 Policy 실행 원리
+  → 학습 데이터 기반 Offline 궤적 검증
+  → 인간 승인형 실물 실행
+```
+
+## 현재 준비·검증 현황
+
+사용 policy:
+
+```text
+Dataset: records/0727/erase_the_shape_512
+Task: erase the shape
+Episodes: 60 (circle 20, triangle 20, rectangle 20)
+Checkpoint: outputs/train/smolvla_erase_shape_512/checkpoints/030000/pretrained_model
+```
+
+관련 도구와 현재 상태:
+
+| 파일 | 목적 | 상태 |
+|---|---|---|
+| `scripts/tools/preview_video_crop.py` | SSH에서 TOP/WRIST crop 입력 확인 | 실행·확인 완료 |
+| `scripts/tools/piper_offline_chunk_rollout.py` | Dataset observation 기반 teacher-forced rollout | 15,000-step episode 0 실행 완료 |
+| `scripts/tools/piper_offline_rollout_rviz.py` | 저장한 rollout을 RViz에서 재생 | 구현 완료 |
+| `scripts/tools/piper_first_chunk_fk_analysis.py` | 60개 episode 첫 chunk의 Piper FK/EEF 비교 | 최종 30,000-step으로 실행 완료 |
+| `scripts/tools/piper_human_approved_inference.py` | Dataset 또는 live observation의 구간별 인간 승인 실행 | Dataset/RViz 확인 완료, 실물 경로 구현 완료 |
+| `scripts/tools/test_human_approved_inference_mock.py` | 승인 전 차단·분할 실행·effort trip 검증 | 5개 mock 통과 |
+
+아직 완료하지 않은 항목:
+
+- 최종 30,000-step checkpoint의 full offline rollout 재실행
+- 실제 Piper에 승인 구간을 전송하는 제한적 실물 검증
+- Effort limit `8.0 N·m`과 trip 후 parking의 실물 안전성 검증
+- 실제 작업 성공률 평가
+
+## 1. 기본 실행 문서의 범위
 
 이 문서는 policy가 예측한 action chunk를 로봇에서 실행하는 방식과 다음 설정의 관계를
 설명한다.
@@ -182,3 +230,8 @@ Async client의 `debug_visualize_queue_size` 옵션을 사용하면 종료 후 q
 - `/home/ugrp43/UGRP/lerobot/src/lerobot/async_inference/policy_server.py`
 - `scripts/8__run_server.sh`
 - `scripts/9__run_client.sh`
+
+학습 데이터 observation으로 예측 chunk를 이어 붙이는 비실물 검증은
+[Offline Action Chunk Rollout](offline_chunk_rollout.md), action chunk를 RViz에서
+확인하고 사람의 승인을 받은 뒤 실제 로봇에 보내는 설계는
+[인간 승인형 Policy 실행 파이프라인](human_approved_policy_execution.md)을 참고한다.

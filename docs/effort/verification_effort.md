@@ -106,12 +106,53 @@ DRY_RUN=true bash scripts/5__record.sh 2>&1 | grep use_effort
 ```text
 SAFETY_ENABLED=true
 SAFETY_EFFORT_LIMIT=8.0
+SAFETY_ON_OVERLOAD=park
 ```
 
-`8.0 N·m`은 실물에서 적절성이 확인된 값이 아니다. 현재 구현도 effort 초과 시 새
-action 전송을 생략할 뿐, 후퇴·parking·제어 종료를 수행하지 않는다. 따라서 아래
-절차는 현재 컷오프의 트리거와 실제 로봇 반응을 확인하기 위한 것이며, 완성된 안전
+`8.0 N·m`은 실물에서 적절성이 확인된 값이 아니다. 세 값 모두 GUI(teleop_ui)의
+Script Launcher 행에서 바로 바꿀 수 있고(Safety Cutoff / Effort limit /
+On overload), `Save as Default`를 누르면 `configs/recording.env`에 저장된다 —
+GUI 값이 recording.env보다 우선한다.
+
+`SAFETY_ON_OVERLOAD`는 임계값 초과 시 동작을 정한다.
+
+- `hold` — 기존 동작. 새 action 전송만 생략하고 그 자리에 멈춘 채 유지된다.
+- `park` — 백그라운드로 parking 자세까지 복귀한 뒤, 그 이후 모든 명령을 차단한다
+  (래치). parking 이동 중 제어 루프가 목표를 덮어쓰지 못하게 하려고 트립 직후부터
+  `send_action`은 아무것도 내보내지 않는다. torque는 켜진 상태로 남는다 —
+  해제는 GUI의 `Safe Torque Release` 또는 `safe_release_torque.py`로 한다.
+
+`park`이어도 후퇴(외력 방향으로 물러나기)나 컴플라이언스 전환은 아직 없다. 따라서
+아래 절차는 컷오프의 트리거와 실제 로봇 반응을 확인하기 위한 것이며, 완성된 안전
 기능의 검증 절차가 아니다.
+
+### torque 해제 자세 (`PARK_RELEASE_MODE`) — 실기 측정 완료 (2026-07-28)
+
+파킹 자세에서 torque를 풀고 8초간 관절값을 기록한 결과:
+
+| joint | 해제 시 움직인 양 |
+|---|---|
+| joint1~4, joint6 | **0.00°** (전혀 안 움직임) |
+| joint5 (손목) | **-24.4°** |
+
+즉 팔 전체가 떨어지는 게 아니라 **손목만 24.4° 뚝 떨어진다** — 감속비가 커서 큰
+관절은 자기 무게로 역구동되지 않는다. "쿵" 하고 놓이는 느낌의 정체가 이 손목
+낙차다. 놓기 전에 손목을 미리 그 각도까지 내려두면 해제 시 움직임이 **0.6°**로
+줄어드는 것을 확인했다(24.4 → 0.6, 약 40배).
+
+해제 자세는 GUI의 `Torque release`에서 고른다.
+
+- `lower` (기본) — 팔은 그 자리에 그대로 두고 손목만 `PARK_RELEASE_WRIST_DROP_DEG`
+  (기본 24.4°)만큼 `PARK_RELEASE_RAMP_S` 동안 내린 뒤 해제. 팔을 옮기지 않으므로
+  이동 위험이 없다.
+- `in_place` — 이동 없이 그 자리에서 해제(손목은 그대로 떨어짐).
+- `park` — 기존 동작(파킹 자세로 이동 후 해제).
+
+손목에 걸리는 중력 방향은 팔 자세에 따라 달라지므로, 평소 쓰는 종료 자세에서
+GUI의 `Measure Wrist Drop`으로 다시 재서 `Save as Default` 하는 것을 권장한다
+(그 버튼은 일부러 "그냥 놓아서" 낙차를 재므로 손목이 한 번 뚝 떨어진다).
+
+어느 모드든 gripper는 건드리지 않는다(잡고 있는 물체/손이 끼지 않도록).
 
 ### 준비
 

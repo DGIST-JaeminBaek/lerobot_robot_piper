@@ -76,7 +76,7 @@ FAVLA는 느린 vision-language planning과 빠른 force 기반 반응 제어를
 
 이 구조는 force 관측과 policy 실행 주기를 함께 고려해야 한다는 연구 사례다. 본
 프로젝트의 동기·비동기 action queue와 재계획 주기는
-[`policy_execution.md`](../policy_execution.md)에서 별도로 다룬다.
+[`docs/policy/README.md`](../policy/README.md)에서 별도로 다룬다.
 
 ### ForceVLA2
 

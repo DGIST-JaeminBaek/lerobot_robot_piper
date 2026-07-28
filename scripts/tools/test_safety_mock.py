@@ -36,11 +36,17 @@ class FakeBus:
     def __init__(self, effort: dict[str, float]):
         self._effort = effort
         self.set_action_calls = 0
+        self.parking_calls = 0
+        self.effort_reads = 0
+
+    def parking(self):
+        self.parking_calls += 1
 
     def get_action(self):
         return {m: 0.0 for m in self.motors}
 
     def get_effort(self):
+        self.effort_reads += 1
         return self._effort
 
     def is_overloaded(self, effort, limit):
@@ -54,16 +60,24 @@ class FakeBus:
         return action
 
 
-def make_follower(safety_enabled: bool, effort: dict[str, float], limit: float = 8.0) -> PiperFollower:
+def make_follower(
+    safety_enabled: bool,
+    effort: dict[str, float],
+    limit: float = 8.0,
+    on_overload: str = "hold",
+) -> PiperFollower:
     follower = PiperFollower.__new__(PiperFollower)
     follower.id = "test_follower"
     follower.bus = FakeBus(effort)
     follower.cameras = {}
+    follower._safety_tripped = False
+    follower._safety_park_thread = None
     follower.config = SimpleNamespace(
         use_action_offset=False,
         max_relative_target=None,
         safety_enabled=safety_enabled,
         safety_effort_limit=limit,
+        safety_on_overload=on_overload,
     )
     return follower
 
@@ -89,9 +103,52 @@ def test_safety_disabled_ignores_overload():
     assert result == {"joint1.pos": 10.0, "joint2.pos": -5.0}
 
 
+def test_overload_park_moves_to_parking_once():
+    f = make_follower(
+        safety_enabled=True, effort={"joint1": 1.0, "joint2": 9.0}, on_overload="park"
+    )
+    f.send_action({"joint1.pos": 10.0, "joint2.pos": -5.0})
+    f._safety_park_thread.join(timeout=5.0)
+    assert f.bus.parking_calls == 1
+    assert f.bus.set_action_calls == 0  # 명령은 로봇으로 안 나감
+    assert f.safety_tripped is True
+
+    # 트립 후에는 래치 — effort를 다시 읽지도, parking을 또 걸지도 않는다
+    # (parking 이동 중에 제어 루프가 목표를 덮어써서 팔이 떠는 걸 막는 부분).
+    reads_before = f.bus.effort_reads
+    f.send_action({"joint1.pos": 20.0, "joint2.pos": -20.0})
+    assert f.bus.effort_reads == reads_before
+    assert f.bus.parking_calls == 1
+    assert f.bus.set_action_calls == 0
+
+
+def test_overload_hold_does_not_park():
+    f = make_follower(
+        safety_enabled=True, effort={"joint1": 1.0, "joint2": 9.0}, on_overload="hold"
+    )
+    f.send_action({"joint1.pos": 10.0, "joint2.pos": -5.0})
+    assert f.bus.parking_calls == 0
+    assert f.bus.set_action_calls == 0
+    assert f.safety_tripped is True
+
+
+def test_reset_safety_allows_commands_again():
+    f = make_follower(
+        safety_enabled=True, effort={"joint1": 1.0, "joint2": 9.0}, on_overload="hold"
+    )
+    f.send_action({"joint1.pos": 10.0, "joint2.pos": -5.0})
+    f.bus._effort = {"joint1": 1.0, "joint2": 1.0}  # 원인 제거
+    f.reset_safety()
+    f.send_action({"joint1.pos": 10.0, "joint2.pos": -5.0})
+    assert f.bus.set_action_calls == 1
+
+
 if __name__ == "__main__":
     test_is_overloaded()
     test_normal_effort_sends_action()
     test_overload_holds_last_position_instead_of_sending()
     test_safety_disabled_ignores_overload()
+    test_overload_park_moves_to_parking_once()
+    test_overload_hold_does_not_park()
+    test_reset_safety_allows_commands_again()
     print("OK: safety cutoff mock 테스트 통과")

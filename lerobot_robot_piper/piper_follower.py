@@ -1,5 +1,6 @@
 import os
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
@@ -87,6 +88,9 @@ class PiperFollower(Robot):
         self._action_offset_start_time: float | None = None
         self._action_offset_reported = False
         self._camera_executor: ThreadPoolExecutor | None = None
+        # effort 안전 컷오프 트립 래치 (_trip_safety 참고)
+        self._safety_tripped = False
+        self._safety_park_thread: threading.Thread | None = None
         self._ensure_camera_executor()
 
     def __str__(self) -> str:
@@ -309,23 +313,73 @@ class PiperFollower(Robot):
         # 실시간 안전 컷오프. use_effort(데이터셋 로깅 플래그)와 무관하게 항상 동작 —
         # get_effort()를 여기서 직접 읽는다. 리플레이/정책 출력이 관절 명령으로 바뀌어
         # 로봇에 나가는 지점이 바로 이 set_action 직전이라 여기서 끊는다.
-        # 컴플라이언스(MIT 모드) 전환 대신 우선은 이 스텝의 명령을 그냥 보류(마지막으로
-        # 실제 전송된 목표를 유지) — 컴플라이언스 kp/kd 튜닝은 다음 단계.
+        # 한 번 트립되면 래치 — 그 뒤로는 effort를 다시 읽지도, 명령을 내보내지도
+        # 않는다. safety_on_overload="park"일 때 parking 이동이 백그라운드에서 도는
+        # 동안 제어 루프가 계속 set_action을 쏘면 서로 목표를 덮어써서 팔이 떠는데,
+        # 래치가 그걸 막아준다(트립 이후 set_action을 부르는 곳은 parking 뿐).
+        if self._safety_tripped:
+            return self._safety_hold_action()
+
         if self.config.safety_enabled:
             effort = self.bus.get_effort()
             if self.bus.is_overloaded(effort, self.config.safety_effort_limit):
-                logger.warning(
-                    f"{self} safety cutoff: effort {effort} exceeds "
-                    f"{self.config.safety_effort_limit} N·m, holding last commanded position"
-                )
-                held_pos = getattr(self, "_last_sent_goal_pos", None) or self.bus.get_action()
-                return {f"{motor}.pos": val for motor, val in held_pos.items()}
+                self._trip_safety(effort)
+                return self._safety_hold_action()
 
         _t0 = time.perf_counter()
         self.bus.set_action(goal_pos, is_conv=True)
         logger.debug(f"{self} set_action: {(time.perf_counter() - _t0) * 1e3:.1f}ms")
         self._last_sent_goal_pos = goal_pos
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
+
+    # ------------------------------------------------------- 안전 컷오프 트립
+    def _safety_hold_action(self) -> dict[str, Any]:
+        """트립 상태에서 돌려줄 action — 로봇에는 아무것도 안 보내고, 호출부에는
+        마지막으로 실제 전송한 목표(없으면 현재 자세)를 그대로 알려준다."""
+        held_pos = getattr(self, "_last_sent_goal_pos", None) or self.bus.get_action()
+        return {f"{motor}.pos": val for motor, val in held_pos.items()}
+
+    def _trip_safety(self, effort: dict[str, float]) -> None:
+        """임계값 초과 1회 처리. safety_on_overload="park"이면 parking 자세로 복귀."""
+        self._safety_tripped = True
+        over = {m: v for m, v in effort.items() if abs(v) > self.config.safety_effort_limit}
+        logger.error(
+            f"{self} SAFETY TRIP: effort {over} exceeds {self.config.safety_effort_limit} N·m "
+            f"(on_overload={self.config.safety_on_overload}); 이후 모든 명령을 차단합니다"
+        )
+        if self.config.safety_on_overload != "park":
+            return
+
+        # parking()은 도달할 때까지 최대 10초 블로킹이라 제어 루프(record/teleop)를
+        # 그 시간만큼 세워버린다 — 별도 스레드로 돌려서 루프는 계속 돌게 두고(래치
+        # 때문에 어차피 명령은 안 나감) 카메라/데이터셋 쪽이 타임아웃으로 깨지지
+        # 않게 한다.
+        def park_worker() -> None:
+            try:
+                logger.warning(f"{self} safety trip -> parking 자세로 복귀 중")
+                self.bus.parking()
+                logger.warning(f"{self} safety trip -> parking 완료 (torque는 켜진 상태)")
+            except Exception:
+                logger.exception(f"{self} safety trip parking 실패")
+
+        self._safety_park_thread = threading.Thread(
+            target=park_worker, name="safety_park", daemon=True
+        )
+        self._safety_park_thread.start()
+
+    @property
+    def safety_tripped(self) -> bool:
+        return self._safety_tripped
+
+    def reset_safety(self) -> None:
+        """트립 래치 해제 — 원인을 제거한 뒤 같은 프로세스에서 다시 움직이고 싶을 때만.
+        parking 스레드가 아직 돌고 있으면 끝날 때까지 기다린다(명령 충돌 방지)."""
+        thread = getattr(self, "_safety_park_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=15.0)
+        self._safety_tripped = False
+        self._safety_park_thread = None
+        logger.info(f"{self} safety latch reset")
 
     def _manual_action_offset(self, goal_pos: dict[str, float]) -> dict[str, float]:
         return {
@@ -357,6 +411,16 @@ class PiperFollower(Robot):
 
     def parking(self):
         self.bus.parking()
+
+    def release_torque_safely(self, mode: str | None = None) -> None:
+        """설정된 방식으로 torque 해제 (GUI의 Safe Torque Release 버튼이 사용).
+        mode를 주면 config의 park_release_mode보다 우선."""
+        self.bus.release_torque_safely(
+            mode=mode or self.config.park_release_mode,
+            wrist_drop_deg=self.config.park_release_wrist_drop_deg,
+            ramp_s=self.config.park_release_ramp_s,
+            settle_s=self.config.park_release_settle_s,
+        )
 
     def _ensure_camera_executor(self) -> None:
         if self.cameras and self._camera_executor is None:
@@ -393,4 +457,20 @@ class PiperFollower(Robot):
         # disconnect — scripts/tools/piper_record_one.py 참고.
         # DISABLE_TORQUE_ON_DISCONNECT=false로 두면 parking만 하고 torque는
         # 켜진 채로 남아 scripts/tools/safe_release_torque.py로 수동 해제 가능.
-        self.bus.disconnect(disable_torque, park=True if park is None else park)
+        park = True if park is None else park
+
+        # torque를 풀 때의 자세는 park_release_mode가 결정한다. park=False(사람이
+        # 조기 종료)일 때 "park" 모드는 의미가 안 맞으므로 in_place로 낮춘다 —
+        # "lower"는 그대로 살린다(살짝 내려놓는 건 조기 종료 때도 하고 싶은 동작).
+        release_mode = self.config.park_release_mode
+        if not park and release_mode == "park":
+            release_mode = "in_place"
+
+        self.bus.disconnect(
+            disable_torque,
+            park=park,
+            release_mode=release_mode,
+            wrist_drop_deg=self.config.park_release_wrist_drop_deg,
+            release_ramp_s=self.config.park_release_ramp_s,
+            release_settle_s=self.config.park_release_settle_s,
+        )
