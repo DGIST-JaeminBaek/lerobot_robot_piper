@@ -17,6 +17,7 @@ from lerobot.robots.utils import ensure_safe_goal_position
 
 from .config_piper import PiperFollowerConfig
 from .motors import PiperMotorsBus
+from .motors.tables import INITIALIZE_POSITION
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,10 @@ class PiperFollower(Robot):
         # effort 안전 컷오프 트립 래치 (_trip_safety 참고)
         self._safety_tripped = False
         self._safety_park_thread: threading.Thread | None = None
+        # parking 스레드가 목표를 소유하는 구간 표시 (그 동안 제어 루프는 전송 금지)
+        self._safety_park_active = False
+        # 트립 후 계속 재전송할 "얼어붙힌" 자세
+        self._safety_hold_pos: dict[str, float] = {}
         self._ensure_camera_executor()
 
     def __str__(self) -> str:
@@ -313,10 +318,10 @@ class PiperFollower(Robot):
         # 실시간 안전 컷오프. use_effort(데이터셋 로깅 플래그)와 무관하게 항상 동작 —
         # get_effort()를 여기서 직접 읽는다. 리플레이/정책 출력이 관절 명령으로 바뀌어
         # 로봇에 나가는 지점이 바로 이 set_action 직전이라 여기서 끊는다.
-        # 한 번 트립되면 래치 — 그 뒤로는 effort를 다시 읽지도, 명령을 내보내지도
-        # 않는다. safety_on_overload="park"일 때 parking 이동이 백그라운드에서 도는
-        # 동안 제어 루프가 계속 set_action을 쏘면 서로 목표를 덮어써서 팔이 떠는데,
-        # 래치가 그걸 막아준다(트립 이후 set_action을 부르는 곳은 parking 뿐).
+        # 한 번 트립되면 래치 — 그 뒤로는 effort를 다시 읽지 않고, 리더/정책이 주는
+        # 목표도 무시한다. 다만 "아무것도 안 보내기"는 안 된다 — Piper는 목표를 계속
+        # 스트리밍해야 자세를 잡아서, 명령이 끊기면 팔이 힘을 잃고 늘어진다.
+        # 그래서 트립 자세 하나를 계속 재전송한다(_safety_hold_action 참고).
         if self._safety_tripped:
             return self._safety_hold_action()
 
@@ -334,21 +339,53 @@ class PiperFollower(Robot):
 
     # ------------------------------------------------------- 안전 컷오프 트립
     def _safety_hold_action(self) -> dict[str, Any]:
-        """트립 상태에서 돌려줄 action — 로봇에는 아무것도 안 보내고, 호출부에는
-        마지막으로 실제 전송한 목표(없으면 현재 자세)를 그대로 알려준다."""
-        held_pos = getattr(self, "_last_sent_goal_pos", None) or self.bus.get_action()
-        return {f"{motor}.pos": val for motor, val in held_pos.items()}
+        """트립 상태에서 매 스텝 호출 — 얼어붙힐 자세를 계속 재전송해서 유지 토크를
+        놓지 않게 한다.
+
+        예전 구현은 여기서 아무것도 안 보냈는데, Piper는 JointCtrl 목표를 계속
+        스트리밍해야 자세를 잡는 구조라 명령이 끊기면 팔이 힘을 잃고 늘어졌다
+        ("에포트 커지면 힘이 풀린다"의 원인). 그래서 "명령을 끊는다"가 아니라
+        "트립 순간의 자세 하나만 계속 보낸다"로 바꿈 — 리더/정책 출력은 무시하되
+        토크는 유지된다.
+
+        얼어붙히는 목표는 트립 순간의 *실측* 자세다(마지막 명령 목표가 아님) —
+        외력으로 밀린 상태에서 밀리기 전 목표를 계속 쏘면 사람과 힘겨루기를 하게
+        되고 effort가 계속 높게 유지된다.
+        """
+        # parking 이동 중에는 그 스레드가 목표를 소유 — 여기서 같이 쏘면 서로
+        # 덮어써서 팔이 떤다.
+        if self._safety_park_active:
+            return {f"{motor}.pos": val for motor, val in self._safety_hold_pos.items()}
+
+        if self.config.safety_hold_resend:
+            self.bus.set_action(self._safety_hold_pos, is_conv=True)
+        return {f"{motor}.pos": val for motor, val in self._safety_hold_pos.items()}
 
     def _trip_safety(self, effort: dict[str, float]) -> None:
         """임계값 초과 1회 처리. safety_on_overload="park"이면 parking 자세로 복귀."""
         self._safety_tripped = True
+        # 트립 순간의 실측 자세를 얼어붙힐 목표로 저장 (_safety_hold_action 참고)
+        self._safety_hold_pos = self.bus.get_action()
         over = {m: v for m, v in effort.items() if abs(v) > self.config.safety_effort_limit}
         logger.error(
             f"{self} SAFETY TRIP: effort {over} exceeds {self.config.safety_effort_limit} N·m "
-            f"(on_overload={self.config.safety_on_overload}); 이후 모든 명령을 차단합니다"
+            f"(on_overload={self.config.safety_on_overload}); "
+            f"리더/정책 명령을 무시하고 트립 자세를 유지합니다"
         )
+        # 팔이 힘을 잃고 늘어지는 원인이 우리 쪽 명령 중단인지 컨트롤러(펌웨어)
+        # 자체 보호 동작인지 구분하려면 이 두 값이 필요하다 — 펌웨어가 스스로
+        # 내려버린 경우엔 enable status가 꺼져 있다.
+        piper = getattr(self.bus, "piper", None)  # mock 테스트에는 없음
+        if piper is not None:
+            try:
+                logger.error(f"{self} trip 시점 enable status: {piper.GetArmEnableStatus()}")
+                logger.error(f"{self} trip 시점 arm status: {piper.GetArmStatus()}")
+            except Exception:
+                logger.exception(f"{self} trip 시점 상태 조회 실패")
+
         if self.config.safety_on_overload != "park":
             return
+        self._safety_park_active = True
 
         # parking()은 도달할 때까지 최대 10초 블로킹이라 제어 루프(record/teleop)를
         # 그 시간만큼 세워버린다 — 별도 스레드로 돌려서 루프는 계속 돌게 두고(래치
@@ -356,11 +393,27 @@ class PiperFollower(Robot):
         # 않게 한다.
         def park_worker() -> None:
             try:
-                logger.warning(f"{self} safety trip -> parking 자세로 복귀 중")
+                ramp_s = self.config.safety_park_ramp_s
+                logger.warning(
+                    f"{self} safety trip -> parking 자세로 복귀 중 "
+                    f"({'천천히 %.1fs' % ramp_s if ramp_s > 0 else '최고속'})"
+                )
+                if ramp_s > 0:
+                    # 외력으로 트립된 직후엔 사람 손이 팔에 닿아 있을 수 있으므로
+                    # 목표를 한 번에 쏘지 않고(=최고속 이동) 잘게 쪼개 보낸다.
+                    self.bus.ramp_to(
+                        {j: INITIALIZE_POSITION[j] for j in self.bus.motors if j != "gripper"},
+                        ramp_s=ramp_s,
+                    )
                 self.bus.parking()
                 logger.warning(f"{self} safety trip -> parking 완료 (torque는 켜진 상태)")
             except Exception:
                 logger.exception(f"{self} safety trip parking 실패")
+            finally:
+                # 여기서부터는 제어 루프(_safety_hold_action)가 목표를 다시 소유해서
+                # 파킹 자세를 계속 재전송한다 — 안 그러면 명령이 끊겨 늘어진다.
+                self._safety_hold_pos = self.bus.get_action()
+                self._safety_park_active = False
 
         self._safety_park_thread = threading.Thread(
             target=park_worker, name="safety_park", daemon=True
@@ -379,6 +432,8 @@ class PiperFollower(Robot):
             thread.join(timeout=15.0)
         self._safety_tripped = False
         self._safety_park_thread = None
+        self._safety_park_active = False
+        self._safety_hold_pos = {}
         logger.info(f"{self} safety latch reset")
 
     def _manual_action_offset(self, goal_pos: dict[str, float]) -> dict[str, float]:
@@ -417,9 +472,12 @@ class PiperFollower(Robot):
         mode를 주면 config의 park_release_mode보다 우선."""
         self.bus.release_torque_safely(
             mode=mode or self.config.park_release_mode,
-            wrist_drop_deg=self.config.park_release_wrist_drop_deg,
+            wrist_rest_deg=self.config.park_release_wrist_rest_deg,
             ramp_s=self.config.park_release_ramp_s,
             settle_s=self.config.park_release_settle_s,
+            gripper_cycle=self.config.park_release_gripper_cycle,
+            gripper_open=self.config.park_release_gripper_open,
+            gripper_wait_s=self.config.park_release_gripper_wait_s,
         )
 
     def _ensure_camera_executor(self) -> None:
@@ -470,7 +528,10 @@ class PiperFollower(Robot):
             disable_torque,
             park=park,
             release_mode=release_mode,
-            wrist_drop_deg=self.config.park_release_wrist_drop_deg,
+            wrist_rest_deg=self.config.park_release_wrist_rest_deg,
             release_ramp_s=self.config.park_release_ramp_s,
             release_settle_s=self.config.park_release_settle_s,
+            gripper_cycle=self.config.park_release_gripper_cycle,
+            gripper_open=self.config.park_release_gripper_open,
+            gripper_wait_s=self.config.park_release_gripper_wait_s,
         )

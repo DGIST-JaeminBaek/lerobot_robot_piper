@@ -32,7 +32,7 @@ import pandas as pd
 
 from .ui import _load_geometry, _save_geometry
 from .config_piper import PiperFollowerConfig
-from .motors.tables import WRIST_RELEASE_DROP_DEG
+from .motors.tables import WRIST_RELEASE_REST_DEG
 from .piper_follower import PiperFollower
 
 from piper_sdk import C_PiperInterface_V2
@@ -612,6 +612,14 @@ class PiperMonitorUI:
             values=["park", "hold"], state="readonly", width=6,
         ).pack(side="left", padx=2)
 
+        # park 복귀에 걸릴 시간(초). 파킹 자세가 "팔이 수직으로 뻗은" 자세라서
+        # 한 번에 쏘면 트립 순간 팔이 확 뻗는다 — 0으로 두면 그 옛 동작(최고속).
+        ttk.Label(safety_row, text="park ramp(s):").pack(side="left", padx=(6, 2))
+        self.safety_park_ramp_var = tk.StringVar(
+            value=self.recording_env.get("SAFETY_PARK_RAMP_S") or "4.0"
+        )
+        ttk.Entry(safety_row, textvariable=self.safety_park_ramp_var, width=5).pack(side="left", padx=2)
+
         # torque를 풀 때 어떤 자세에서 풀지 (piper_motors_bus.release_torque_safely).
         # in_place=그 자리에서 바로, lower=손목을 미리 내린 뒤, park=기존(파킹 자세로 이동 후).
         ttk.Label(safety_row, text="Torque release:").pack(side="left", padx=(12, 2))
@@ -621,11 +629,11 @@ class PiperMonitorUI:
             values=["lower", "in_place", "park"], state="readonly", width=9,
         ).pack(side="left", padx=2)
 
-        ttk.Label(safety_row, text="Wrist drop (deg):").pack(side="left", padx=(8, 2))
-        self.wrist_drop_var = tk.StringVar(
-            value=self.recording_env.get("PARK_RELEASE_WRIST_DROP_DEG") or str(WRIST_RELEASE_DROP_DEG)
+        ttk.Label(safety_row, text="Wrist rest (deg):").pack(side="left", padx=(8, 2))
+        self.wrist_rest_var = tk.StringVar(
+            value=self.recording_env.get("PARK_RELEASE_WRIST_REST_DEG") or str(WRIST_RELEASE_REST_DEG)
         )
-        ttk.Entry(safety_row, textvariable=self.wrist_drop_var, width=6).pack(side="left", padx=2)
+        ttk.Entry(safety_row, textvariable=self.wrist_rest_var, width=6).pack(side="left", padx=2)
 
         ttk.Button(safety_row, text="Safe Torque Release", command=self._on_safe_torque_release).pack(
             side="left", padx=(8, 2)
@@ -635,14 +643,24 @@ class PiperMonitorUI:
         # 얼마나 떨어지는지 재서 위 값을 갱신하는 버튼 (torque가 풀린 채로 끝남).
         rest_row = ttk.Frame(script_frame)
         rest_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 4))
-        ttk.Button(rest_row, text="Measure Wrist Drop", command=self._on_measure_wrist_drop).pack(
+        ttk.Button(rest_row, text="Measure Wrist Rest", command=self._on_measure_wrist_rest).pack(
             side="left", padx=4
         )
-        self.wrist_drop_info_var = tk.StringVar(
-            value="Torque release: lower = 팔은 그대로 두고 놓기 전에 손목만 미리 내림 "
-                  "(측정: 그냥 놓으면 손목이 24.4도 떨어짐 -> 미리 내리면 0.6도)"
+
+        # 그리퍼는 팔 모터와 별개 노드(0x159)라 DisablePiper()로 안 풀린다 — 해제 시
+        # 실능은 항상 하고, 이 체크박스는 "풀기 전에 한 번 열고 닫아 파킹 위치로"
+        # 되돌릴지만 정한다. 켜두면 물고 있던 물체를 놓는다.
+        self.gripper_cycle_var = tk.BooleanVar(
+            value=(self.recording_env.get("PARK_RELEASE_GRIPPER_CYCLE") or "true").lower() == "true"
         )
-        ttk.Label(rest_row, textvariable=self.wrist_drop_info_var, foreground="#888888").pack(
+        ttk.Checkbutton(
+            rest_row, text="Gripper open/close on release", variable=self.gripper_cycle_var
+        ).pack(side="left", padx=(12, 4))
+        self.wrist_rest_info_var = tk.StringVar(
+            value="Torque release: lower = 팔은 그대로 두고 놓기 전에 손목만 자연 정지각까지 미리 내림 "
+                  "(자세에 따라 정지각이 달라지니 Measure Wrist Rest로 그때그때 잴 것)"
+        )
+        ttk.Label(rest_row, textvariable=self.wrist_rest_info_var, foreground="#888888").pack(
             side="left", padx=4
         )
 
@@ -702,7 +720,8 @@ class PiperMonitorUI:
             self.use_effort_var,
             self.timestamp_enabled_var,
             self.safety_enabled_var, self.safety_limit_var, self.safety_action_var,
-            self.release_mode_var, self.wrist_drop_var,
+            self.release_mode_var, self.wrist_rest_var, self.safety_park_ramp_var,
+            self.gripper_cycle_var,
         ):
             var.trace_add("write", self._refresh_command)
 
@@ -887,19 +906,23 @@ class PiperMonitorUI:
         녹화를 길게 잡아놓고 저장 위치를 맞춘 뒤 Save Episode로 torque를 푸는 기존
         우회 절차 대신, 녹화와 무관하게 아무 때나 이 버튼 하나로 끝내려고 만든 것."""
         mode = self.release_mode_var.get().strip() or "lower"
-        drop = self._wrist_drop_deg()
+        rest = self._wrist_rest_deg()
+        cycle = self.gripper_cycle_var.get()
 
         def action(follower: PiperFollower) -> None:
             follower.bus.release_torque_safely(
                 mode=mode,
-                wrist_drop_deg=drop,
+                wrist_rest_deg=rest,
                 ramp_s=float(self.recording_env.get("PARK_RELEASE_RAMP_S") or 2.0),
                 settle_s=float(self.recording_env.get("PARK_RELEASE_SETTLE_S") or 0.5),
+                gripper_cycle=cycle,
+                gripper_open=float(self.recording_env.get("PARK_RELEASE_GRIPPER_OPEN") or 100.0),
+                gripper_wait_s=float(self.recording_env.get("PARK_RELEASE_GRIPPER_WAIT_S") or 1.5),
             )
 
         self._run_follower_action(f"Safe Torque Release ({mode})", action)
 
-    def _on_measure_wrist_drop(self):
+    def _on_measure_wrist_rest(self):
         """지금 자세에서 torque를 풀고 손목이 실제로 몇 도 떨어지는지 재서
         Wrist drop 입력칸에 반영. 종료 자세가 바뀌면 손목에 걸리는 중력 방향도
         바뀌므로 그 자세에서 다시 재는 용도 — 측정이 끝나면 torque는 풀린 채로
@@ -907,15 +930,15 @@ class PiperMonitorUI:
 
         주의: 이 버튼은 일부러 "그냥 놓는" 동작이라 손목이 뚝 떨어진다."""
         def action(follower: PiperFollower) -> None:
-            drop = follower.bus.measure_wrist_drop()
-            self.root.after(0, self._apply_measured_wrist_drop, drop)
+            rest, drop = follower.bus.measure_wrist_rest()
+            self.root.after(0, self._apply_measured_wrist_rest, rest, drop)
 
-        self._run_follower_action("Measure Wrist Drop", action)
+        self._run_follower_action("Measure Wrist Rest", action)
 
-    def _apply_measured_wrist_drop(self, drop: float) -> None:
-        self.wrist_drop_var.set(f"{drop:.1f}")
-        self.wrist_drop_info_var.set(
-            f"측정됨: 이 자세에서 그냥 놓으면 손목이 {drop:+.1f}도 떨어짐 "
+    def _apply_measured_wrist_rest(self, rest: float, drop: float) -> None:
+        self.wrist_rest_var.set(f"{rest:.1f}")
+        self.wrist_rest_info_var.set(
+            f"측정됨: 이 자세에서 놓으면 손목이 {drop:+.1f}도 떨어져 {rest:.1f}도에 멎음 "
             "— Save as Default로 저장하면 이후 lower 해제에 쓰임"
         )
         self._refresh_command()
@@ -1300,8 +1323,10 @@ class PiperMonitorUI:
             "SAFETY_ENABLED": "true" if self.safety_enabled_var.get() else "false",
             "SAFETY_EFFORT_LIMIT": self.safety_limit_var.get().strip() or "8.0",
             "SAFETY_ON_OVERLOAD": self.safety_action_var.get().strip() or "park",
+            "SAFETY_PARK_RAMP_S": self.safety_park_ramp_var.get().strip() or "4.0",
             "PARK_RELEASE_MODE": self.release_mode_var.get().strip() or "lower",
-            "PARK_RELEASE_WRIST_DROP_DEG": f"{self._wrist_drop_deg():.1f}",
+            "PARK_RELEASE_WRIST_REST_DEG": f"{self._wrist_rest_deg():.1f}",
+            "PARK_RELEASE_GRIPPER_CYCLE": "true" if self.gripper_cycle_var.get() else "false",
         }
         if self.dataset_root_override_var.get().strip():
             updates["DATASET_ROOT"] = self.dataset_root_override_var.get().strip()
@@ -1405,6 +1430,8 @@ class PiperMonitorUI:
             f"--robot.safety_enabled={'true' if self.safety_enabled_var.get() else 'false'}",
             f"--robot.safety_effort_limit={limit}",
             f"--robot.safety_on_overload={self.safety_action_var.get().strip() or 'park'}",
+            f"--robot.safety_park_ramp_s={self.safety_park_ramp_var.get().strip() or '4.0'}",
+            f"--robot.safety_hold_resend={(env.get('SAFETY_HOLD_RESEND') or 'true').lower()}",
             *self._release_args(),
         ]
 
@@ -1414,18 +1441,21 @@ class PiperMonitorUI:
         env = self.recording_env
         return [
             f"--robot.park_release_mode={self.release_mode_var.get().strip() or 'lower'}",
-            f"--robot.park_release_wrist_drop_deg={self._wrist_drop_deg()}",
+            f"--robot.park_release_wrist_rest_deg={self._wrist_rest_deg()}",
+            f"--robot.park_release_gripper_cycle={'true' if self.gripper_cycle_var.get() else 'false'}",
+            f"--robot.park_release_gripper_open={env.get('PARK_RELEASE_GRIPPER_OPEN') or '100.0'}",
+            f"--robot.park_release_gripper_wait_s={env.get('PARK_RELEASE_GRIPPER_WAIT_S') or '1.5'}",
             f"--robot.park_release_ramp_s={env.get('PARK_RELEASE_RAMP_S') or '2.0'}",
             f"--robot.park_release_settle_s={env.get('PARK_RELEASE_SETTLE_S') or '0.5'}",
         ]
 
-    def _wrist_drop_deg(self) -> float:
-        """"lower" 모드에서 손목을 미리 내릴 각도(도). 입력이 비었거나 숫자가
-        아니면 실측 기본값(tables.WRIST_RELEASE_DROP_DEG)으로 되돌린다."""
+    def _wrist_rest_deg(self) -> float:
+        """"lower" 모드에서 손목을 내려둘 각도(도, 절대값=자연 정지각). 입력이
+        비었거나 숫자가 아니면 실측 기본값(tables.WRIST_RELEASE_REST_DEG)으로 되돌린다."""
         try:
-            return float(self.wrist_drop_var.get().strip())
+            return float(self.wrist_rest_var.get().strip())
         except ValueError:
-            return WRIST_RELEASE_DROP_DEG
+            return WRIST_RELEASE_REST_DEG
 
     def _dataset_args(self, fps: str) -> list[str]:
         """5__record.sh의 dataset.* 인자와 동일한 fallback. Task/Num Episodes/Episode

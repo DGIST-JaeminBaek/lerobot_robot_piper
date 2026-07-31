@@ -54,12 +54,21 @@ class PiperFollowerConfig(RobotConfig):
     # N·m. get_effort()가 current 기반 추정치라 절대 토크값이 아니므로, 처음엔 보수적으로
     # 잡고 랩 PC에서 자유운동(무접촉) 시 관측되는 effort 노이즈 상한을 본 뒤 튜닝할 것.
     safety_effort_limit: float = 8.0
-    # 임계값을 넘었을 때 무엇을 할지.
-    #   "hold" — 기존 동작. 그 자리에서 명령만 보류(멈춘 채로 계속 서 있음).
-    #   "park" — 즉시 parking 자세로 복귀하고 그 뒤로는 명령을 받지 않음(래치).
-    # 기본 "park": 과부하가 걸린 자세 그대로 굳어 있으면 물체/작업대를 계속 누르고
-    # 있게 되는 경우가 있어서, 일단 안전한 자세로 빼는 쪽을 기본으로 둔다.
+    # 임계값을 넘었을 때 무엇을 할지. 둘 다 리더/정책 명령은 무시하되 토크는 유지한다
+    # (트립 자세를 계속 재전송 — safety_hold_resend 참고).
+    #   "hold" — 트립 순간의 자세에서 그대로 정지.
+    #   "park" — parking 자세로 천천히 복귀한 뒤 그 자세로 정지.
     safety_on_overload: str = "park"
+    # "park"으로 복귀할 때 걸릴 시간(초). 0 이하면 기존 bus.parking()처럼 목표를
+    # 한 번에 쏴서 컨트롤러 최고속으로 이동한다 — parking 자세가 "팔이 수직으로
+    # 뻗은" 자세라서 그렇게 하면 트립 순간 팔이 확 뻗는 것처럼 보이고, 사람 손이
+    # 팔에 닿아 있을 수 있는 상황(외력으로 트립된 직후)에서 위험하다. 그래서
+    # 기본은 ramp_to로 천천히 복귀.
+    safety_park_ramp_s: float = 4.0
+    # 트립 후 "얼어붙힌 자세"를 매 스텝 다시 보낼지. Piper는 JointCtrl 목표를 계속
+    # 스트리밍해야 자세를 잡으므로, 끄면(=명령 완전 중단) 팔이 힘을 잃고 늘어진다.
+    # 늘어짐의 원인이 우리 쪽인지 컨트롤러 자체 보호인지 가려낼 때만 false로 둘 것.
+    safety_hold_resend: bool = True
 
     # torque 해제 방식 (motors/piper_motors_bus.py release_torque_safely 참고).
     #   "in_place" — 이동 없이 그 자리에서 해제
@@ -71,10 +80,17 @@ class PiperFollowerConfig(RobotConfig):
     park_release_mode: str = "lower"
     park_release_ramp_s: float = 2.0
     park_release_settle_s: float = 0.5
-    # "lower"에서 손목을 미리 내릴 각도(도). 기본값은 motors/tables.py의
-    # WRIST_RELEASE_DROP_DEG와 동일 — 여기 그대로 적어둔 이유는 config가 piper_sdk를
-    # import하는 motors 패키지에 의존하지 않게 하기 위함(둘을 같이 고칠 것).
-    park_release_wrist_drop_deg: float = 24.4
+    # "lower"에서 손목을 내려둘 각도(도) — 상대 델타가 아니라 절대 각도(자연 정지각).
+    # 기본값은 motors/tables.py의 WRIST_RELEASE_REST_DEG와 동일 — 여기 그대로 적어둔
+    # 이유는 config가 piper_sdk를 import하는 motors 패키지에 의존하지 않게 하기 위함.
+    park_release_wrist_rest_deg: float = 24.4
+    # torque를 풀기 전에 그리퍼를 한 번 열고 닫아서 물고 있던 것을 놓고 파킹
+    # 위치(닫힘)로 되돌릴지. 그리퍼는 팔 모터와 별개 노드(0x159)라 DisablePiper()로
+    # 풀리지 않으므로, 해제 시 실능(GripperCtrl code=0x00)은 이 값과 무관하게 항상 한다.
+    # 주의: 여는 순간 잡고 있던 물체가 떨어지고 닫을 때 손가락이 끼일 수 있다.
+    park_release_gripper_cycle: bool = True
+    park_release_gripper_open: float = 100.0
+    park_release_gripper_wait_s: float = 1.5
 
     # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
     # Set this to a positive scalar to have the same value for all motors, or a dictionary that maps motor

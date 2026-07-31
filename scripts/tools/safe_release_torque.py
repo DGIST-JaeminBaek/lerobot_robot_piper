@@ -34,8 +34,8 @@ def parse_args() -> argparse.Namespace:
                          help="해제 전 자세 (기본: lower)")
     parser.add_argument("--ramp-s", type=float, default=2.0,
                          help="lower 모드에서 손목을 내리는 데 걸리는 시간(초)")
-    parser.add_argument("--wrist-drop-deg", type=float, default=24.4,
-                         help="lower 모드에서 손목을 미리 내릴 각도(도)")
+    parser.add_argument("--wrist-rest-deg", type=float, default=24.4,
+                         help="lower 모드에서 손목을 내려둘 각도(도, 절대값=자연 정지각)")
     parser.add_argument("--max-relative-target", type=float, default=15.0,
                          help="자세 이동 시 timestep별 최대 이동량")
     return parser.parse_args()
@@ -74,9 +74,9 @@ def main() -> None:
                 ramp_s=args.ramp_s,
             )
         elif args.mode == "lower":
-            print(f"손목(joint5)을 {args.wrist_drop_deg}도 미리 내립니다 (팔은 그대로)...")
+            print(f"손목(joint5)을 {args.wrist_rest_deg}도(자연 정지각)까지 내립니다 (팔은 그대로)...")
             follower.bus.ramp_to(
-                follower.bus.wrist_drop_target(args.wrist_drop_deg), ramp_s=args.ramp_s
+                follower.bus.wrist_rest_target(args.wrist_rest_deg), ramp_s=args.ramp_s
             )
         else:
             print("이동 없이 현재 자세에서 해제합니다.")

@@ -40,7 +40,7 @@ INITIALIZE_POSITION = {
     "gripper":   0,
 }
 
-# torque를 풀 때 손목(joint5)을 미리 내려둘 각도(도).
+# torque를 풀 때 손목(joint5)을 미리 내려둘 각도(도) — **절대 각도**(자연 정지각).
 # release_torque_safely(mode="lower")가 사용한다.
 #
 # 실기 측정으로 얻은 값(2026-07-28, 파킹 자세에서):
@@ -52,6 +52,11 @@ INITIALIZE_POSITION = {
 #     (24.4 -> 0.6도, 약 40배). 즉 팔을 어디로 옮길 필요 없이 손목만 미리 내리면 된다.
 #
 # 팔 자세에 따라 손목에 걸리는 중력 방향이 달라지므로 이 값이 항상 최적은 아니다 —
-# GUI의 "Measure Wrist Drop"으로 지금 쓰는 종료 자세에서 다시 재서 recording.env
-# (PARK_RELEASE_WRIST_DROP_DEG)에 저장할 수 있다.
-WRIST_RELEASE_DROP_DEG = 24.4
+# GUI의 "Measure Wrist Rest"로 지금 쓰는 종료 자세에서 다시 재서 recording.env
+# (PARK_RELEASE_WRIST_REST_DEG)에 저장할 수 있다.
+#
+# 상대 델타가 아니라 절대 각도인 게 중요하다(실기 확인 2026-07-31): 손목이 이미
+# 정지각 근처에 있을 때 상대로 또 내리면 그보다 아래로 명령했다가 놓는 순간 그만큼
+# 튕겨 올라온다. 자세에 따라 정지각이 달라지므로(파킹에서 24.4도, 다른 자세에서
+# 29~30도) GUI의 "Measure Wrist Rest"로 그때그때 재는 게 정확하다.
+WRIST_RELEASE_REST_DEG = 24.4

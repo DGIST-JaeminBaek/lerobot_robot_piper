@@ -14,7 +14,7 @@ from .tables import (
     MODEL_ENCODING_TABLE,
     MODEL_NUMBER_TABLE,
     MODEL_RESOLUTION_TABLE,
-    WRIST_RELEASE_DROP_DEG,
+    WRIST_RELEASE_REST_DEG,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,9 +65,12 @@ class PiperMotorsBus(MotorsBus):
         disable_torque: bool = True,
         park: bool | None = None,
         release_mode: str | None = None,
-        wrist_drop_deg: float = WRIST_RELEASE_DROP_DEG,
+        wrist_rest_deg: float = WRIST_RELEASE_REST_DEG,
         release_ramp_s: float = 2.0,
         release_settle_s: float = 0.5,
+        gripper_cycle: bool = True,
+        gripper_open: float = 100.0,
+        gripper_wait_s: float = 1.0,
     ) -> None:
         # park과 disable_torque를 분리 — follower는 항상 parking 자세로는 가되
         # torque 자동 해제 여부만 선택하고 싶은 경우(DISABLE_TORQUE_ON_DISCONNECT=false
@@ -83,9 +86,12 @@ class PiperMotorsBus(MotorsBus):
             mode = release_mode or ("park" if park else "in_place")
             self.release_torque_safely(
                 mode=mode,
-                wrist_drop_deg=wrist_drop_deg,
+                wrist_rest_deg=wrist_rest_deg,
                 ramp_s=release_ramp_s,
                 settle_s=release_settle_s,
+                gripper_cycle=gripper_cycle,
+                gripper_open=gripper_open,
+                gripper_wait_s=gripper_wait_s,
             )
         elif park:
             self.parking()
@@ -126,6 +132,8 @@ class PiperMotorsBus(MotorsBus):
 
     def disable_torque(self, motors: str | list[str] | None = None, num_retry: int = 0) -> None:
         self.piper.DisablePiper()
+        # 그리퍼는 별개 노드라 DisablePiper()로 안 풀린다 (disable_gripper 참고)
+        self.disable_gripper()
 
     def read_calibration(self) -> dict[str, MotorCalibration]:
         return self.calibration
@@ -204,60 +212,154 @@ class PiperMotorsBus(MotorsBus):
             )
             time.sleep(step_s)
 
-    def wrist_drop_target(self, drop_deg: float) -> dict[str, float]:
-        """현재 자세에서 손목(joint5)만 drop_deg만큼 내린 목표 자세(정규화값)."""
+    # ---- 그리퍼 (팔 모터와 별개 노드 — 0x159, GripperCtrl) ----
+
+    def gripper_ctrl(self, angle_norm: float, effort: int = 1000, code: int = 0x03) -> None:
+        """그리퍼 단독 제어. angle_norm은 다른 관절과 같은 정규화값(0~100).
+
+        code: 0x00 실능, 0x01 사용, 0x02 실능+에러클리어, 0x03 사용+에러클리어.
+        평소 동작(set_action)은 0x03을 쓴다.
+        """
+        raw = abs(int(self._unnormalize({"gripper": angle_norm})["gripper"]))
+        self.piper.GripperCtrl(raw, effort, code, 0)
+
+    def gripper_status_code(self) -> int:
+        """그리퍼 피드백 상태코드(0x2A Byte 6). bit[6]이 구동기 사용(1)/실능(0)."""
+        return int(self.piper.GetArmGripperMsgs().gripper_state.status_code)
+
+    def is_gripper_enabled(self) -> bool:
+        return bool(self.gripper_status_code() & (1 << 6))
+
+    def disable_gripper(self, retries: int = 6, wait_s: float = 0.2) -> bool:
+        """그리퍼 힘 풀기(실능). 실제로 풀렸는지 확인될 때까지 재시도하고 결과를 반환.
+
+        DisablePiper()는 팔 모터(0x471)만 내리고 그리퍼는 별개 노드(0x159)라 그대로
+        물고 있어서, 종료 후에도 그리퍼가 안 풀리는 원인이 됐다.
+
+        한 번만 쏘고 끝내면 프레임이 씹히거나 드라이버 에러 상태에서 무시될 수 있어서
+        (실기에서 실제로 안 풀렸다), 상태코드 bit[6]으로 확인하면서 0x00(실능)과
+        0x02(실능+에러클리어)를 번갈아 보낸다 — SDK 데모(piper_ctrl_gripper.py)도
+        0x02로 리셋한 뒤 쓴다. 각도는 현재값 그대로, effort=0으로 줘서 실능 직전에
+        움직이지 않게 한다.
+        """
+        current = self.get_action()["gripper"]
+        for attempt in range(retries):
+            code = 0x00 if attempt % 2 == 0 else 0x02
+            self.gripper_ctrl(current, effort=0, code=code)
+            time.sleep(wait_s)
+            if not self.is_gripper_enabled():
+                logger.info(f"{self.id} gripper disabled (code=0x{code:02X}, {attempt + 1}회 시도).")
+                return True
+        logger.warning(
+            f"{self.id} gripper 실능 실패 — status_code=0x{self.gripper_status_code():02X} "
+            f"(bit6=1이면 아직 사용 중). 전원을 껐다 켜야 할 수 있음."
+        )
+        return False
+
+    def cycle_gripper(
+        self,
+        open_norm: float = 100.0,
+        close_norm: float = 0.0,
+        wait_s: float = 1.0,
+        effort: int = 1000,
+    ) -> None:
+        """그리퍼를 한 번 열고 다시 닫아서 파킹 위치로 되돌린다.
+
+        물고 있던 물체를 놓게 하고(열기), 보관/시작 자세인 닫힘 상태로 맞춘다.
+        주의: 여는 순간 잡고 있던 물체가 떨어지고, 닫을 때 손가락이 끼일 수 있다 —
+        사람이 그리퍼 안에 손을 두지 않은 상태에서만 쓸 것.
+        """
+        logger.info(f"{self.id} gripper cycle: open({open_norm:.0f}) -> close({close_norm:.0f})")
+        # 팔이 CAN 제어 모드가 아니면 그리퍼 각도 명령이 무시된다 — set_action()은
+        # 매번 이걸 먼저 보내지만, 여기서는 팔 관절 명령 없이 그리퍼만 움직이므로
+        # 직접 한 번 보내줘야 한다(실기에서 이거 없이는 각도가 안 변하는 걸 확인).
+        self.piper.ModeCtrl(0x01, 0x01, 30, 0x00)
+        self.gripper_ctrl(open_norm, effort=effort)
+        time.sleep(wait_s)
+        self.gripper_ctrl(close_norm, effort=effort)
+        time.sleep(wait_s)
+
+    def wrist_rest_target(self, rest_deg: float) -> dict[str, float]:
+        """손목(joint5)을 rest_deg(자연 정지각, 절대 각도)로 내린 목표 자세(정규화값).
+
+        상대 델타가 아니라 절대 각도인 게 중요하다 — 상대로 하면 손목이 이미 정지각에
+        있을 때 그보다 더 아래로 명령하게 되고, 놓는 순간 그만큼 다시 튕겨 올라온다
+        (실기에서 확인: 손목 30도에서 +24.4도를 더 줬다가 해제하니 29.9도로 복귀).
+
+        이미 정지각보다 아래(각도가 큰 쪽)면 그대로 둔다 — 손목을 도로 들어올리면
+        놓을 때 다시 떨어지므로.
+        """
         cal = self.calibration["joint5"]
-        # 정규화 스케일: 전체 범위(raw)가 -100~100(=200)에 대응
-        delta_norm = (drop_deg * 1000.0) / (cal.range_max - cal.range_min) * 200
+        rest_norm = ((rest_deg * 1000.0 - cal.range_min) / (cal.range_max - cal.range_min)) * 200 - 100
         target = {m: v for m, v in self.get_action().items() if m != "gripper"}
-        target["joint5"] += delta_norm
+        target["joint5"] = max(target["joint5"], rest_norm)
         return target
 
     def release_torque_safely(
         self,
         mode: str = "in_place",
-        wrist_drop_deg: float = WRIST_RELEASE_DROP_DEG,
+        wrist_rest_deg: float = WRIST_RELEASE_REST_DEG,
         ramp_s: float = 2.0,
         settle_s: float = 0.5,
+        gripper_cycle: bool = True,
+        gripper_open: float = 100.0,
+        gripper_wait_s: float = 1.0,
     ) -> None:
         """torque를 푸는 세 가지 방식.
 
         - "in_place": 이동 없이 지금 자세 그대로 해제. 예상 못 한 이동이 아예 없다.
-        - "lower": 팔은 그 자리에 두고 손목(joint5)만 wrist_drop_deg만큼 미리 내린
-          뒤 해제. 실기 측정 결과 torque를 풀 때 실제로 떨어지는 건 손목뿐이라
+        - "lower": 팔은 그 자리에 두고 손목(joint5)만 wrist_rest_deg(자연 정지각)까지
+          미리 내린 뒤 해제. 실기 측정 결과 torque를 풀 때 실제로 떨어지는 건 손목뿐이라
           (joint1~4/6은 0.00도) 그 낙차를 미리 없애는 것 — tables.py의
-          WRIST_RELEASE_DROP_DEG 주석 참고. 팔을 옮기지 않으므로 이동 위험이 없다.
+          WRIST_RELEASE_REST_DEG 주석 참고. 팔을 옮기지 않으므로 이동 위험이 없다.
         - "park": 기존 동작 — parking 자세로 이동한 뒤 해제.
 
-        어느 쪽이든 gripper는 건드리지 않는다(뭔가 잡고 있을 때 손/물체가 끼지 않도록).
+        팔 관절 이동에서는 gripper를 건드리지 않는다(잡고 있는 물체/손이 끼지 않도록).
+        gripper_cycle=True면 마지막에 그리퍼를 한 번 열고 닫아서 물고 있던 걸 놓고
+        파킹 위치(닫힘)로 되돌린 뒤 실능시킨다.
         """
         mode = (mode or "in_place").lower()
         if mode == "park":
             self.parking()
         elif mode == "lower":
-            self.ramp_to(self.wrist_drop_target(wrist_drop_deg), ramp_s=ramp_s)
+            self.ramp_to(self.wrist_rest_target(wrist_rest_deg), ramp_s=ramp_s)
             # 마지막 목표에 실제로 도달할 시간을 준 뒤에 풀어야 "거의 다 내려간
             # 상태"가 아니라 "다 내려간 상태"에서 해제된다.
             time.sleep(settle_s)
         elif mode != "in_place":
             logger.warning(f"{self.id} unknown release mode '{mode}' — in_place로 처리")
 
+        # 팔 토크를 내리기 전에 그리퍼를 정리한다 — 팔이 늘어진 뒤에 그리퍼를
+        # 여닫으면 반력으로 팔이 흔들린다.
+        if gripper_cycle:
+            self.cycle_gripper(
+                open_norm=gripper_open,
+                close_norm=INITIALIZE_POSITION["gripper"],
+                wait_s=gripper_wait_s,
+            )
+
         logger.info(f"{self.id} releasing torque (mode={mode}).")
         self.piper.DisablePiper()
+        # DisablePiper()는 팔 모터만 내린다 — 그리퍼는 따로 실능시켜야 풀린다.
+        self.disable_gripper()
 
-    def measure_wrist_drop(self, settle_s: float = 3.0) -> float:
-        """지금 자세에서 torque를 풀고 손목(joint5)이 얼마나 떨어지는지 측정(도).
+    def measure_wrist_rest(self, settle_s: float = 3.0) -> tuple[float, float]:
+        """torque를 풀고 손목(joint5)이 멎는 각도를 측정. (정지각, 낙차) 도 단위.
 
-        GUI의 "Measure Wrist Drop"이 사용 — 종료 자세가 바뀌면 손목에 걸리는 중력
-        방향도 바뀌므로, 그 자세에서 다시 재서 wrist_drop_deg를 갱신하기 위한 것.
+        GUI의 "Measure Wrist Rest"가 사용 — 종료 자세가 바뀌면 손목에 걸리는 중력
+        방향도 바뀌므로 그 자세에서 다시 재서 wrist_rest_deg를 갱신하기 위한 것.
         측정이 끝나면 torque는 풀린 상태로 남는다(다시 잡으려면 enable_torque).
         """
         cal = self.calibration["joint5"]
-        before = self.get_action()["joint5"]
+
+        def to_deg(norm: float) -> float:
+            return (((norm + 100) / 200) * (cal.range_max - cal.range_min) + cal.range_min) / 1000.0
+
+        before = to_deg(self.get_action()["joint5"])
         self.piper.DisablePiper()
         time.sleep(settle_s)
-        after = self.get_action()["joint5"]
-        return (after - before) / 200 * (cal.range_max - cal.range_min) / 1000.0
+        after = to_deg(self.get_action()["joint5"])
+        return after, after - before
 
     def set_slave(self):
         self.piper.MasterSlaveConfig(0xFC, 0, 0, 0)

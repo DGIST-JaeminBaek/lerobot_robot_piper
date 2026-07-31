@@ -4,7 +4,10 @@
 (joint1~4/6은 0.00도) 그 낙차가 24.4도였다 — 그게 "쿵" 하고 놓이는 느낌의 정체.
 그래서 lower 모드는 팔을 옮기지 않고 손목만 미리 내린 뒤 해제한다. 이 테스트는
 각 모드가 실제로 어떤 이동을 하는지(또는 안 하는지), lower가 손목 외의 관절은
-건드리지 않는지, gripper를 절대 건드리지 않는지를 확인한다.
+건드리지 않는지, 그리퍼가 제대로 실능(0x00)되는지를 확인한다.
+
+그리퍼는 팔 모터와 별개 노드(0x159)라 DisablePiper()로는 안 풀린다 — 실기에서
+"팔은 풀렸는데 그리퍼가 계속 물고 있다"로 나타났던 문제.
 
 실행: PYTHONPATH=. python scripts/tools/test_release_mock.py
 """
@@ -13,8 +16,9 @@ import sys
 from types import SimpleNamespace
 
 try:
+    from lerobot.motors import MotorNormMode
     from lerobot_robot_piper.motors.piper_motors_bus import PiperMotorsBus
-    from lerobot_robot_piper.motors.tables import WRIST_RELEASE_DROP_DEG
+    from lerobot_robot_piper.motors.tables import WRIST_RELEASE_REST_DEG
 except ModuleNotFoundError as e:  # pragma: no cover - 랩 PC 외 환경
     print(f"SKIP: piper_sdk/lerobot import 실패 — {e}")
     sys.exit(0)
@@ -24,11 +28,34 @@ JOINTS = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
 
 
 class FakePiper:
-    def __init__(self):
+    def __init__(self, disable_after: int = 1):
         self.disable_calls = 0
+        self.gripper_calls = []  # (angle_raw, effort, code)
+        # 실능 명령 몇 번째에 실제로 풀릴지 (1이면 첫 시도에 성공)
+        self.disable_after = disable_after
+        self.gripper_enabled = True
+        self.mode_ctrl_calls = 0
 
     def DisablePiper(self):
         self.disable_calls += 1
+
+    def ModeCtrl(self, ctrl_mode, move_mode, speed, is_mit):
+        # 그리퍼 각도 명령이 먹으려면 팔이 CAN 제어 모드여야 한다 — cycle_gripper가
+        # 이걸 먼저 보내는지 확인용
+        self.mode_ctrl_calls += 1
+
+    def GripperCtrl(self, angle, effort, code, set_zero):
+        self.gripper_calls.append((angle, effort, code))
+        if code in (0x00, 0x02):
+            disables = sum(1 for c in self.gripper_calls if c[2] in (0x00, 0x02))
+            if disables >= self.disable_after:
+                self.gripper_enabled = False
+        else:
+            self.gripper_enabled = True
+
+    def GetArmGripperMsgs(self):
+        status = (1 << 6) if self.gripper_enabled else 0
+        return SimpleNamespace(gripper_state=SimpleNamespace(status_code=status))
 
 
 def make_bus(start: dict[str, float]) -> PiperMotorsBus:
@@ -40,8 +67,13 @@ def make_bus(start: dict[str, float]) -> PiperMotorsBus:
     bus.sent = []
     # 손목 각도 <-> 정규화값 변환에 calibration 범위가 필요 (piper_follower.py의
     # joint5: -65000~65000 = -65~65도)
+    # _unnormalize()가 norm_mode를 보므로 motors도 필요
+    bus.motors = {
+        "gripper": SimpleNamespace(norm_mode=MotorNormMode.RANGE_0_100, model="AGILEX-S"),
+    }
     bus.calibration = {
         "joint5": SimpleNamespace(range_min=-65000, range_max=65000),
+        "gripper": SimpleNamespace(range_min=0, range_max=68000, drive_mode=0),
     }
 
     def get_action():
@@ -62,7 +94,7 @@ START = {j: 0.0 for j in JOINTS} | {"gripper": 42.0}
 
 def test_in_place_does_not_move():
     bus = make_bus(START)
-    bus.release_torque_safely(mode="in_place")
+    bus.release_torque_safely(mode="in_place", gripper_cycle=False)
     assert bus.sent == []
     assert bus.piper.disable_calls == 1
 
@@ -71,14 +103,14 @@ def test_park_moves_to_parking_then_releases():
     bus = make_bus(START)
     parking_calls = []
     bus.parking = lambda: parking_calls.append(1)
-    bus.release_torque_safely(mode="park")
+    bus.release_torque_safely(mode="park", gripper_cycle=False)
     assert parking_calls == [1]
     assert bus.piper.disable_calls == 1
 
 
 def test_lower_drops_only_wrist_and_keeps_gripper():
-    bus = make_bus(START)
-    bus.release_torque_safely(mode="lower", ramp_s=0.2, settle_s=0.0)
+    bus = make_bus(START)  # 손목 0도에서 시작 -> 정지각(24.4도)까지 내려가야 함
+    bus.release_torque_safely(mode="lower", ramp_s=0.2, settle_s=0.0, gripper_cycle=False)
 
     # 한 번에 점프하지 않고 여러 스텝으로 나눠서 내려간다
     assert len(bus.sent) > 1
@@ -88,33 +120,92 @@ def test_lower_drops_only_wrist_and_keeps_gripper():
         if joint == "joint5":
             continue
         assert abs(final[joint] - START[joint]) < 1e-9, joint
-    # 24.4도 -> 정규화 델타: 24.4*1000 / (65000-(-65000)) * 200
-    expected = START["joint5"] + WRIST_RELEASE_DROP_DEG * 1000.0 / 130000 * 200
+    # 24.4도(절대) -> 정규화: (24400 - (-65000)) / 130000 * 200 - 100
+    expected = (WRIST_RELEASE_REST_DEG * 1000.0 + 65000) / 130000 * 200 - 100
     assert abs(final["joint5"] - expected) < 1e-6
     # gripper는 전 구간에서 손도 대지 않음 (잡고 있는 물체/손이 끼지 않도록)
     assert all(abs(step["gripper"] - START["gripper"]) < 1e-9 for step in bus.sent)
     assert bus.piper.disable_calls == 1
 
 
-def test_lower_uses_custom_wrist_drop():
+def test_lower_uses_custom_wrist_rest():
     bus = make_bus(START)
-    bus.release_torque_safely(mode="lower", wrist_drop_deg=10.0, ramp_s=0.2, settle_s=0.0)
-    assert abs(bus.sent[-1]["joint5"] - (10.0 * 1000.0 / 130000 * 200)) < 1e-6
+    bus.release_torque_safely(mode="lower", wrist_rest_deg=10.0, ramp_s=0.2, settle_s=0.0,
+                              gripper_cycle=False)
+    assert abs(bus.sent[-1]["joint5"] - ((10000 + 65000) / 130000 * 200 - 100)) < 1e-6
 
 
-def test_measure_wrist_drop_reports_degrees():
-    bus = make_bus(START)
-    # torque를 푸는 순간 손목이 정규화 37.538(=24.4도)만큼 떨어지는 상황을 흉내
+def test_lower_never_lifts_wrist_back_up():
+    """손목이 이미 정지각보다 아래면 그대로 둔다 — 도로 들어올리면 놓을 때 다시 떨어진다.
+
+    실기에서 손목 30도(이미 정지)에 상대 델타를 더 줬다가 해제하니 29.9도로 튕겨
+    올라온 케이스의 회귀 테스트.
+    """
+    start = dict(START)
+    start["joint5"] = (40000 + 65000) / 130000 * 200 - 100  # 40도 = 정지각보다 아래
+    bus = make_bus(start)
+    bus.release_torque_safely(mode="lower", wrist_rest_deg=24.4, ramp_s=0.2, settle_s=0.0,
+                              gripper_cycle=False)
+    assert all(abs(step["joint5"] - start["joint5"]) < 1e-9 for step in bus.sent)
+
+
+def test_measure_wrist_rest_reports_angle_and_drop():
+    bus = make_bus(START)  # 0도에서 시작
+    # torque를 푸는 순간 손목이 24.4도로 떨어지는 상황을 흉내
     def disable():
-        bus._pose["joint5"] = 37.538461538
+        bus._pose["joint5"] = (24400 + 65000) / 130000 * 200 - 100
     bus.piper.DisablePiper = disable
-    drop = bus.measure_wrist_drop(settle_s=0.0)
+    rest, drop = bus.measure_wrist_rest(settle_s=0.0)
+    assert abs(rest - 24.4) < 0.01, rest
     assert abs(drop - 24.4) < 0.01, drop
+
+
+def test_release_always_disables_gripper():
+    """그리퍼는 팔 모터와 별개 노드라 DisablePiper()만으로는 안 풀린다 —
+    해제 경로에서 반드시 code=0x00(실능)을 보내야 한다."""
+    bus = make_bus(START)
+    bus.release_torque_safely(mode="in_place", gripper_cycle=False)
+    assert bus.piper.disable_calls == 1
+    codes = [c for _, _, c in bus.piper.gripper_calls]
+    assert 0x00 in codes, codes
+    # 실능은 effort 0으로 (각도 명령으로 움직이지 않게)
+    disable_call = next(c for c in bus.piper.gripper_calls if c[2] == 0x00)
+    assert disable_call[1] == 0
+    assert bus.is_gripper_enabled() is False
+
+
+def test_disable_gripper_retries_until_status_confirms():
+    """한 번 쏘고 끝내면 실기에서 안 풀렸다 — 상태코드로 확인될 때까지 재시도해야 한다."""
+    bus = make_bus(START)
+    bus.piper.disable_after = 3  # 세 번째 실능 명령에서야 풀리는 상황
+    assert bus.disable_gripper(wait_s=0.0) is True
+    disable_codes = [c[2] for c in bus.piper.gripper_calls if c[2] in (0x00, 0x02)]
+    assert disable_codes == [0x00, 0x02, 0x00]  # 0x00 / 0x02 번갈아
+
+
+def test_disable_gripper_reports_failure():
+    bus = make_bus(START)
+    bus.piper.disable_after = 99  # 끝까지 안 풀리는 상황
+    assert bus.disable_gripper(retries=3, wait_s=0.0) is False
+
+
+def test_gripper_cycle_opens_then_closes_to_parking():
+    bus = make_bus(START)
+    bus.release_torque_safely(mode="in_place", gripper_cycle=True,
+                              gripper_open=100.0, gripper_wait_s=0.0)
+    # 사용(0x03) 명령 두 번 = 열기 -> 닫기, 그 다음 실능(0x00)
+    # 팔이 CAN 제어 모드가 아니면 그리퍼 각도 명령이 무시된다(실기 확인)
+    assert bus.piper.mode_ctrl_calls >= 1
+    enable_calls = [c for c in bus.piper.gripper_calls if c[2] == 0x03]
+    assert len(enable_calls) == 2, bus.piper.gripper_calls
+    assert enable_calls[0][0] == 68000   # 정규화 100 -> raw 68mm (완전 열림)
+    assert enable_calls[1][0] == 0       # 파킹 위치(닫힘)
+    assert bus.piper.gripper_calls[-1][2] == 0x00  # 마지막은 실능
 
 
 def test_unknown_mode_falls_back_to_in_place():
     bus = make_bus(START)
-    bus.release_torque_safely(mode="nonsense")
+    bus.release_torque_safely(mode="nonsense", gripper_cycle=False)
     assert bus.sent == []
     assert bus.piper.disable_calls == 1
 
@@ -123,7 +214,12 @@ if __name__ == "__main__":
     test_in_place_does_not_move()
     test_park_moves_to_parking_then_releases()
     test_lower_drops_only_wrist_and_keeps_gripper()
-    test_lower_uses_custom_wrist_drop()
-    test_measure_wrist_drop_reports_degrees()
+    test_lower_uses_custom_wrist_rest()
+    test_lower_never_lifts_wrist_back_up()
+    test_measure_wrist_rest_reports_angle_and_drop()
+    test_release_always_disables_gripper()
+    test_disable_gripper_retries_until_status_confirms()
+    test_disable_gripper_reports_failure()
+    test_gripper_cycle_opens_then_closes_to_parking()
     test_unknown_mode_falls_back_to_in_place()
     print("OK: torque 해제 모드 mock 테스트 통과")

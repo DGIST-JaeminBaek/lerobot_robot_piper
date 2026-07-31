@@ -132,7 +132,7 @@ robot_safety_args() {
   # 전부 차단(래치), hold면 기존처럼 그 자리에서 명령만 보류한다.
   #
   # PARK_RELEASE_MODE는 종료 시 "어떤 자세에서 torque를 푸는지"를 정한다 —
-  # lower(팔은 그대로, 손목만 PARK_RELEASE_WRIST_DROP_DEG만큼 미리 내린 뒤 해제) /
+  # lower(팔은 그대로, 손목만 PARK_RELEASE_WRIST_REST_DEG 각도까지 미리 내린 뒤 해제) /
   # in_place(그 자리에서 바로) / park(기존: 파킹 자세로 이동 후).
   # 실측상 torque를 풀 때 떨어지는 건 손목뿐이라(joint1~4/6은 0.00도) lower가 기본.
   printf '%s\n' \
@@ -141,8 +141,13 @@ robot_safety_args() {
     "--robot.safety_enabled=$(bool_default "${SAFETY_ENABLED:-}" true)" \
     "--robot.safety_effort_limit=${SAFETY_EFFORT_LIMIT:-8.0}" \
     "--robot.safety_on_overload=${SAFETY_ON_OVERLOAD:-park}" \
+    "--robot.safety_park_ramp_s=${SAFETY_PARK_RAMP_S:-4.0}" \
+    "--robot.safety_hold_resend=$(bool_default "${SAFETY_HOLD_RESEND:-}" true)" \
     "--robot.park_release_mode=${PARK_RELEASE_MODE:-lower}" \
-    "--robot.park_release_wrist_drop_deg=${PARK_RELEASE_WRIST_DROP_DEG:-24.4}" \
+    "--robot.park_release_wrist_rest_deg=${PARK_RELEASE_WRIST_REST_DEG:-24.4}" \
+    "--robot.park_release_gripper_cycle=$(bool_default "${PARK_RELEASE_GRIPPER_CYCLE:-}" true)" \
+    "--robot.park_release_gripper_open=${PARK_RELEASE_GRIPPER_OPEN:-100.0}" \
+    "--robot.park_release_gripper_wait_s=${PARK_RELEASE_GRIPPER_WAIT_S:-1.5}" \
     "--robot.park_release_ramp_s=${PARK_RELEASE_RAMP_S:-2.0}" \
     "--robot.park_release_settle_s=${PARK_RELEASE_SETTLE_S:-0.5}"
 }
