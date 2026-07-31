@@ -5,7 +5,17 @@ The two boundary events come from ``episode_segmentation``; this script turns
 them into the cut the operator would have made:
 
     start = motion_onset - start_margin, rounded down to round_start
-    end   = gripper_release - end_margin
+    end   = <end event> - end_margin
+
+``--end-event`` picks which end of the gripper release closes the episode:
+``release_start`` (default) is the frame the gripper leaves its holding plateau,
+``release_done`` is the frame it finishes opening, ~14 frames later, which keeps
+the eraser being set down inside the cut.
+
+``--fit`` re-derives the margins from whatever labels the manifest already holds.
+Note that fitting ``release_done`` against labels made under ``release_start``
+just reproduces the old cut (it returns margin 19); that combination is only
+meaningful once a labelling session has marked the placement itself.
 
 The margins are fitted, not guessed. Against the 60 hand-labelled ``erase the
 shape`` episodes the defaults give MAE 5.7 frames on start (94% within 10) and
@@ -39,7 +49,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from episode_segmentation import gripper_release, motion_onset, suggest_range
+from episode_segmentation import (
+    DEFAULT_END_EVENT,
+    END_EVENTS,
+    END_MARGIN,
+    motion_onset,
+    release_frame,
+    suggest_range,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -51,7 +68,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST, help=f"(default: {DEFAULT_MANIFEST})")
     parser.add_argument("--write", action="store_true", help="Write the detected ranges back into the manifest.")
     parser.add_argument("--start-margin", type=int, default=22, help="Frames kept before motion onset (default: 22).")
-    parser.add_argument("--end-margin", type=int, default=6, help="Frames dropped before gripper release (default: 6).")
+    parser.add_argument(
+        "--end-margin",
+        type=int,
+        default=None,
+        help=f"Frames dropped before the end event (default: per event, {END_MARGIN}).",
+    )
+    parser.add_argument(
+        "--end-event",
+        choices=END_EVENTS,
+        default=DEFAULT_END_EVENT,
+        help=f"Which end of the gripper release closes the episode (default: {DEFAULT_END_EVENT}).",
+    )
     parser.add_argument("--round-start", type=int, default=10, help="Round start down to this multiple (0 disables).")
     parser.add_argument(
         "--only-missing",
@@ -88,7 +116,7 @@ def load_action(root: Path) -> np.ndarray:
     return np.stack(frame["action"].to_numpy())
 
 
-def fit_margins(episodes: list[dict[str, Any]], round_start: int) -> tuple[int, int]:
+def fit_margins(episodes: list[dict[str, Any]], round_start: int, end_event: str) -> tuple[int, int]:
     """Grid-search the margins that best reproduce the labels already present."""
     labelled = [entry for entry in episodes if entry.get("start_frame") is not None]
     if len(labelled) < 5:
@@ -97,7 +125,7 @@ def fit_margins(episodes: list[dict[str, Any]], round_start: int) -> tuple[int, 
     onsets, releases, starts, ends = [], [], [], []
     for entry in labelled:
         action = load_action(resolve_source(entry["source_dataset"]))
-        release = gripper_release(action)
+        release = release_frame(action, end_event)
         if release is None:
             continue
         onsets.append(motion_onset(action))
@@ -116,7 +144,7 @@ def fit_margins(episodes: list[dict[str, Any]], round_start: int) -> tuple[int, 
     start_margin = min(range(0, 60), key=start_error)
     end_margin = min(range(-10, 30), key=lambda m: np.abs((releases - m) - ends).mean())
     print(
-        f"fitted on {len(starts)} labelled episodes: "
+        f"fitted on {len(starts)} labelled episodes ({end_event}): "
         f"start_margin={start_margin} (MAE {start_error(start_margin):.2f}), "
         f"end_margin={end_margin} (MAE {np.abs((releases - end_margin) - ends).mean():.2f})\n"
     )
@@ -130,11 +158,14 @@ def main() -> int:
     episodes = manifest["episodes"]
 
     if args.fit:
-        args.start_margin, args.end_margin = fit_margins(episodes, args.round_start)
+        args.start_margin, args.end_margin = fit_margins(episodes, args.round_start, args.end_event)
+    if args.end_margin is None:
+        args.end_margin = END_MARGIN[args.end_event]
 
     deltas: list[tuple[int, int]] = []
     flagged: list[str] = []
 
+    print(f"end event: {args.end_event} (margin {args.end_margin}), start margin {args.start_margin}\n")
     print(f"{'episode':<34}{'frames':>7}{'start':>8}{'end':>7}{'Δstart':>8}{'Δend':>7}")
     for entry in episodes:
         name = Path(entry["source_dataset"]).name
@@ -143,7 +174,9 @@ def main() -> int:
             continue
 
         action = load_action(resolve_source(entry["source_dataset"]))
-        start, end, warnings = suggest_range(action, args.start_margin, args.end_margin, args.round_start)
+        start, end, warnings = suggest_range(
+            action, args.start_margin, args.end_margin, args.round_start, args.end_event
+        )
 
         old_start, old_end = entry.get("start_frame"), entry.get("end_frame")
         if args.only_missing and old_start is not None and old_end is not None:

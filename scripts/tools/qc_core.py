@@ -43,7 +43,14 @@ import cv2
 import numpy as np
 import pandas as pd
 
-from episode_segmentation import gripper_plateau, gripper_release, motion_onset, suggest_range
+from episode_segmentation import (
+    DEFAULT_END_EVENT,
+    gripper_plateau,
+    gripper_release,
+    gripper_release_done,
+    motion_onset,
+    suggest_range,
+)
 
 
 REQUIRED_SUBDIRS = ("data", "meta", "videos")
@@ -87,6 +94,7 @@ class Report:
     end: int | None = None
     motion_onset: int | None = None
     gripper_release: int | None = None
+    gripper_release_done: int | None = None
     erased: float | None = None
     n_shapes: int = 0
     n_jumps: int = 0
@@ -183,7 +191,13 @@ def read_episode(root: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
     return frame, info
 
 
-def inspect(path: Path, start_margin: int = 22, end_margin: int = 6, round_start: int = 10) -> Report:
+def inspect(
+    path: Path,
+    start_margin: int = 22,
+    end_margin: int | None = None,
+    round_start: int = 10,
+    end_event: str = DEFAULT_END_EVENT,
+) -> Report:
     """Everything that can be judged from one recording folder on its own."""
     report = Report(name=path.name, path=path)
 
@@ -231,7 +245,8 @@ def inspect(path: Path, start_margin: int = 22, end_margin: int = 6, round_start
 
     report.motion_onset = motion_onset(action)
     report.gripper_release = gripper_release(action)
-    start, end, warnings = suggest_range(action, start_margin, end_margin, round_start)
+    report.gripper_release_done = gripper_release_done(action, report.gripper_release)
+    start, end, warnings = suggest_range(action, start_margin, end_margin, round_start, end_event)
     report.start, report.end = start, end
     for warning in warnings:
         report.flag(RED, warning)

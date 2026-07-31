@@ -29,7 +29,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from autofill_frame_ranges import load_action, resolve_source
-from episode_segmentation import gripper_plateau, gripper_release, motion_onset, suggest_range
+from episode_segmentation import (
+    DEFAULT_END_EVENT,
+    END_EVENTS,
+    END_MARGIN,
+    gripper_plateau,
+    motion_onset,
+    release_frame,
+    suggest_range,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -49,7 +57,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episode", nargs="+", default=None, help="Substrings of the episode names to render.")
     parser.add_argument("--tolerance", type=int, default=10, help="Disagreement threshold in frames (default: 10).")
     parser.add_argument("--start-margin", type=int, default=22)
-    parser.add_argument("--end-margin", type=int, default=6)
+    parser.add_argument("--end-margin", type=int, default=None,
+                        help=f"Frames dropped before the end event (default: per event, {END_MARGIN}).")
+    parser.add_argument("--end-event", choices=END_EVENTS, default=DEFAULT_END_EVENT,
+                        help=f"Which end of the gripper release closes the episode (default: {DEFAULT_END_EVENT}).")
     parser.add_argument("--round-start", type=int, default=10)
     return parser.parse_args()
 
@@ -72,10 +83,11 @@ def grab_frames(root: Path, wanted: list[int]) -> dict[int, np.ndarray]:
     return frames
 
 
-def draw_sheet(name: str, action: np.ndarray, entry: dict[str, Any], auto: tuple[int, int], root: Path, out: Path):
+def draw_sheet(name: str, action: np.ndarray, entry: dict[str, Any], auto: tuple[int, int], root: Path, out: Path,
+               end_event: str = DEFAULT_END_EVENT):
     label_start, label_end = entry.get("start_frame"), entry.get("end_frame")
     auto_start, auto_end = auto
-    onset, release = motion_onset(action), gripper_release(action)
+    onset, release = motion_onset(action), release_frame(action, end_event)
 
     picks = [("manifest start", label_start), ("auto start", auto_start), ("manifest end", label_end), ("auto end", auto_end)]
     picks = [(caption, frame) for caption, frame in picks if frame is not None]
@@ -147,7 +159,8 @@ def main() -> int:
 
         root = resolve_source(entry["source_dataset"])
         action = load_action(root)
-        start, end, _ = suggest_range(action, args.start_margin, args.end_margin, args.round_start)
+        start, end, _ = suggest_range(action, args.start_margin, args.end_margin,
+                                      args.round_start, args.end_event)
 
         if not args.all and not args.episode:
             label_start, label_end = entry.get("start_frame"), entry.get("end_frame")
@@ -157,7 +170,7 @@ def main() -> int:
                 continue
 
         path = args.output / f"{name}.png"
-        draw_sheet(name, action, entry, (start, end), root, path)
+        draw_sheet(name, action, entry, (start, end), root, path, args.end_event)
         written.append(path)
         print(f"wrote {path}")
 

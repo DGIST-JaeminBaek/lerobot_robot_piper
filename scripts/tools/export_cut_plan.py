@@ -30,7 +30,14 @@ from pathlib import Path
 from typing import Any
 
 from autofill_frame_ranges import load_action, resolve_source
-from episode_segmentation import gripper_release, motion_onset, suggest_range
+from episode_segmentation import (
+    DEFAULT_END_EVENT,
+    END_EVENTS,
+    END_MARGIN,
+    motion_onset,
+    release_frame,
+    suggest_range,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -47,7 +54,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", default="erase the shape", help="target_task written into the JSON.")
     parser.add_argument("--force", action="store_true", help="Overwrite existing output files.")
     parser.add_argument("--start-margin", type=int, default=22)
-    parser.add_argument("--end-margin", type=int, default=6)
+    parser.add_argument("--end-margin", type=int, default=None,
+                        help=f"Frames dropped before the end event (default: per event, {END_MARGIN}).")
+    parser.add_argument("--end-event", choices=END_EVENTS, default=DEFAULT_END_EVENT,
+                        help=f"Which end of the gripper release closes the episode (default: {DEFAULT_END_EVENT}).")
     parser.add_argument("--round-start", type=int, default=10)
     return parser.parse_args()
 
@@ -69,9 +79,10 @@ def episode_rows(sources: list[tuple[Path, dict[str, Any] | None]], args: argpar
     rows = []
     for root, entry in sources:
         action = load_action(root)
-        start, end, warnings = suggest_range(action, args.start_margin, args.end_margin, args.round_start)
+        start, end, warnings = suggest_range(action, args.start_margin, args.end_margin,
+                                             args.round_start, args.end_event)
         fps = json.loads((root / "meta/info.json").read_text())["fps"]
-        release = gripper_release(action)
+        release = release_frame(action, args.end_event)
         rows.append(
             {
                 "name": root.name,
