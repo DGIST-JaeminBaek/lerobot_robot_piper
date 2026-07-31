@@ -1,0 +1,21 @@
+{
+  "format_version": 1,
+  "type": "image_preprocessing_profile",
+  "name": "smolvla_v1",
+  "source": {
+    "width": 1280,
+    "height": 720
+  },
+  "crop": {
+    "x": 280,
+    "y": 0,
+    "width": 720,
+    "height": 720
+  },
+  "resize": {
+    "mode": "stretch",
+    "width": 512,
+    "height": 512,
+    "pad_value": [0, 0, 0]
+  }
+}
