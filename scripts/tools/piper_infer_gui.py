@@ -714,8 +714,15 @@ class InferGui(tk.Tk):
                 raise ValueError(f"실물 전송에는 확인 문구 {REAL_ROBOT_CONFIRM} 입력이 필요합니다.")
             if os.environ.get("SAFETY_ENABLED", "true").lower() in {"0", "false", "no", "off"}:
                 raise ValueError("실물 전송에는 SAFETY_ENABLED=true가 필요합니다.")
-            if os.environ.get("SAFETY_ON_OVERLOAD", "park").strip().lower() != "park":
-                raise ValueError("실물 전송에는 SAFETY_ON_OVERLOAD=park가 필요합니다.")
+            # hold와 park 둘 다 "정책 명령은 무시하되 토크는 유지"라 안전하다
+            # (config_piper.py의 safety_on_overload 설명 참고). hold는 트립 자세에서
+            # 그대로 정지, park는 parking 자세로 천천히 복귀한 뒤 정지.
+            overload_mode = os.environ.get("SAFETY_ON_OVERLOAD", "park").strip().lower()
+            if overload_mode not in {"hold", "park"}:
+                raise ValueError(
+                    f"실물 전송에는 SAFETY_ON_OVERLOAD가 hold 또는 park여야 합니다 "
+                    f"(현재 {overload_mode!r})."
+                )
 
         return {
             "policy_path": policy_path,
