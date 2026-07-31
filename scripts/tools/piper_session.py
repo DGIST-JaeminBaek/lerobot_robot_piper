@@ -91,7 +91,7 @@ CFG = {
     # 가상환경 — 이 PC(ugrp43)는 원본 실험실 PC(ugrp308)와 달리 plain venv가 아니라
     # conda를 씀. conda_base/conda_env로 source_prefix()가 conda activate를 함.
     "conda_base":       "/home/ugrp43/miniconda3",
-    "conda_env":        "piper-gui-refactor",
+    "conda_env":        "ugrp",
     "lerobot_dir":      "/home/ugrp43/UGRP/lerobot",
     "ugrp_dir":         "/home/ugrp43/UGRP",
     # CAN — lerobot_robot_piper는 leader/follower가 물리적으로 분리된
@@ -117,7 +117,7 @@ CFG = {
         "ROS_SETUP_PATH", f"/opt/ros/{_ROS_DISTRO}/setup.bash"
     ),
     # 데이터셋 — 레포 내 records/ 컨벤션(configs/recording.env의 DATASET_ROOT)과 맞춤
-    "dataset_root":     "/home/ugrp43/lerobot_robot_piper-gui-refactor/records/local/piper-smolvla",
+    "dataset_root":     "/home/ugrp43/UGRP/lerobot_robot_piper/records/local/piper-smolvla",
     "dataset_repo_id":  "local/piper-smolvla",
     # joint-space 안전 범위 (정규화 단위) — data_check/calc_range/rviz_preview에서 사용.
     # action/observation.state 컬럼 순서(joint1.pos~joint6.pos, gripper.pos)와

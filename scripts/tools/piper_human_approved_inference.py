@@ -37,6 +37,7 @@ max_relative_target 제한과 effort 안전 컷오프가 그대로 적용된다.
     HUMAN_APPROVED_SHOW_IMAGES=true
     HUMAN_APPROVED_APPROVAL_TIMEOUT_S=0
     HUMAN_APPROVED_MAX_CHUNKS=0
+    HUMAN_APPROVED_REPEAT_LAST_FRAME=false
     MAX_RELATIVE_TARGET=5.0
     FPS=30
 
@@ -291,6 +292,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(env.get("HUMAN_APPROVED_MAX_CHUNKS", "0")),
         help="0이면 episode 끝까지",
+    )
+    parser.add_argument(
+        "--repeat-last-frame",
+        type=parse_bool,
+        default=parse_bool(env.get("HUMAN_APPROVED_REPEAT_LAST_FRAME", "false")),
+        metavar="BOOL",
+        help="dataset source에서 episode 끝에 도달해도 멈추지 않고 마지막 frame을 "
+        "계속 observation으로 재사용 (RViz-only 반복 확인용, source=dataset에서만 동작)",
     )
     parser.add_argument(
         "--seed",
@@ -556,8 +565,8 @@ def build_robot_from_env(args: argparse.Namespace):
         park_release_mode=env.get("PARK_RELEASE_MODE", "lower"),
         park_release_ramp_s=float(env.get("PARK_RELEASE_RAMP_S", "2.0")),
         park_release_settle_s=float(env.get("PARK_RELEASE_SETTLE_S", "0.5")),
-        park_release_wrist_drop_deg=float(
-            env.get("PARK_RELEASE_WRIST_DROP_DEG", "24.4")
+        park_release_wrist_rest_deg=float(
+            env.get("PARK_RELEASE_WRIST_REST_DEG", "24.4")
         ),
         max_relative_target=args.max_relative_target,
         # Policy action은 follower 절대 position target이므로 teleop offset을 적용하지 않는다.
@@ -870,15 +879,22 @@ def main() -> int:
             robot = build_robot_from_env(args)
             robot.connect()
 
-        while args.source == "robot" or cursor < dataset.num_frames:
+        while (
+            args.source == "robot"
+            or cursor < dataset.num_frames
+            or args.repeat_last_frame
+        ):
             if args.max_chunks and approved_count >= args.max_chunks:
                 print(f"[STOP] approved chunk limit reached: {args.max_chunks}")
                 break
 
             if args.source == "dataset":
-                item = dataset[cursor]
+                # repeat_last_frame이면 cursor가 episode 끝을 넘어가도 마지막
+                # frame(dataset.num_frames - 1)에 고정해서 계속 같은 observation을 준다.
+                frame_idx = min(cursor, dataset.num_frames - 1)
+                item = dataset[frame_idx]
                 raw_observation = make_raw_observation(dataset, item)
-                observation_frame = cursor
+                observation_frame = frame_idx
             else:
                 live_observation = robot.get_observation()
                 raw_observation = preprocess_live_camera_observation(
@@ -901,9 +917,12 @@ def main() -> int:
             )
             inference_seconds = time.perf_counter() - started
             raw_chunk = raw_chunk_tensor.numpy().astype(np.float32, copy=False)
+            repeating_last_frame = (
+                args.source == "dataset" and cursor >= dataset.num_frames
+            )
             remaining = (
                 dataset.num_frames - cursor
-                if args.source == "dataset"
+                if args.source == "dataset" and not repeating_last_frame
                 else args.preview_actions
             )
             take = min(args.preview_actions, len(raw_chunk), remaining)
@@ -1075,11 +1094,19 @@ def main() -> int:
                     segment_offset = segment_end
                     expected_state = segment_actions[-1]
                     if args.source == "dataset":
-                        cursor += len(segment_actions)
-                        print(
-                            f"[APPROVED/RVIZ-ONLY] dataset cursor -> {cursor}; "
-                            "physical robot commands sent: 0"
-                        )
+                        if cursor < dataset.num_frames:
+                            cursor += len(segment_actions)
+                        if cursor >= dataset.num_frames and args.repeat_last_frame:
+                            print(
+                                "[APPROVED/RVIZ-ONLY] dataset episode 끝"
+                                f"(frame {dataset.num_frames - 1}) 도달; repeat-last-frame으로 "
+                                "마지막 frame을 계속 재사용합니다; physical robot commands sent: 0"
+                            )
+                        else:
+                            print(
+                                f"[APPROVED/RVIZ-ONLY] dataset cursor -> {cursor}; "
+                                "physical robot commands sent: 0"
+                            )
                     else:
                         print(
                             "[APPROVED/LIVE-PREVIEW-ONLY] 다음 구간을 이어서 "
