@@ -8,6 +8,34 @@
 랩 PC에 쌓여 있던 작업분을 한 번에 정리해서 올린 회차입니다. 실기 검증이 필요한
 항목은 각 절에 그 근거를 적어 두었습니다.
 
+### 추론 시 팔이 떨리는 문제 — smoothing 도구 일습
+
+자세한 내용은 [`docs/policy/smoothing.md`](docs/policy/smoothing.md)에 있습니다.
+
+- `scripts/tools/action_smoothing.py` — temporal ensemble(ACT 방식 `exp(-m·i)`
+  가중평균) → EMA → rate limit을 순서대로 적용하는 순수 numpy 모듈. 하드웨어/ROS2/
+  lerobot 의존이 없어 오프라인 분석에도 그대로 씁니다. 셋 다 끄면 원본 action이
+  그대로 나오므로 baseline 비교가 됩니다. 단위 테스트 19개
+  (`scripts/tools/test_action_smoothing.py`).
+- `scripts/11__infer_gui.sh` / `scripts/tools/piper_infer_gui.py` — 추론 전용 GUI.
+  실행 중에 smoothing 파라미터를 바꿀 수 있고, E-STOP 버튼(`Esc`)과 RViz 궤적
+  publish, 최근 300스텝 그래프, TV/jerk 실시간 표시를 포함합니다. 기본은
+  `source=dataset` 안전 모드이고, 실물 전송은 3중 게이트를 모두 통과해야 켜집니다.
+- `scripts/tools/piper_smoothing_sweep.py` — 하드웨어 없이 `m`을 고르기 위한 스윕.
+  설정마다 자식 프로세스를 새로 띄웁니다(한 프로세스에서 SmolVLA를 두 번 로드하면
+  CUDA 컨텍스트가 깨져 죽습니다).
+
+`smolvla_erase_shape_512` 30k 체크포인트로 실측한 결과, `m=0.01`에서 total variation이
+5.617 → 2.881로 절반이 됩니다. 기존에 흔히 쓰던 `m=1.0`은 25% 감소에 그칩니다.
+
+같이 확인된 것: 이 머신의 SmolVLA 추론이 1회 ~150ms라 `fps=8`은 유지되지 않습니다
+(실제 6.65Hz). `fps=6`에서 지터 표준편차 7.5ms로 안정적이라 GUI 기본값을 6으로 뒀고,
+`INFER_FPS`로 덮어쓸 수 있습니다. 제어 주기가 들쭉날쭉한 것 자체가 jerk 원인이므로
+녹화 FPS(30)를 그대로 쓰지 마세요.
+
+**실기 미검증:** 위 수치는 전부 dataset observation 기반이고 실제 Piper로는 아직
+돌리지 않았습니다. `source=robot` 경로의 검증이 남아 있습니다.
+
 ### 안전 컷오프 — 트립 후 팔이 늘어지던 문제
 
 `safety_effort_limit`을 넘겨 트립되면 팔에서 힘이 빠지는 현상이 있었습니다. 원인은
