@@ -149,8 +149,12 @@ velocity 6개로 구성됩니다. GUI와 셸 녹화 경로 모두에서 실제 �
 확인했습니다.
 
 Effort 녹화 구현은 [Effort 문서](effort/effort.md), 실물 확인 상태는
-[검증 문서](effort/verification_effort.md)를 참고합니다. 현재 effort 안전
-임계값과 안전 컷오프의 물리적 동작은 실물에서 검증하지 않았습니다.
+[검증 문서](effort/verification_effort.md)를 참고합니다.
+
+안전 컷오프의 물리적 동작은 이후 실물에서 검증했습니다(2026-07-30/31). 트립 후
+"명령을 차단"하면 Piper가 목표 스트림이 끊길 때 유지 토크를 놓아 팔이 늘어지므로,
+지금은 리더/정책 목표만 무시하고 트립 순간의 실측 자세를 계속 재전송합니다. 날짜순
+변경 내역은 [CHANGELOG](../CHANGELOG.md)를 참고합니다.
 
 ## 8. `teleop_ui.py` — 원본의 launcher 골격을 유지한 채 대폭 확장
 

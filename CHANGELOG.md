@@ -1,0 +1,126 @@
+# 변경 이력
+
+날짜순 기록입니다. "지금 코드가 왜 이런 모양인지"에 대한 주제별 설명은
+[`docs/change.md`](docs/change.md)(WEGO 원본 대비)를 참고하세요.
+
+## 2026-07-31
+
+랩 PC에 쌓여 있던 작업분을 한 번에 정리해서 올린 회차입니다. 실기 검증이 필요한
+항목은 각 절에 그 근거를 적어 두었습니다.
+
+### 안전 컷오프 — 트립 후 팔이 늘어지던 문제
+
+`safety_effort_limit`을 넘겨 트립되면 팔에서 힘이 빠지는 현상이 있었습니다. 원인은
+트립 처리가 "명령을 아예 끊는" 것이었기 때문입니다. Piper는 `JointCtrl` 목표를 계속
+스트리밍해야 자세를 잡는 구조라, 명령이 끊기면 유지 토크도 같이 사라집니다.
+
+- 트립 후 동작을 "명령 차단"에서 "트립 순간의 자세 하나를 계속 재전송"으로 변경.
+  리더/정책 명령은 그대로 무시하되 토크는 유지됩니다 (`safety_hold_resend`, 기본 true).
+- 얼어붙히는 목표는 마지막 명령 목표가 아니라 트립 순간의 **실측** 자세입니다.
+  외력으로 밀린 상태에서 밀리기 전 목표를 계속 쏘면 사람과 힘겨루기가 되어 effort가
+  계속 높게 유지되기 때문입니다.
+- `safety_on_overload="park"`의 복귀를 최고속에서 램프 이동으로 변경
+  (`safety_park_ramp_s`, 기본 4.0초). 파킹 자세가 "팔이 수직으로 뻗은" 자세라
+  한 번에 쏘면 트립 직후 팔이 확 뻗는데, 외력 트립 직후에는 사람 손이 팔에 닿아
+  있을 수 있어 위험합니다. 0으로 두면 이전 동작이 됩니다.
+- 트립 시점의 `GetArmEnableStatus()` / `GetArmStatus()`를 로그에 남깁니다. 늘어짐의
+  원인이 우리 쪽 명령 중단인지 컨트롤러 펌웨어 자체 보호인지 구분하기 위한 것입니다.
+- parking 스레드가 목표를 소유하는 구간(`_safety_park_active`)을 표시해, 제어 루프와
+  parking이 서로 목표를 덮어써 팔이 떠는 것을 막습니다.
+
+### 그리퍼가 종료 후에도 안 풀리던 문제
+
+그리퍼는 팔 모터(0x471)와 별개 노드(0x159)라 `DisablePiper()`로 풀리지 않습니다.
+
+- `disable_gripper()` 추가 — 상태코드 bit[6]으로 실제로 풀렸는지 확인하면서
+  `0x00`(실능)과 `0x02`(실능+에러클리어)를 번갈아 재시도합니다. 한 번만 쏘면 프레임이
+  씹히거나 드라이버 에러 상태에서 무시되는 경우가 실기에서 확인됐습니다.
+- `disable_torque()`가 `disable_gripper()`를 함께 호출합니다.
+- `cycle_gripper()` 추가 — torque 해제 전에 그리퍼를 한 번 열고 닫아 물고 있던 것을
+  놓고 파킹 위치(닫힘)로 되돌립니다 (`park_release_gripper_cycle`, 기본 true).
+  팔 토크를 내리기 **전에** 수행합니다 — 팔이 늘어진 뒤에 여닫으면 반력으로 팔이
+  흔들립니다. 주의: 여는 순간 물체가 떨어지고 닫을 때 손가락이 낄 수 있습니다.
+- 팔이 CAN 제어 모드가 아니면 그리퍼 각도 명령이 무시되므로 `ModeCtrl`을 먼저 보냅니다.
+
+### 손목 정지각 — 상대 델타에서 절대 각도로
+
+`WRIST_RELEASE_DROP_DEG` → `WRIST_RELEASE_REST_DEG` (설정: `park_release_wrist_drop_deg`
+→ `park_release_wrist_rest_deg`, env: `PARK_RELEASE_WRIST_DROP_DEG` →
+`PARK_RELEASE_WRIST_REST_DEG`). GUI 버튼도 "Measure Wrist Drop" → "Measure Wrist Rest".
+
+상대 델타로 두면 손목이 이미 정지각 근처일 때 그보다 더 아래로 명령하게 되고, 놓는
+순간 그만큼 튕겨 올라옵니다 (실기 확인 2026-07-31: 손목 30도에서 +24.4도를 더 준 뒤
+해제하니 29.9도로 복귀). 이미 정지각보다 아래면 그대로 둡니다 — 도로 들어올리면 놓을
+때 다시 떨어지기 때문입니다. 정지각은 자세에 따라 달라집니다(파킹 24.4도, 다른 자세
+29~30도).
+
+### QC 종료 프레임 기준 선택 옵션
+
+에피소드 종료 프레임을 그리퍼 릴리즈의 어느 쪽에 걸지 고를 수 있게 했습니다
+(`--end-event`). 두 시점의 간격은 88개 에피소드에서 평균 16프레임(0.5초), 최대
+44프레임(1.5초)으로 실측됐습니다.
+
+- `release_start` (기본값) — 그리퍼가 유지 plateau를 벗어나는 프레임, 마진 6.
+  기존 수동 라벨 60개가 여기 있어 기본값으로 유지했습니다 (MAE 2.78프레임, 변경 전과 동일).
+- `release_done` — 그리퍼가 다 벌어진 프레임, 마진 0. 지우개를 내려놓는 동작이 컷
+  안에 들어옵니다. 느린 에피소드에서는 plateau를 처음 벗어나는 게 팔이 아직 지우개를
+  받침대에 정렬하는 중의 부분적 이완이라, 기존 기준은 놓는 동작을 통째로 잘라냈습니다.
+
+`release_done`의 마진을 기존 라벨에 피팅하면 19가 나오지만 일부러 쓰지 않았습니다 —
+그 값을 쓰면 컷이 다시 그리퍼가 열리기 전으로 돌아가 옵션의 의미가 사라집니다. 기존
+라벨 자체가 `release_start` 기준으로 찍혔기 때문입니다. 새 기준으로 라벨링 세션을
+한 번 돌린 뒤에 `--fit`으로 다시 잡아야 합니다.
+
+`qc_studio.py`에는 "종료 기준" 라디오를 추가해 실행 중 전환됩니다 — 확인 완료한
+에피소드는 건드리지 않고, 파케이/영상 재읽기 없이 즉시 재계산됩니다. 트레이스에는 두
+시점이 항상 함께 표시됩니다. 옵션은 `autofill_frame_ranges.py`, `review_cuts.py`,
+`export_cut_plan.py`에도 동일하게 연결했습니다.
+
+검증: 21개 에피소드 전수에서 `release_done`이 모든 에피소드의 컷을 연장(+10~+50프레임),
+시작 프레임은 불변. 영상 확인 결과 `release_start` 종료 프레임에서는 그리퍼가 아직
+지우개를 물고 있고 `release_done`에서는 벌어진 채 받침대에 놓여 있습니다.
+
+### CAN 재부팅 복구
+
+이 시스템에는 CAN 이름을 고정하는 udev 규칙이 없어 재부팅하면 `can0`/`can1`로 돌아갑니다.
+
+- `scripts/tools/recover_can_after_reboot.sh` — 인터페이스를 bring-up하고 실제 역할을
+  판별해 `can_leader`/`can_follower`로 이름을 바꾼 뒤 다시 UP.
+- `scripts/tools/detect_can_roles.py` — `ctrl_mode`를 읽어 역할 판별
+  (0x06 = Linkage teaching input mode면 leader). USB 포트 순서로 추측하면 틀릴 수
+  있어서 실제로 읽습니다. sudo 불필요.
+- `scripts/tools/check_startup_push.py` — 시작 직후 팔로워가 아래로 누르는 힘이 생기는
+  원인 진단(이동 명령 없이 읽기만). 컨트롤러가 마지막 `JointCtrl` 목표를 기억하기
+  때문이라는 가설을 확인하기 위한 것입니다.
+
+### 합성 데이터 파이프라인 (`synthetic/`)
+
+시뮬레이터가 아니라 **컴퓨터가 궤적/action stream을 생성 → 실제 Piper가 실행 → 그동안
+카메라·state·action을 재녹화**해 현실 LeRobotDataset을 만드는 방식입니다. 배경은
+[`synthetic_data.md`](synthetic_data.md), 설계는 [`synthetic/README.md`](synthetic/README.md).
+
+구성: `kinematics`(FK/IK), `trajectory`(도형 궤적 생성/합성/타이밍), `transforms`
+(homography, 이미지 변환), `calibration`(보드 점 선택 — 웹 UI 포함), `preprocessing`,
+`preview`(오버레이/플롯/RViz 어댑터). 테스트 194개 전부 통과.
+
+### 기타
+
+- `piper_human_approved_inference.py`에 `--repeat-last-frame` 추가 — dataset source에서
+  episode 끝에 도달해도 마지막 frame을 계속 observation으로 재사용합니다(RViz 반복 확인용).
+- `piper_session.py`의 conda env를 `piper-gui-refactor` → `ugrp`,
+  dataset 경로를 현재 레포 위치로 수정.
+- `.gitignore`: `명령어.txt` → `메모장.txt`.
+- 학습 로그 추가: `docs/training/logs/` (smolvla erase_shape_512 30000 steps —
+  loss curve, metrics csv, tmux 로그).
+
+### 검증 상태
+
+- 자동 테스트 통과: mock 5종(release/safety/smooth_start/dataset_features/effort),
+  `synthetic/tests` 194개.
+- 실기 확인 (상세는 [`docs/effort/verification_effort.md`](docs/effort/verification_effort.md)):
+  - 안전 트립 유지 (2026-07-30) — 임계값 0.5 N·m로 강제 트립 후 5초간 자세 변화
+    최대 0.56°. 트립 시점 `enable status [True]×6`, `Arm Status NORMAL`, `Error Code 0`
+    이라 펌웨어 보호가 아닌 우리 쪽 명령 중단이 원인임을 확인.
+  - 그리퍼 실능/사이클 (2026-07-30).
+  - 손목 정지각 (2026-07-31) — 손목 0°에서 해제 시 22.8°까지 내려간 뒤 **움직임 0.00°**.
+- QC 종료 기준 옵션 — 실제 에피소드 21개 전수 + 영상 대조.
