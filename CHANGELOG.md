@@ -3,6 +3,95 @@
 날짜순 기록입니다. "지금 코드가 왜 이런 모양인지"에 대한 주제별 설명은
 [`docs/change.md`](docs/change.md)(WEGO 원본 대비)를 참고하세요.
 
+## 2026-08-04
+
+### 추론 경로 통합 + 롤아웃 dataset 기록
+
+추론 실행 경로가 4개로 흩어져 있고 그중 하나(teleop_ui의 `Infer` 프리셋)만
+smoothing이 안 걸리던 걸 정리했습니다. 자세한 내용은
+[`docs/policy/smoothing.md`](docs/policy/smoothing.md).
+
+- `scripts/tools/piper_infer_runner.py` **신규** — 제어 루프 본체. GUI에 있던
+  `InferenceWorker`를 여기로 뺐고, GUI·teleop_ui·CLI가 전부 이 하나를 씁니다.
+  lerobot을 우회하지 않습니다 — `LeRobotDataset` / `make_policy` / `PiperFollower`를
+  그대로 쓰고, 실물 명령은 전부 `send_action()`을 지나갑니다.
+- `teleop_ui.py`의 `Infer` 프리셋이 `lerobot-record --policy.path=...` 대신 이 runner를
+  호출합니다. 그 경로는 action chunk를 노출하지 않아 temporal ensemble을 걸 수
+  없었는데, 실측에서 TV를 절반으로 줄인 유일한 항목이 ensemble이었습니다.
+  **Record / Replay 프리셋은 그대로 `lerobot-record` / `lerobot-replay`를 쓰므로
+  영향받지 않습니다.**
+- `piper_infer_gui.py`는 runner 위의 화면으로 축소(1018 → 720줄). 실시간 그래프,
+  슬라이더, E-STOP은 그대로입니다.
+- **모드 프리셋** `demo`(시연용) / `augment`(증강용) 추가. 모드는 프리셋일 뿐이고
+  값은 전부 화면에 보이며 개별로 덮어쓸 수 있습니다 — 논문에 실행 조건을 그대로
+  옮겨 적어야 하므로 모드 뒤에 값을 숨기지 않습니다.
+- **롤아웃 dataset 기록**(증강용). 기록되는 `action`은 raw 출력이 아니라 스무딩을
+  거쳐 실제로 `send_action()`에 넘어간 값이고, 카메라는 크롭 전 원본 프레임입니다
+  (기존 Record와 같은 형태라 `prepare_erase_shape_dataset.py`로 그대로 변환 가능).
+  raw chunk와 실행 조건(스무딩 파라미터 전부 + 실측 제어 주기)은 학습 호환성을
+  깨지 않도록 dataset feature가 아니라 `rollout_meta.json` / `raw_actions_ep*.npz`로
+  뺐습니다. 종료 시 성공/실패를 물어 같이 남깁니다 — 실패 롤아웃을 걸러내지 않고
+  학습시키면 자기 실수를 복제하기 때문입니다.
+- `PiperFollowerConfig.action_ema_alpha` 추가(기본 `1.0` = 꺼짐). `send_action()`
+  단계 EMA라 텔레옵·Record·Replay 등 chunk가 없는 경로에도 걸리는 바닥입니다.
+  안전 클램프(`max_relative_target`)보다 먼저 적용되므로 스무딩이 안전 제한을
+  넘길 수 없습니다. rate limit은 `max_relative_target`과 중복이라 따로 두지
+  않았습니다.
+- `teleop_ui.py`의 `self.python_executable`이 어디에도 정의돼 있지 않아 Sync Player
+  경로가 `AttributeError`로 죽던 문제 수정. 이제 GUI를 띄운 인터프리터를 그대로
+  씁니다.
+- 테스트 39개 추가(`test_infer_runner_mock.py` 27, `test_action_ema_mock.py` 12).
+  `scripts/tools/` 전체 98개 통과.
+
+되돌릴 지점: 태그 `inference-before-runner-merge` (커밋 `8c136a3`).
+
+### 실물에서 흔들림 원인을 끝까지 추적
+
+랩 Piper로 검증하면서 찾은 것들입니다. 자세한 실측표는
+[`docs/policy/smoothing.md`](docs/policy/smoothing.md).
+
+- **명령 주파수** — `fps=6`이 한계라던 이전 결론이 틀렸습니다. chunk 하나가 이미
+  50스텝 분량이라 매 스텝 추론할 필요가 없습니다. `fps=30, infer_every=5`로 바꾸고
+  추론을 별도 스레드로 빼서 **실측 5.55Hz → 28.6Hz**(지연 0회, 최대 5ms).
+- **클램프 포화** — `max_relative_target`을 smoothing의 rate limit과 같은 값으로
+  묶어놨던 탓에, 스텝 200부터 100% 포화되어 명령이 `실측+5`로 대체되고 있었습니다.
+  스무딩 결과가 통째로 버려지던 상태입니다. 둘을 분리하고 15로 올려 858회 → 2회.
+- **MIT(임피던스) 제어** — `JointMitCtrl` 경로 추가. MOVE J는 목표마다 궤적을
+  재계획해서 30Hz 스트리밍에 맞지 않습니다. 기본 꺼짐 + 별도 확인 문구.
+  관절별 게인(`mit_kp_overrides`) 지원 — 처짐 = 중력토크/kp라 공통 게인으로는
+  못 맞춥니다. `scripts/12__mit_probe.sh`로 관절 하나씩 확인.
+- **`ema_alpha`를 켰습니다(1.0 → 0.2).** 스무딩 파이프라인 3단 중 EMA가 내내 꺼져
+  있었습니다. 실물 위치 명령이 스텝의 **33.7%에서 방향을 뒤집고** 있었는데, MOVE J는
+  플래너가 가려줬지만 MIT는 그대로 재현합니다. α=0.2에서 방향 반전 5.8%,
+  이동폭은 그대로(42.57 → 42.28).
+- 정지 시 **`park_lower`** 모드 추가 — 보관 자세로 간 뒤 손목까지 내리고 해제.
+  예전에는 `PARK_RELEASE_MODE=lower`가 `park=True`를 덮어써서 추론이 끝난 자리에
+  팔이 그대로 늘어졌습니다. 중단(SIGINT/SIGTERM) 시 정리를 끝까지 기다리도록
+  고쳤습니다(예전엔 30초 타임아웃이라 파킹 도중 데몬 스레드가 잘렸습니다).
+
+버그 수정:
+- 주기 대기 루프가 음수 sleep으로 `ValueError`를 던져 제어 루프가 죽고 팔이 park로
+  내려가던 문제. 루프가 빨라져 반복이 늘어난 뒤 실물에서 터졌습니다.
+- `[TIMING]` 경고가 `step % 30 == 0`과 추론 스텝이 수학적으로 겹치지 않아 죽어 있던 문제.
+- Dataset Browser가 `DATASET_ROOT`의 부모만 스캔해 `records/outputs/`의 학습용
+  데이터셋이 안 보이던 문제 → `records/` 전체 스캔(200개, 0.03초).
+- `source=robot`인데 카메라 crop이 비어 있으면 로봇 연결 후에야 `KeyError`로 죽던 문제
+  → `recording.env`에서 읽고, 없으면 시작 전에 거부.
+- 정책과 참조 dataset이 안 맞으면 정책 로딩·로봇 연결이 끝난 뒤에야 텐서 크기
+  불일치로 죽던 문제 → `config.json`만 읽어 미리 검사하고 학습 dataset을 알려줌.
+- `11__infer_gui.sh` 등 4개 스크립트에 conda 활성화가 없어 base에서 실행되며
+  `ModuleNotFoundError`로 죽던 문제 → `run_common.sh`에 `activate_conda_env()`로 공통화.
+
+시도했지만 안 된 것:
+- **MOVE CPV(`move_mode=0x05`)** — 펌웨어 S-V1.8-2에서 지원되지만 실제로는 팔이
+  전혀 움직이지 않았습니다. `JointCtrl`은 위치만 보내는데 CPV는 속도 setpoint가
+  필요한 것으로 보이고 SDK에 해당 API가 없습니다.
+- **룩어헤드(`--lookahead-s`)** — 목표를 진행 방향으로 앞당겨 보내는 방식.
+  0.15초로 실물 확인했으나 체감 개선이 없었습니다. 코드는 남겨뒀습니다(기본 0=꺼짐).
+
+**남은 미검증**: 롤아웃 기록의 `source=robot` 경로(실물 카메라 원본 프레임 저장),
+MIT + 속도 피드포워드(`vff=1.0`) 조합, `park_lower` 정지 동작.
+
 ## 2026-07-31
 
 랩 PC에 쌓여 있던 작업분을 한 번에 정리해서 올린 회차입니다. 실기 검증이 필요한

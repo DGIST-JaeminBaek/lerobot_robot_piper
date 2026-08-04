@@ -562,7 +562,10 @@ def build_robot_from_env(args: argparse.Namespace):
         safety_enabled=parse_bool(env.get("SAFETY_ENABLED", "true")),
         safety_effort_limit=float(env.get("SAFETY_EFFORT_LIMIT", "8.0")),
         safety_on_overload=env.get("SAFETY_ON_OVERLOAD", "park").strip().lower(),
-        park_release_mode=env.get("PARK_RELEASE_MODE", "lower"),
+        # 기본값은 PiperFollowerConfig와 같은 "park_lower" — 보관 자세로 간 뒤
+        # 손목까지 내리고 해제한다. 예전 폴백은 "lower"였는데, 그러면 추론이 끝난
+        # 자리(보드 앞 등)에 팔이 그대로 늘어졌다.
+        park_release_mode=env.get("PARK_RELEASE_MODE", "park_lower"),
         park_release_ramp_s=float(env.get("PARK_RELEASE_RAMP_S", "2.0")),
         park_release_settle_s=float(env.get("PARK_RELEASE_SETTLE_S", "0.5")),
         park_release_wrist_rest_deg=float(

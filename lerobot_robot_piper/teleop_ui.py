@@ -75,6 +75,14 @@ RECORDING_ENV_PATH = REPO_ROOT / "configs" / "recording.env"
 SMOOTH_START_FRAMES_DEFAULT = 100
 SMOOTH_SCRIPT_PATH = REPO_ROOT / "scripts" / "tools" / "smooth_start_frames.py"
 
+# Infer 프리셋이 piper_infer_runner.py에 넘기는 실물 전송 확인 문구.
+# runner 쪽 상수(piper_infer_runner.REAL_ROBOT_CONFIRM)와 같은 값이어야 하며,
+# 여기서 runner를 import하지 않는 이유는 teleop_ui가 torch/lerobot 로딩 없이
+# 떠야 하기 때문. 값이 어긋나면 runner가 실행을 거부하므로 안전 쪽으로 실패한다.
+INFER_REAL_ROBOT_CONFIRM = "I_UNDERSTAND_REAL_ROBOT"
+# MIT(임피던스) 제어용 별도 확인 문구. piper_infer_runner.MIT_CONFIRM과 같아야 한다.
+INFER_MIT_CONFIRM = "I_UNDERSTAND_TORQUE_CONTROL"
+
 
 def load_recording_env(path: pathlib.Path = RECORDING_ENV_PATH) -> dict[str, str]:
     """configs/recording.env를 KEY=VALUE 딕셔너리로 파싱. 파일이 없거나
@@ -146,14 +154,21 @@ def save_recording_env(updates: dict[str, str], path: pathlib.Path = RECORDING_E
 
 
 def dataset_scan_root(recording_env: dict[str, str]) -> pathlib.Path:
-    """recording.env의 DATASET_ROOT 부모 폴더(보통 records/)를 스캔 기준으로 씀.
-    DATASET_ROOT가 없으면 REPO_ROOT/records로 fallback."""
-    dataset_root = recording_env.get("DATASET_ROOT", "")
-    if dataset_root:
-        p = pathlib.Path(dataset_root)
-        if not p.is_absolute():
-            p = REPO_ROOT / p
-        return p.parent
+    """Dataset Browser가 뒤질 루트. 기본은 records/ 전체.
+
+    예전에는 DATASET_ROOT의 부모를 썼는데, 그건 데이터셋을 records/ 바로 아래에
+    두던 시절의 가정이었다. 지금은 records/0727/, records/outputs/ 처럼 두 단계로
+    나뉘어 있어서, DATASET_ROOT가 가리키는 하위 폴더 하나에만 갇혀 나머지가 전부
+    안 보였다(예: DATASET_ROOT=records/local/... 이면 records/outputs/의 학습용
+    데이터셋이 목록에 안 뜸).
+
+    DATASET_SCAN_ROOT로 좁힐 수 있다 — records/가 아주 커져서 스캔이 느려지면
+    그때 쓰면 된다(2026-08-04 기준 200개 0.03초라 문제 없음).
+    """
+    scan_root = recording_env.get("DATASET_SCAN_ROOT", "")
+    if scan_root:
+        p = pathlib.Path(scan_root)
+        return p if p.is_absolute() else REPO_ROOT / p
     return REPO_ROOT / "records"
 
 
@@ -163,6 +178,48 @@ def discover_datasets(scan_root: pathlib.Path) -> list[pathlib.Path]:
     if not scan_root.exists():
         return []
     return sorted(p.parent.parent for p in scan_root.rglob("meta/info.json"))
+
+
+def discover_policies(train_root: pathlib.Path | None = None) -> list[tuple[str, str]]:
+    """outputs/train/ 밑의 학습 체크포인트를 (표시이름, 경로) 목록으로 찾음.
+
+    lerobot이 outputs/train/<run>/checkpoints/<step>/pretrained_model 구조로 저장하고,
+    `last`는 최신 step으로 가는 심볼릭 링크다. 링크는 따로 항목으로 만들지 않고,
+    그게 가리키는 step에 "(last)" 표시만 붙여서 중복을 피한다.
+
+    최신 run / 큰 step이 위로 오게 정렬 — 보통 그걸 쓴다.
+    """
+    root = train_root or (REPO_ROOT / "outputs" / "train")
+    if not root.is_dir():
+        return []
+
+    entries: list[tuple[float, int, str, str]] = []
+    for run_dir in root.iterdir():
+        checkpoints = run_dir / "checkpoints"
+        if not checkpoints.is_dir():
+            continue
+
+        last_target = None
+        last_link = checkpoints / "last"
+        if last_link.is_symlink():
+            last_target = os.path.realpath(last_link)
+
+        for step_dir in checkpoints.iterdir():
+            if step_dir.is_symlink():
+                continue  # `last`는 아래에서 표시만 붙임
+            model_dir = step_dir / "pretrained_model"
+            if not model_dir.is_dir():
+                continue
+            suffix = " (last)" if last_target and os.path.realpath(step_dir) == last_target else ""
+            label = f"{run_dir.name} / {step_dir.name}{suffix}"
+            try:
+                step_number = int(step_dir.name)
+            except ValueError:
+                step_number = -1
+            entries.append((run_dir.stat().st_mtime, step_number, label, str(model_dir)))
+
+    entries.sort(key=lambda e: (-e[0], -e[1]))
+    return [(label, path) for _mtime, _step, label, path in entries]
 
 
 def read_episode_count(dataset_root: pathlib.Path) -> int:
@@ -396,6 +453,12 @@ PRESET_NAMES = list(PRESET_BUILDERS.keys())
 class PiperMonitorUI:
     def __init__(self):
         self.running = True
+        # GUI를 띄운 것과 같은 인터프리터로 자식 스크립트를 실행한다. conda env를
+        # 활성화한 셸에서 떴으면 그 env의 python이 그대로 쓰인다 — "python"으로
+        # 부르면 시스템 python이 잡혀 lerobot import가 깨질 수 있음.
+        # (기존 Sync Player 경로가 이 속성을 참조하면서 어디에도 정의하지 않아
+        #  AttributeError로 죽고 있었음.)
+        self.python_executable = sys.executable
         self.script_proc: subprocess.Popen | None = None
         # 이번 Launch가 Record면 그 dataset root를 담아둠(종료 후 초반 프레임 보정용). Record가 아니면 None.
         self._record_dataset_root: str | None = None
@@ -671,20 +734,132 @@ class PiperMonitorUI:
 
         ttk.Label(policy_row, text="Policy Path:").pack(side="left", padx=4)
         self.policy_path_var = tk.StringVar(value=self.recording_env.get("POLICY_PRETRAINED_PATH") or "")
-        ttk.Entry(policy_row, textvariable=self.policy_path_var, width=40).pack(side="left", padx=2)
+        # 편집 가능한 콤보박스 — outputs/train/ 밑 체크포인트를 목록으로 주되,
+        # HF repo id나 다른 경로를 직접 타이핑하는 것도 계속 된다(readonly 아님).
+        self.policy_combo = ttk.Combobox(policy_row, textvariable=self.policy_path_var, width=38)
+        self.policy_combo.pack(side="left", padx=2)
+        self.policy_combo.bind("<<ComboboxSelected>>", self._on_policy_selected)
+        ttk.Button(policy_row, text="↻", width=3, command=self._refresh_policy_list).pack(
+            side="left", padx=1
+        )
+        ttk.Button(policy_row, text="…", width=3, command=self._browse_policy_path).pack(
+            side="left", padx=1
+        )
+        self.policy_label_var = tk.StringVar(value="")
+        ttk.Label(policy_row, textvariable=self.policy_label_var, foreground="#2a9d5c").pack(
+            side="left", padx=6
+        )
+        self._policy_choices: dict[str, str] = {}
+        self._refresh_policy_list()
+        # 직접 타이핑해도 옆 표시가 따라오게 (콤보박스 선택은 별도 핸들러)
+        self.policy_path_var.trace_add("write", lambda *_args: self._update_policy_label())
+
+        # Infer 프리셋 설정 — piper_infer_runner.py에 그대로 넘어간다.
+        # 모드는 프리셋일 뿐이라 여기 값들이 항상 이긴다. 논문에 실행 조건을
+        # 그대로 옮겨 적어야 하므로 모드 뒤에 값을 숨기지 않는다
+        # (근거와 실측값은 docs/policy/smoothing.md).
+        infer_row = ttk.Frame(script_frame)
+        infer_row.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        ttk.Label(infer_row, text="Infer Mode:").pack(side="left", padx=4)
+        self.infer_mode_var = tk.StringVar(value="demo")
+        ttk.Combobox(
+            infer_row, textvariable=self.infer_mode_var,
+            values=["demo", "augment"], state="readonly", width=8,
+        ).pack(side="left", padx=2)
+
+        # 명령 주파수는 학습 데이터 fps(보통 30)와 맞춘다. 낮추면 정책이 예측한
+        # 동작이 그 비율만큼 슬로모션이 되고, 낮은 주파수 자체가 "움직였다 멈췄다"를
+        # 반복해 물리적으로 끊겨 보인다(실물에서 확인). 추론이 1회 ~115ms라 매 스텝
+        # 추론은 못 하지만, chunk 하나가 50스텝 분량이라 그럴 필요가 없다 —
+        # infer_every로 추론 빈도만 낮추면 명령은 30Hz로 계속 쏠 수 있다.
+        ttk.Label(infer_row, text="fps:").pack(side="left", padx=(8, 0))
+        self.infer_fps_var = tk.StringVar(value=self.recording_env.get("INFER_FPS") or "30")
+        ttk.Entry(infer_row, textvariable=self.infer_fps_var, width=5).pack(side="left", padx=2)
+
+        # ensemble 표수 = chunk_size / infer_every. 50/5 = 10표.
+        ttk.Label(infer_row, text="infer_every:").pack(side="left", padx=(8, 0))
+        self.infer_every_var = tk.StringVar(value=self.recording_env.get("INFER_EVERY") or "5")
+        ttk.Entry(infer_row, textvariable=self.infer_every_var, width=4).pack(side="left", padx=2)
+
+        ttk.Label(infer_row, text="ensemble m:").pack(side="left", padx=(8, 0))
+        self.infer_ensemble_m_var = tk.StringVar(value="0.01")
+        ttk.Entry(infer_row, textvariable=self.infer_ensemble_m_var, width=6).pack(side="left", padx=2)
+
+        # send_action의 안전 클램프. smoothing의 ensemble/rate-limit과 다른 것으로,
+        # "명령이 실측 위치에서 얼마나 벗어날 수 있나"를 제한한다. 이 값이 너무
+        # 작으면 팔이 목표를 못 쫓아가 매 스텝 포화되고, 그때는 명령이 사실상
+        # "실측 위치 + 이 값"으로 고정돼 스무딩 결과가 통째로 버려진다(실물에서
+        # 30Hz로 돌렸을 때 스텝 200부터 100% 포화되는 걸 확인).
+        ttk.Label(infer_row, text="clamp:").pack(side="left", padx=(8, 0))
+        self.infer_clamp_var = tk.StringVar(
+            value=self.recording_env.get("MAX_RELATIVE_TARGET") or "5.0"
+        )
+        ttk.Entry(infer_row, textvariable=self.infer_clamp_var, width=5).pack(side="left", padx=2)
+
+        # smoothing 파이프라인의 rate limit — 직전 *명령*에서 한 스텝에 얼마나
+        # 변할 수 있나. 위 clamp(실측 위치 기준)와는 다른 것이다. 실물에서
+        # max_step이 이 값에 딱 붙어 있으면 여기가 병목이라는 뜻이다.
+        ttk.Label(infer_row, text="rate:").pack(side="left", padx=(8, 0))
+        self.infer_rate_var = tk.StringVar(value="5.0")
+        ttk.Entry(infer_row, textvariable=self.infer_rate_var, width=5).pack(side="left", padx=2)
+
+        # 컨트롤러 이동 속도 백분율. 위 clamp/rate와 성격이 다르다 — 그 둘은
+        # 명령값의 상한(천장)이라 올려도 팔이 빨라지지 않는다. 팔이 실제로 얼마나
+        # 빨리 움직이는지는 이 값이 정한다(ModeCtrl 세 번째 인자).
+        ttk.Label(infer_row, text="spd%:").pack(side="left", padx=(8, 0))
+        self.infer_speed_var = tk.StringVar(value="30")
+        ttk.Entry(infer_row, textvariable=self.infer_speed_var, width=4).pack(side="left", padx=2)
+
+        # A. 룩어헤드(초) — 목표를 진행 방향으로 앞서 보낸다. MOVE J가 목표마다
+        # 궤적을 재계획하는 문제를 줄인다. 0.1~0.2 권장, 0이면 꺼짐.
+        ttk.Label(infer_row, text="look:").pack(side="left", padx=(8, 0))
+        self.infer_lookahead_var = tk.StringVar(value="0.0")
+        ttk.Entry(infer_row, textvariable=self.infer_lookahead_var, width=5).pack(side="left", padx=2)
+
+        # C. MIT(임피던스) 제어 — 토크 제어라 확인 문구까지 있어야 실제로 켜진다.
+        self.infer_mit_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            infer_row, text="MIT(토크)", variable=self.infer_mit_var,
+        ).pack(side="left", padx=(8, 0))
+
+        # MIT의 속도 피드포워드 배율. 0이면 순수 위치 임피던스.
+        # 30Hz 궤적을 그냥 미분하면 지터가 30배로 증폭돼 속도가 아니라 노이즈가
+        # 되므로(부호가 3스텝에 1번 뒤집힘), runner가 EMA로 다듬어 넘긴다.
+        # 흔들림 원인이 속도항인지 가려낼 때 0으로 두고 비교할 것.
+        # smoothing 파이프라인의 EMA. 위치 명령의 방향 뒤집힘(지터)을 없앤다 —
+        # 실측에서 33.7%였던 방향 반전이 alpha=0.2에서 5.8%로 줄고 이동폭은
+        # 그대로였다. MOVE J에서는 플래너가 가려줬지만 MIT는 그대로 재현한다.
+        ttk.Label(infer_row, text="ema:").pack(side="left", padx=(8, 0))
+        self.infer_ema_var = tk.StringVar(value="0.2")
+        ttk.Entry(infer_row, textvariable=self.infer_ema_var, width=4).pack(side="left", padx=2)
+
+        ttk.Label(infer_row, text="vff:").pack(side="left", padx=(8, 0))
+        self.infer_vff_var = tk.StringVar(value="1.0")
+        ttk.Entry(infer_row, textvariable=self.infer_vff_var, width=4).pack(side="left", padx=2)
+
+        self.infer_ensemble_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            infer_row, text="temporal ensemble", variable=self.infer_ensemble_var,
+        ).pack(side="left", padx=(8, 0))
+
+        self.infer_apply_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            infer_row, text="실물 전송", variable=self.infer_apply_var,
+        ).pack(side="left", padx=(8, 0))
 
         # Preset + custom command
-        ttk.Label(script_frame, text="Preset:").grid(row=8, column=0, padx=4, sticky="e")
+        ttk.Label(script_frame, text="Preset:").grid(row=9, column=0, padx=4, sticky="e")
         self.preset_var = tk.StringVar(value="Teleoperate")
         preset_combo = ttk.Combobox(
             script_frame, textvariable=self.preset_var,
             values=PRESET_NAMES, state="readonly", width=14,
         )
-        preset_combo.grid(row=8, column=1, padx=4, sticky="w")
+        preset_combo.grid(row=9, column=1, padx=4, sticky="w")
         preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
 
         btn_row2 = ttk.Frame(script_frame)
-        btn_row2.grid(row=8, column=2, sticky="e")
+        btn_row2.grid(row=9, column=2, sticky="e")
         self.btn_launch = ttk.Button(btn_row2, text="Launch", command=self._on_launch)
         self.btn_launch.pack(side="left", padx=4)
         self.btn_end_episode = ttk.Button(
@@ -694,11 +869,11 @@ class PiperMonitorUI:
         self.btn_kill = ttk.Button(btn_row2, text="Stop", command=self._on_kill, state="disabled")
         self.btn_kill.pack(side="left", padx=4)
 
-        ttk.Label(script_frame, text="Command:").grid(row=9, column=0, padx=4, sticky="e")
+        ttk.Label(script_frame, text="Command:").grid(row=10, column=0, padx=4, sticky="e")
         self.cmd_var = tk.StringVar()
         self._on_preset_selected(None)  # fill initial command
         cmd_entry = ttk.Entry(script_frame, textvariable=self.cmd_var)
-        cmd_entry.grid(row=9, column=1, columnspan=2, padx=4, sticky="ew", pady=(4, 0))
+        cmd_entry.grid(row=10, column=1, columnspan=2, padx=4, sticky="ew", pady=(4, 0))
 
         # 실행 중인 lerobot-record의 stdout에서 "Recording episode N" 로그를 파싱해서
         # 진행 상황을 표시 (Rerun 창을 안 보고 있어도 상태 파악 가능). 녹화 중이 아니면 빈 문자열.
@@ -722,6 +897,14 @@ class PiperMonitorUI:
             self.safety_enabled_var, self.safety_limit_var, self.safety_action_var,
             self.release_mode_var, self.wrist_rest_var, self.safety_park_ramp_var,
             self.gripper_cycle_var,
+            # Infer 프리셋 설정 — 여기 빠지면 모드를 바꿔도 Command가 그대로라
+            # 옛 커맨드로 Launch된다(위 use_effort_var와 같은 함정).
+            self.infer_mode_var, self.infer_fps_var, self.infer_every_var,
+            self.infer_clamp_var, self.infer_rate_var, self.infer_speed_var,
+            self.infer_lookahead_var, self.infer_mit_var, self.infer_vff_var,
+            self.infer_ema_var,
+            self.infer_ensemble_m_var,
+            self.infer_ensemble_var, self.infer_apply_var,
         ):
             var.trace_add("write", self._refresh_command)
 
@@ -1564,43 +1747,152 @@ class PiperMonitorUI:
         ]
         return " ".join(args)
 
+    def _refresh_policy_list(self) -> None:
+        """outputs/train/ 을 다시 훑어 콤보박스 목록을 채움. 학습이 끝난 직후에도
+        GUI를 재시작하지 않고 ↻ 버튼으로 새 체크포인트를 잡을 수 있게 한다."""
+        found = discover_policies()
+        self._policy_choices = {label: path for label, path in found}
+        self.policy_combo["values"] = list(self._policy_choices)
+        self._update_policy_label()
+        if not found:
+            self.policy_label_var.set("outputs/train/ 에 체크포인트 없음")
+
+    def _on_policy_selected(self, _event) -> None:
+        """콤보박스에는 읽기 좋은 이름이 들어가므로 실제 경로로 바꿔 넣는다."""
+        selected = self.policy_path_var.get()
+        path = self._policy_choices.get(selected)
+        if path:
+            self.policy_path_var.set(path)
+        self._update_policy_label()
+
+    def _browse_policy_path(self) -> None:
+        chosen = filedialog.askdirectory(
+            title="pretrained_model 폴더 선택",
+            initialdir=str(REPO_ROOT / "outputs" / "train"),
+        )
+        if chosen:
+            self.policy_path_var.set(chosen)
+            self._update_policy_label()
+
+    @staticmethod
+    def _training_dataset_of(policy_dir: pathlib.Path) -> str | None:
+        """체크포인트의 train_config.json에서 학습 dataset 경로를 읽음.
+
+        piper_infer_runner에도 같은 함수가 있지만 여기서 import하지 않는다 —
+        그쪽은 torch/lerobot을 끌어오고 teleop_ui는 그것 없이 떠야 한다.
+        """
+        for candidate in (
+            policy_dir / "train_config.json",
+            policy_dir.parent.parent.parent / "train_config.json",
+        ):
+            if candidate.is_file():
+                try:
+                    dataset = json.loads(candidate.read_text(encoding="utf-8"))["dataset"]
+                except (json.JSONDecodeError, OSError, KeyError):
+                    continue
+                return dataset.get("root") or dataset.get("repo_id")
+        return None
+
+    def _update_policy_label(self) -> None:
+        """현재 경로가 실제 체크포인트인지 옆에 표시 — 오타로 Launch하는 걸 막는다."""
+        raw = self.policy_path_var.get().strip()
+        if not raw:
+            self.policy_label_var.set("")
+            return
+        path = pathlib.Path(raw)
+        if not path.is_absolute():
+            path = REPO_ROOT / path
+        if (path / "config.json").is_file():
+            # 학습에 쓴 dataset을 같이 보여준다 — Dataset Browser에 200개가 다
+            # 보이다 보니 다른 걸 고르기 쉽고, 그러면 정규화 통계가 안 맞아
+            # 텐서 크기 불일치로 죽는다(state 7 vs 20 등).
+            trained = self._training_dataset_of(path)
+            hint = f"  ← dataset: {pathlib.Path(trained).name}" if trained else ""
+            for label, candidate in self._policy_choices.items():
+                if os.path.realpath(candidate) == os.path.realpath(path):
+                    self.policy_label_var.set(f"✓ {label}{hint}")
+                    return
+            self.policy_label_var.set(f"✓ 체크포인트{hint}")
+        elif path.exists():
+            self.policy_label_var.set("⚠ config.json 없음")
+        else:
+            # HF repo id일 수도 있으니 없는 경로라고 단정하지 않는다
+            self.policy_label_var.set("? 로컬 경로 아님 (HF repo id면 정상)")
+
     def _build_infer_command(self) -> str:
-        """lerobot-record --policy.path=... 로 정책(SmolVLA 등) 추론 실행.
-        구 UGRP의 별도 smolvla-inference CLI는 새 레포에 없음 — lerobot 자체가
-        lerobot-record에 --policy.path를 지원해서 policy가 action을 생성하고
-        teleop은 episode 사이 리셋용으로 병행할 수 있음
-        (lerobot/scripts/lerobot_record.py 상단 docstring, RecordConfig 참고).
-        카메라 인자를 Record와 공유하므로 depth 설정(REALSENSE_USE_DEPTH 등)도
-        recording.env에 넣어두면 그대로 반영됨.
-        dataset.* 인자(EPISODE_TIME_S/FPS 등)도 Record와 동일하게 공유하지만
-        의미가 다름 — Record에서는 "녹화 시간/프레임레이트"지만, 여기서는
-        policy가 실제로 follower를 움직이며 추론하는 구간의 길이(EPISODE_TIME_S)와
-        그 동안의 관찰->action 제어 주기(FPS)가 됨. RESET_TIME_S 구간은 policy가
-        리셋을 못 하므로 Record와 마찬가지로 항상 사람이 leader로 개입해야 함.
-        주의: 새 lerobot-record CLI에는 구 UGRP infer_dry 같은
-        --use_devices=false dry-run 옵션이 없음 — Launch 누르면 바로 실제
-        로봇에 정책 action이 전송됨."""
-        env = self.recording_env
-        follower_port = self.follower_port_var.get().strip()
-        leader_port = self.leader_port_var.get().strip()
+        """scripts/tools/piper_infer_runner.py로 정책(SmolVLA 등) 추론 실행.
+
+        예전에는 lerobot-record --policy.path=... 를 그대로 띄웠지만, 그 경로는
+        action chunk를 노출하지 않아 temporal ensemble을 걸 수 없었음. ensemble이
+        우리 실측에서 total variation을 5.617 -> 2.881로 줄인 유일한 항목이라
+        (docs/policy/smoothing.md), 제어 루프를 우리가 들고 가도록 바꿨음.
+        runner는 lerobot을 우회하지 않음 — LeRobotDataset / make_policy /
+        PiperFollower를 그대로 쓰고, 실물 명령은 전부 send_action()을 지나가므로
+        max_relative_target과 effort 안전 컷오프가 유지됨.
+
+        Record / Replay 프리셋은 그대로 lerobot-record / lerobot-replay를 쓰므로
+        이 변경의 영향을 받지 않음.
+
+        Infer Mode는 프리셋일 뿐이고 화면의 fps / ensemble 값이 항상 이김.
+        augment 모드는 롤아웃을 LeRobotDataset으로 기록하고(원본 프레임 저장,
+        끝나면 성공/실패 질문) demo 모드는 기록하지 않음.
+
+        실물 전송은 "실물 전송" 체크 + source=robot + 확인 문구가 모두 있어야
+        열림 — 체크만으로는 안 열리게 runner가 한 번 더 막음."""
+        script_path = REPO_ROOT / "scripts" / "tools" / "piper_infer_runner.py"
         policy_path = self.policy_path_var.get().strip()
-        fps = self.fps_var.get().strip() or "30"
+        dataset_root = self.replay_dataset_root_var.get().strip()
+        episode = self.replay_episode_var.get().strip() or "0"
+        task = self.task_var.get().strip()
+        mode = self.infer_mode_var.get()
+        fps = self.infer_fps_var.get().strip() or "30"
+        infer_every = self.infer_every_var.get().strip() or "5"
+
+        if not policy_path:
+            return "# Set Policy Path first"
+        if not dataset_root:
+            return "# Select a reference dataset in Dataset Browser first"
 
         args = [
-            "lerobot-record",
-            "--robot.type=piper_follower",
-            f"--robot.port={follower_port}",
-            *self._camera_args(),
-            *self._action_offset_args(),
-            *self._robot_safety_args(),
-            "--teleop.type=piper_leader",
-            f"--teleop.port={leader_port}",
-            f"--policy.path={policy_path}",
-            f"--display_data={env.get('DISPLAY_DATA') or 'true'}",
-            *self._dataset_args(fps),
-            "--robot.discover_packages_path=lerobot_robot_piper",
-            "--teleop.discover_packages_path=lerobot_robot_piper",
+            str(self.python_executable),
+            str(script_path),
+            f"--mode={mode}",
+            f"--dataset-root={shlex.quote(dataset_root)}",
+            f"--policy-path={shlex.quote(policy_path)}",
+            f"--episode={episode}",
+            f"--fps={fps}",
+            f"--infer-every={infer_every}",
+            f"--max-relative-target={self.infer_clamp_var.get().strip() or '5.0'}",
+            f"--rate-limit={self.infer_rate_var.get().strip() or '5.0'}",
+            f"--move-speed-rate={self.infer_speed_var.get().strip() or '30'}",
+            f"--lookahead-s={self.infer_lookahead_var.get().strip() or '0.0'}",
+            f"--ema-alpha={self.infer_ema_var.get().strip() or '0.2'}",
         ]
+        if task:
+            args.append(f"--task={shlex.quote(task)}")
+
+        if self.infer_ensemble_var.get():
+            args.append(f"--ensemble-m={self.infer_ensemble_m_var.get().strip() or '0.01'}")
+        else:
+            args.append("--no-ensemble")
+
+        if self.infer_mit_var.get():
+            # 확인 문구를 커맨드에 그대로 넣는다 — Launch 전에 Command 칸에서
+            # 토크 제어가 켜졌다는 걸 눈으로 볼 수 있게.
+            args += [
+                "--mit",
+                f"--mit-confirm={INFER_MIT_CONFIRM}",
+                f"--mit-vel-scale={self.infer_vff_var.get().strip() or '1.0'}",
+            ]
+
+        if self.infer_apply_var.get():
+            # 실물이면 관찰도 실물에서 받아야 함. 확인 문구는 runner가 요구하는
+            # 상수를 그대로 넘김 — Launch 전에 Command 칸에서 눈으로 볼 수 있음.
+            args += [
+                "--source=robot",
+                "--apply-to-robot",
+                f"--real-robot-confirm={INFER_REAL_ROBOT_CONFIRM}",
+            ]
         return " ".join(args)
 
     def _build_replay_real_command(self) -> str:

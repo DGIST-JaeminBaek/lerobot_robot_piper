@@ -223,3 +223,116 @@ if __name__ == "__main__":
     test_gripper_cycle_opens_then_closes_to_parking()
     test_unknown_mode_falls_back_to_in_place()
     print("OK: torque 해제 모드 mock 테스트 통과")
+
+
+# ── park_lower: 파킹 자세로 간 뒤 손목까지 내리고 해제 ────
+# 예전 기본값 "lower"는 팔이 있던 자리에 그대로 늘어져서, 추론이 끝난 위치
+# (보드 앞 등)에 팔이 남았다. 보관 자세로 돌아가야 한다.
+class _OrderRecordingBus:
+    """release_torque_safely의 동작 순서만 확인하는 스텁."""
+
+    move_mode = 1
+    move_speed_rate = 30
+
+    def __init__(self):
+        self.id = "test"
+        self.calls: list[str] = []
+        self.piper = self
+
+    def parking(self):
+        self.calls.append("parking")
+
+    def wrist_rest_target(self, rest_deg):
+        self.calls.append("wrist_rest_target")
+        return {"joint5": 0.0}
+
+    def ramp_to(self, target, ramp_s):
+        self.calls.append("ramp_to")
+
+    def cycle_gripper(self, **kwargs):
+        self.calls.append("cycle_gripper")
+
+    def DisablePiper(self):
+        self.calls.append("DisablePiper")
+
+    def disable_gripper(self):
+        self.calls.append("disable_gripper")
+
+    release_torque_safely = PiperMotorsBus.release_torque_safely
+
+
+def _release(mode):
+    bus = _OrderRecordingBus()
+    bus.release_torque_safely(mode=mode, ramp_s=0.0, settle_s=0.0)
+    return bus.calls
+
+
+def test_park_lower_parks_before_lowering_the_wrist():
+    """순서가 뒤집히면 wrist_rest_target이 파킹 전 자세를 기준으로 잡는다."""
+    calls = _release("park_lower")
+    assert calls.index("parking") < calls.index("wrist_rest_target")
+    assert calls.index("wrist_rest_target") < calls.index("ramp_to")
+    assert calls.index("ramp_to") < calls.index("DisablePiper")
+
+
+def test_park_lower_is_the_config_default():
+    from lerobot_robot_piper.config_piper import PiperFollowerConfig
+
+    assert PiperFollowerConfig.park_release_mode == "park_lower"
+
+
+def test_park_alone_does_not_lower_the_wrist():
+    assert "ramp_to" not in _release("park")
+    assert "parking" in _release("park")
+
+
+def test_lower_alone_does_not_park():
+    calls = _release("lower")
+    assert "parking" not in calls
+    assert "ramp_to" in calls
+
+
+def test_in_place_moves_nothing():
+    calls = _release("in_place")
+    assert "parking" not in calls and "ramp_to" not in calls
+    assert "DisablePiper" in calls
+
+
+def test_gripper_is_cycled_before_torque_release():
+    """팔이 늘어진 뒤 그리퍼를 여닫으면 반력으로 팔이 흔들린다."""
+    calls = _release("park_lower")
+    assert calls.index("cycle_gripper") < calls.index("DisablePiper")
+
+
+# ── park=False일 때 파킹 모드 강등 ────────────────────────
+# park_lower를 추가하면서 생긴 구멍: 조기 종료(park=False)인데도 파킹 이동이
+# 일어나면, 사람이 "여기서 멈춰"라고 한 의도와 반대로 팔이 움직인다.
+def _downgrade(release_mode, park):
+    """piper_follower.disconnect의 강등 규칙과 같은 수식."""
+    if not park:
+        return {"park": "in_place", "park_lower": "lower"}.get(release_mode, release_mode)
+    return release_mode
+
+
+def test_park_lower_is_downgraded_when_not_parking():
+    assert _downgrade("park_lower", park=False) == "lower"
+    assert _downgrade("park", park=False) == "in_place"
+
+
+def test_modes_without_parking_are_untouched():
+    assert _downgrade("lower", park=False) == "lower"
+    assert _downgrade("in_place", park=False) == "in_place"
+
+
+def test_nothing_is_downgraded_when_parking():
+    for mode in ("park_lower", "park", "lower", "in_place"):
+        assert _downgrade(mode, park=True) == mode
+
+
+def test_follower_downgrade_matches_this_rule():
+    import inspect
+
+    from lerobot_robot_piper.piper_follower import PiperFollower
+
+    source = inspect.getsource(PiperFollower.disconnect)
+    assert '"park": "in_place", "park_lower": "lower"' in source

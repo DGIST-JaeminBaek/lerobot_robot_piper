@@ -62,9 +62,16 @@ class PiperFollower(Robot):
         self.id = config.id
         self.port = config.port
         self.cameras: dict[str, Camera] = {}
+        # send_action EMA 상태(action_ema_alpha < 1.0일 때만 씀). None이면 다음
+        # 목표로 초기화된다 — 시작할 때 이전 자세로 끌려가지 않게 하기 위함.
+        self._action_ema_state: dict[str, float] | None = None
+        # send_action(velocity=...)로 들어온 목표 속도. MIT 제어에서만 쓴다.
+        self._pending_goal_velocity: dict[str, float] = {}
         self.bus = PiperMotorsBus(
             id=config.id,
             port=config.port,
+            move_mode=config.move_mode,
+            move_speed_rate=config.move_speed_rate,
             motors={
                 "joint1": Motor(1, "AGILEX-M", MotorNormMode.RANGE_M100_100),
                 "joint2": Motor(2, "AGILEX-M", MotorNormMode.RANGE_M100_100),
@@ -266,7 +273,12 @@ class PiperFollower(Robot):
 
         return obs_dict
 
-    def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
+    def send_action(
+        self, action: dict[str, Any], velocity: dict[str, float] | None = None
+    ) -> dict[str, Any]:
+        """velocity는 MIT 제어에서만 쓰인다(정규화 단위/초). 위치 제어에서는 무시된다 —
+        MOVE J는 속도 setpoint를 받지 않기 때문."""
+        self._pending_goal_velocity = velocity or {}
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
@@ -307,13 +319,27 @@ class PiperFollower(Robot):
             # leader 절대 자세로 점프하지 않고, leader의 이동 변화량을 follower 현재 자세에 얹는다.
             goal_pos = {key: val + self._action_offset.get(key, 0.0) for key, val in goal_pos.items()}
 
+        # send_action 단계 EMA. 기본은 꺼짐(alpha=1.0)이라 기존 동작은 그대로다.
+        # max_relative_target 클램프보다 *먼저* 걸어야 한다 — 안전 제한은 항상
+        # 마지막에 와야 스무딩이 그 제한을 넘길 수 없다.
+        goal_pos = self._apply_action_ema(goal_pos)
+
         # Cap goal position when too far away from present position.
         if self.config.max_relative_target is not None:
             _t0 = time.perf_counter()
             present_pos = self.bus.sync_read("Present_Position")
             logger.debug(f"{self} sync_read(clip): {(time.perf_counter() - _t0) * 1e3:.1f}ms")
             goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
-            goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+            clamped = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+            # MIT에서는 클램프된 관절의 속도 피드포워드를 0으로 내린다. 클램프가
+            # 걸렸다는 건 팔이 목표를 못 따라잡고 있다는 뜻인데, 그 상태에서
+            # 정책의 원래 속도를 vel_ref로 계속 넣으면 kd 항이 큰 토크를 만든다
+            # (위치는 잘라놓고 속도는 안 자르는 불일치).
+            if self._pending_goal_velocity:
+                for key, value in clamped.items():
+                    if abs(value - goal_pos[key]) > 1e-4:
+                        self._pending_goal_velocity[key] = 0.0
+            goal_pos = clamped
 
         # 실시간 안전 컷오프. use_effort(데이터셋 로깅 플래그)와 무관하게 항상 동작 —
         # get_effort()를 여기서 직접 읽는다. 리플레이/정책 출력이 관절 명령으로 바뀌어
@@ -332,10 +358,75 @@ class PiperFollower(Robot):
                 return self._safety_hold_action()
 
         _t0 = time.perf_counter()
-        self.bus.set_action(goal_pos, is_conv=True)
+        # getattr — 진단 도구나 테스트가 최소 config로 follower를 만들 수 있게
+        # (action_ema_alpha와 같은 방식).
+        if getattr(self.config, "use_mit_control", False):
+            # MIT(임피던스) 스트리밍. 위치 제어와 달리 궤적 재계획이 없다.
+            # goal_vel은 send_action(velocity=...)로 넘어온 정규화 속도(단위/초).
+            self.bus.set_action_mit(
+                goal_pos,
+                self._pending_goal_velocity,
+                kp=self._mit_gains("mit_kp", "mit_kp_overrides", 10.0),
+                kd=self._mit_gains("mit_kd", "mit_kd_overrides", 0.8),
+            )
+        else:
+            self.bus.set_action(goal_pos, is_conv=True)
         logger.debug(f"{self} set_action: {(time.perf_counter() - _t0) * 1e3:.1f}ms")
         self._last_sent_goal_pos = goal_pos
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
+
+    def _mit_gains(self, base_key: str, override_key: str, fallback: float):
+        """관절별 게인을 만든다. 덮어쓸 관절이 없으면 float 하나를 그대로 돌려준다.
+
+        중력 부담이 관절마다 달라서 공통 게인으로는 처짐을 맞출 수 없다 —
+        config_piper.py의 mit_kp_overrides 주석에 실측값이 있다.
+        """
+        base = float(getattr(self.config, base_key, fallback))
+        spec = (getattr(self.config, override_key, "") or "").strip()
+        if not spec:
+            return base
+
+        gains = {motor: base for motor in self.bus.motors if motor != "gripper"}
+        for item in spec.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            name, _, value = item.partition("=")
+            name = name.strip()
+            if name not in gains:
+                logger.warning(f"unknown joint in {override_key}: {name!r} — 무시")
+                continue
+            try:
+                gains[name] = float(value)
+            except ValueError:
+                logger.warning(f"bad gain in {override_key}: {item!r} — 무시")
+        return gains
+
+    def _apply_action_ema(self, goal_pos: dict[str, float]) -> dict[str, float]:
+        """목표 자세에 EMA를 건다. alpha=1.0이면 아무것도 안 한다.
+
+        어떤 경로로 명령이 들어오든(텔레옵, lerobot-record, lerobot-replay, 정책
+        runner) 여기를 지나가므로 최소한의 스무딩 바닥이 된다. 상태는 첫 목표로
+        초기화해서 시작할 때 이전 자세로 끌려가지 않게 한다.
+        """
+        alpha = float(getattr(self.config, "action_ema_alpha", 1.0))
+        if alpha >= 1.0:
+            self._action_ema_state = None
+            return goal_pos
+        if alpha <= 0.0:
+            raise ValueError(f"action_ema_alpha must be in (0, 1]; got {alpha}")
+
+        previous = getattr(self, "_action_ema_state", None)
+        if previous is None:
+            self._action_ema_state = dict(goal_pos)
+            return goal_pos
+
+        smoothed = {
+            key: alpha * value + (1.0 - alpha) * previous.get(key, value)
+            for key, value in goal_pos.items()
+        }
+        self._action_ema_state = smoothed
+        return smoothed
 
     # ------------------------------------------------------- 안전 컷오프 트립
     def _safety_hold_action(self) -> dict[str, Any]:
@@ -520,9 +611,13 @@ class PiperFollower(Robot):
         # torque를 풀 때의 자세는 park_release_mode가 결정한다. park=False(사람이
         # 조기 종료)일 때 "park" 모드는 의미가 안 맞으므로 in_place로 낮춘다 —
         # "lower"는 그대로 살린다(살짝 내려놓는 건 조기 종료 때도 하고 싶은 동작).
+        # "park_lower"도 파킹 이동을 포함하므로 같이 강등해야 한다 — 손목을
+        # 내리는 부분("lower")은 조기 종료 때도 하고 싶은 동작이라 남긴다.
         release_mode = self.config.park_release_mode
-        if not park and release_mode == "park":
-            release_mode = "in_place"
+        if not park:
+            release_mode = {"park": "in_place", "park_lower": "lower"}.get(
+                release_mode, release_mode
+            )
 
         self.bus.disconnect(
             disable_torque,

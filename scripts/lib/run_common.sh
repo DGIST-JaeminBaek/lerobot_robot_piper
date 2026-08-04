@@ -17,6 +17,46 @@ load_recording_env() {
   fi
 }
 
+activate_conda_env() {
+  # lerobot_robot_piper는 conda env(기본 ugrp)에만 설치돼 있다. base에서 실행하면
+  # ModuleNotFoundError로 죽으므로 실행 스크립트는 전부 이걸 먼저 불러야 한다.
+  # (0__launch_gui.sh에만 있던 걸 함수로 빼서 다른 스크립트도 쓰게 함 —
+  #  11__infer_gui.sh가 이게 없어서 base로 실행되며 터졌다.)
+  local env_name="${CONDA_ENV_NAME:-ugrp}"
+
+  if [[ "${CONDA_DEFAULT_ENV:-}" == "${env_name}" ]]; then
+    echo "[INFO] 이미 ${env_name} 활성화됨 — 건너뜀"
+    return 0
+  fi
+
+  # Nautilus "Run in Terminal" 등 비로그인 셸에서는 ~/.bashrc의 conda init이
+  # 실행되지 않아 PATH에 conda가 없을 수 있음 — 흔한 설치 위치를 직접 탐색
+  local conda_base="" candidate
+  for candidate in "${CONDA_EXE:+$(dirname "$(dirname "${CONDA_EXE}")")}" \
+                   "${HOME}/miniconda3" "${HOME}/anaconda3" "${HOME}/miniforge3" \
+                   "/opt/miniconda3" "/opt/anaconda3"; do
+    if [[ -n "${candidate}" && -f "${candidate}/etc/profile.d/conda.sh" ]]; then
+      conda_base="${candidate}"
+      break
+    fi
+  done
+
+  if [[ -z "${conda_base}" ]]; then
+    echo "[ERROR] conda 설치 위치를 찾을 수 없음 — 수동으로 '${env_name}' 환경을 활성화한 뒤 재실행하세요." >&2
+    return 1
+  fi
+
+  # conda.sh/activate가 내부적으로 미설정 변수를 참조해 set -u와 충돌하므로 잠시 해제
+  set +u
+  # shellcheck disable=SC1091
+  source "${conda_base}/etc/profile.d/conda.sh"
+  conda activate "${env_name}"
+  set -u
+
+  echo "[OK] conda env  = ${CONDA_DEFAULT_ENV:-<none>}"
+  echo "[OK] python     = $(command -v python)"
+}
+
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "[ERROR] Required command not found: $1" >&2

@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 from typing import Any
 
@@ -19,6 +20,27 @@ from .tables import (
 
 logger = logging.getLogger(__name__)
 
+# ModeCtrl(0x151)의 MOVE 모드 (piper_sdk ModeCtrl docstring 참고).
+#
+# MOVE_J는 "이 목표로 이동하라"는 점대점 명령이다 — 컨트롤러가 목표마다 가속/감속
+# 궤적을 새로 계획한다. 목표를 하나 주고 도착을 기다리는 방식(파킹, 캘리브레이션,
+# 사람이 리더를 천천히 움직이는 텔레옵)에는 맞다.
+#
+# 문제는 정책 추론처럼 30Hz로 목표를 계속 흘려보낼 때다. 33ms마다 새 점대점 명령이
+# 들어오면 컨트롤러가 초당 30번 궤적을 처음부터 다시 계획한다 — 움직이다 말고
+# 재시작하기를 반복해서 팔이 떤다. MOVE_CPV(연속 위치-속도)는 그런 스트리밍
+# setpoint를 위한 모드다. 펌웨어 V1.8-1 이상이 필요하다(이 랩 팔은 S-V1.8-2).
+MOVE_P = 0x00
+MOVE_J = 0x01
+MOVE_L = 0x02
+MOVE_C = 0x03
+MOVE_M = 0x04
+MOVE_CPV = 0x05
+
+# MIT 제어 대상 관절 (그리퍼는 별개 CAN 노드라 제외). JointMitCtrl의 motor_num이
+# 1부터 시작하므로 이 순서가 곧 모터 번호다.
+JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+
 
 class PiperMotorsBus(MotorsBus):
 
@@ -32,6 +54,10 @@ class PiperMotorsBus(MotorsBus):
     model_number_table = MODEL_NUMBER_TABLE
     model_resolution_table = MODEL_RESOLUTION_TABLE
     normalized_data = ["Present_Position", "Goal_Position"]
+    # __init__이 덮어쓰지만 클래스 기본값으로도 둔다 — 테스트나 진단 도구가
+    # __init__을 거치지 않고 버스를 만들어도 set_action()이 동작해야 한다.
+    move_mode = MOVE_J
+    move_speed_rate = 30
 
     def __init__(
         self,
@@ -39,12 +65,18 @@ class PiperMotorsBus(MotorsBus):
         port: str,
         motors: dict[str, Motor],
         calibration: dict[str, MotorCalibration] | None = None,
+        move_mode: int = MOVE_J,
+        move_speed_rate: int = 30,
     ):
         super().__init__(port, motors, calibration)
 
         self.port_handler = PortHandler()
         self.id = id
         self._is_connected = False
+        # ModeCtrl(0x151)의 MOVE 모드. set_action()이 매 명령마다 함께 보낸다.
+        # 자세한 차이는 MOVE_J / MOVE_CPV 상수 설명 참고.
+        self.move_mode = move_mode
+        self.move_speed_rate = move_speed_rate
         self.piper = C_PiperInterface_V2(port)
         logger.info(f"{id} : {port} is selected.")
 
@@ -273,7 +305,7 @@ class PiperMotorsBus(MotorsBus):
         # 팔이 CAN 제어 모드가 아니면 그리퍼 각도 명령이 무시된다 — set_action()은
         # 매번 이걸 먼저 보내지만, 여기서는 팔 관절 명령 없이 그리퍼만 움직이므로
         # 직접 한 번 보내줘야 한다(실기에서 이거 없이는 각도가 안 변하는 걸 확인).
-        self.piper.ModeCtrl(0x01, 0x01, 30, 0x00)
+        self.piper.ModeCtrl(0x01, MOVE_J, self.move_speed_rate, 0x00)
         self.gripper_ctrl(open_norm, effort=effort)
         time.sleep(wait_s)
         self.gripper_ctrl(close_norm, effort=effort)
@@ -312,21 +344,27 @@ class PiperMotorsBus(MotorsBus):
           미리 내린 뒤 해제. 실기 측정 결과 torque를 풀 때 실제로 떨어지는 건 손목뿐이라
           (joint1~4/6은 0.00도) 그 낙차를 미리 없애는 것 — tables.py의
           WRIST_RELEASE_REST_DEG 주석 참고. 팔을 옮기지 않으므로 이동 위험이 없다.
-        - "park": 기존 동작 — parking 자세로 이동한 뒤 해제.
+        - "park": parking 자세로 이동한 뒤 해제. 손목 낙차는 남는다.
+        - "park_lower": parking 자세로 이동한 뒤, 거기서 손목까지 정지각으로 내리고
+          해제. "park"과 "lower"를 합친 것으로, 실행이 끝났을 때 팔이 보관 자세에
+          있으면서 놓는 순간의 손목 낙차도 없다 — 정상 종료의 기본값.
 
         팔 관절 이동에서는 gripper를 건드리지 않는다(잡고 있는 물체/손이 끼지 않도록).
         gripper_cycle=True면 마지막에 그리퍼를 한 번 열고 닫아서 물고 있던 걸 놓고
         파킹 위치(닫힘)로 되돌린 뒤 실능시킨다.
         """
         mode = (mode or "in_place").lower()
-        if mode == "park":
+        if mode in ("park", "park_lower"):
             self.parking()
-        elif mode == "lower":
+        if mode in ("lower", "park_lower"):
+            # park_lower면 parking 자세에 도착한 *뒤* 그 자세 기준으로 손목을
+            # 내린다 — wrist_rest_target()이 현재 자세를 읽어 목표를 만들므로
+            # 순서가 중요하다.
             self.ramp_to(self.wrist_rest_target(wrist_rest_deg), ramp_s=ramp_s)
             # 마지막 목표에 실제로 도달할 시간을 준 뒤에 풀어야 "거의 다 내려간
             # 상태"가 아니라 "다 내려간 상태"에서 해제된다.
             time.sleep(settle_s)
-        elif mode != "in_place":
+        elif mode not in ("in_place", "park"):
             logger.warning(f"{self.id} unknown release mode '{mode}' — in_place로 처리")
 
         # 팔 토크를 내리기 전에 그리퍼를 정리한다 — 팔이 늘어진 뒤에 그리퍼를
@@ -448,7 +486,7 @@ class PiperMotorsBus(MotorsBus):
         else:
             action_denormalized = action
 
-        self.piper.ModeCtrl(0x01, 0x01, 30, 0x00)
+        self.piper.ModeCtrl(0x01, self.move_mode, self.move_speed_rate, 0x00)
         self.piper.JointCtrl(
             int(action_denormalized["joint1"]),
             int(action_denormalized["joint2"]),
@@ -459,6 +497,100 @@ class PiperMotorsBus(MotorsBus):
         )
         self.piper.GripperCtrl(abs(int(action_denormalized["gripper"])), 1000, 0x03, 0)
         return self.get_control()
+
+    # ---- MIT (임피던스) 제어 ----
+
+    # SDK JointMitCtrl docstring의 참고값. kp가 낮으면 팔이 중력에 무너지고,
+    # 높으면 격렬하게 진동한다. 반드시 낮은 값에서 시작해 올릴 것.
+    MIT_KP_DEFAULT = 10.0
+    MIT_KD_DEFAULT = 0.8
+    MIT_KP_MAX = 500.0
+    MIT_KD_MAX = 5.0
+
+    def _norm_to_rad(self, motor: str, value: float) -> float:
+        """정규화 위치(-100~100)를 라디안으로. calibration 범위는 0.001도 단위."""
+        milli_deg = self._unnormalize({motor: value})[motor]
+        return milli_deg * 0.001 * math.pi / 180.0
+
+    def _norm_rate_to_rad_s(self, motor: str, value_per_s: float) -> float:
+        """정규화 속도(단위/초)를 rad/s로. 오프셋 없이 배율만 적용한다."""
+        cal = self.calibration[motor]
+        # RANGE_M100_100: 정규화 200 구간이 (max-min) 0.001도에 대응
+        span_rad = (cal.range_max - cal.range_min) * 0.001 * math.pi / 180.0
+        return value_per_s * span_rad / 200.0
+
+    @staticmethod
+    def _gain_for(gain: "float | dict[str, float]", motor: str, fallback: float) -> float:
+        """관절별 게인을 허용한다. float면 전 관절 공통, dict면 관절별.
+
+        중력 부담이 관절마다 다르므로 공통 게인으로는 맞출 수 없다 — 실측에서
+        같은 kp=10에 joint1/4/6은 처짐 0.00인데 joint2는 1.83이었다. 처짐은
+        중력토크/kp라 무거운 관절만 kp를 올려야 한다.
+        """
+        if isinstance(gain, dict):
+            return float(gain.get(motor, fallback))
+        return float(gain)
+
+    def set_action_mit(
+        self,
+        goal_pos: dict[str, float],
+        goal_vel: dict[str, float] | None = None,
+        kp: "float | dict[str, float]" = MIT_KP_DEFAULT,
+        kd: "float | dict[str, float]" = MIT_KD_DEFAULT,
+    ) -> dict[str, float]:
+        """MIT(임피던스) 모드로 관절 목표를 스트리밍한다.
+
+        MOVE J와 달리 궤적을 계획하지 않는다 — 매 명령이 그냥
+        `토크 = kp*(pos_ref - pos) + kd*(vel_ref - vel) + t_ref` 를 갱신할 뿐이라,
+        33ms마다 새 목표를 흘려보내도 재계획이 일어나지 않는다. 30Hz 스트리밍에
+        맞는 인터페이스가 이것이다.
+
+        속도를 함께 보내는 게 핵심이다. 정책 chunk는 30fps로 시간 매개화된
+        궤적이라 각 시점의 의도된 속도를 이미 담고 있는데, 위치만 보내면 그
+        정보를 버리게 된다.
+
+        ⚠ 위험: 이건 토크 제어다. kp가 낮으면 팔이 중력에 무너지고 높으면
+        진동한다. max_relative_target(위치 명령 클램프)과 effort 컷오프는 위치
+        제어를 전제로 만들어진 것이라 여기서는 의미가 달라진다. 반드시 낮은
+        게인에서 관절 하나씩 확인할 것 — scripts/tools/piper_mit_probe.py 참고.
+
+        그리퍼는 MIT 대상이 아니다(별개 노드) — 기존 GripperCtrl을 그대로 쓴다.
+        """
+        goal_vel = goal_vel or {}
+        gains = {}
+        for motor in JOINT_NAMES:
+            motor_kp = self._gain_for(kp, motor, self.MIT_KP_DEFAULT)
+            motor_kd = self._gain_for(kd, motor, self.MIT_KD_DEFAULT)
+            if not (0.0 <= motor_kp <= self.MIT_KP_MAX):
+                raise ValueError(f"{motor} kp must be in [0, {self.MIT_KP_MAX}]; got {motor_kp}")
+            if not (-self.MIT_KD_MAX <= motor_kd <= self.MIT_KD_MAX):
+                raise ValueError(
+                    f"{motor} kd must be in [-{self.MIT_KD_MAX}, {self.MIT_KD_MAX}]; got {motor_kd}"
+                )
+            gains[motor] = (motor_kp, motor_kd)
+
+        self.piper.ModeCtrl(0x01, MOVE_M, self.move_speed_rate, 0xAD)
+        for index, motor in enumerate(JOINT_NAMES, start=1):
+            if motor not in goal_pos:
+                continue
+            motor_kp, motor_kd = gains[motor]
+            self.piper.JointMitCtrl(
+                index,
+                self._norm_to_rad(motor, goal_pos[motor]),
+                self._norm_rate_to_rad_s(motor, goal_vel.get(motor, 0.0)),
+                motor_kp,
+                motor_kd,
+                0.0,  # t_ref — 중력 보상은 컨트롤러에 맡긴다
+            )
+        if "gripper" in goal_pos:
+            gripper = self._unnormalize({"gripper": goal_pos["gripper"]})["gripper"]
+            self.piper.GripperCtrl(abs(int(gripper)), 1000, 0x03, 0)
+        return self.get_control()
+
+    def leave_mit_mode(self) -> None:
+        """MIT를 끄고 위치 제어(MOVE J)로 되돌린다. 종료 경로에서 반드시 부를 것 —
+        MIT 상태로 parking()을 부르면 위치 명령이 먹지 않는다."""
+        self.piper.ModeCtrl(0x01, MOVE_J, self.move_speed_rate, 0x00)
 
     # ---- Normalization ----
 

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """piper_infer_gui.py — 정책 추론을 실시간으로 보면서 smoothing을 조절하는 전용 GUI.
 
+제어 루프 자체는 여기 없다 — piper_infer_runner.InferenceRunner에 있고, 이 파일은
+그 위에 붙는 화면일 뿐이다. teleop_ui의 Infer 프리셋과 CLI도 같은 runner를 쓰므로
+어느 경로로 돌리든 smoothing과 안전 게이트가 동일하게 적용된다.
+
 기존 도구들과의 관계:
   piper_infer_preview.py         전체 episode를 한 번에 추론하고 끝나면 RViz 재생.
                                   실행 중 개입 불가, smoothing 없음.
@@ -10,6 +14,10 @@
   이 파일                        추론을 돌리면서 RViz로 궤적을 보고, smoothing
                                   파라미터를 실행 중에 바꾸고, 큰 빨간 버튼으로
                                   즉시 멈춘다.
+
+모드(시연용/증강용)는 프리셋일 뿐이다 — 고르면 아래 값들이 세팅되지만 전부 화면에
+그대로 보이고 개별로 덮어쓸 수 있다. 증강용을 고르면 롤아웃이 LeRobotDataset으로
+기록되고 끝날 때 성공/실패를 묻는다.
 
 기본값은 안전하다: source=dataset(로봇 미연결), APPLY_TO_ROBOT 없음. 실물 실행은
 Robot 탭에서 source=robot + "실물 전송" 체크 + 확인 문구 입력을 모두 해야 켜진다.
@@ -33,11 +41,10 @@ import os
 import pathlib
 import queue
 import sys
-import threading
 import time
 import tkinter as tk
 from dataclasses import asdict
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import numpy as np
 
@@ -45,315 +52,19 @@ SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from action_smoothing import SmoothingConfig, SmoothingPipeline, smoothness_metrics  # noqa: E402
+from action_smoothing import SmoothingConfig, smoothness_metrics  # noqa: E402
+from piper_infer_runner import (  # noqa: E402
+    DEFAULT_ENV_FILE,
+    MODES,
+    MOTOR_NAMES,
+    REAL_ROBOT_CONFIRM,
+    Event,
+    InferenceRunner,
+    RunSettings,
+    mode_preset,
+)
 
-MOTOR_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"]
-REAL_ROBOT_CONFIRM = "I_UNDERSTAND_REAL_ROBOT"
-DEFAULT_ENV_FILE = REPO_ROOT / "configs" / "recording.env"
 GEOMETRY_KEY = "infer_gui"
-
-
-# ═══════════════════════════════════════════════════════════════════
-# worker가 GUI로 보내는 이벤트
-# ═══════════════════════════════════════════════════════════════════
-class Event:
-    LOG = "log"
-    STATUS = "status"
-    STEP = "step"
-    FINISHED = "finished"
-
-
-# ═══════════════════════════════════════════════════════════════════
-# RViz publisher — piper_infer_preview.run_rviz와 같은 변환/토픽을 쓴다.
-# ═══════════════════════════════════════════════════════════════════
-class RvizPublisher:
-    def __init__(self, topic: str = "/joint_states") -> None:
-        import rclpy
-        from rclpy.node import Node
-        from sensor_msgs.msg import JointState
-
-        from piper_infer_preview import unnormalize_to_physical
-
-        self._rclpy = rclpy
-        self._JointState = JointState
-        self._unnormalize = unnormalize_to_physical
-        if not rclpy.ok():
-            rclpy.init()
-        self._node = Node("piper_infer_gui")
-        self._publisher = self._node.create_publisher(JointState, topic, 10)
-        self.topic = topic
-
-    def publish(self, action: np.ndarray) -> None:
-        message = self._JointState()
-        message.header.stamp = self._node.get_clock().now().to_msg()
-        message.name = MOTOR_NAMES
-        message.position = [
-            self._unnormalize(name, float(value))
-            for name, value in zip(MOTOR_NAMES, action)
-        ]
-        self._publisher.publish(message)
-        self._rclpy.spin_once(self._node, timeout_sec=0.0)
-
-    def close(self) -> None:
-        try:
-            self._node.destroy_node()
-            if self._rclpy.ok():
-                self._rclpy.shutdown()
-        except Exception:
-            pass
-
-
-# ═══════════════════════════════════════════════════════════════════
-# 추론 worker — GUI 스레드를 절대 건드리지 않고 큐로만 통신한다.
-# ═══════════════════════════════════════════════════════════════════
-class InferenceWorker(threading.Thread):
-    def __init__(self, settings: dict, events: "queue.Queue[tuple[str, object]]") -> None:
-        super().__init__(daemon=True)
-        self.settings = settings
-        self.events = events
-
-        self.stop_event = threading.Event()
-        self.estop_event = threading.Event()
-        self.pause_event = threading.Event()
-        # GUI가 실행 중에 바꿀 수 있는 값들 — lock으로 감싼다.
-        self._config_lock = threading.Lock()
-        self._pending_smoothing: SmoothingConfig | None = None
-
-        self.trajectory: list[np.ndarray] = []
-        self.raw_trajectory: list[np.ndarray] = []
-
-    # ── GUI 쪽에서 호출 ──────────────────────────────────────────
-    def apply_smoothing(self, config: SmoothingConfig) -> None:
-        with self._config_lock:
-            self._pending_smoothing = config
-
-    def emergency_stop(self) -> None:
-        self.estop_event.set()
-        self.stop_event.set()
-        self.pause_event.clear()
-
-    # ── 내부 ─────────────────────────────────────────────────────
-    def _log(self, message: str) -> None:
-        self.events.put((Event.LOG, message))
-
-    def _take_pending_smoothing(self) -> SmoothingConfig | None:
-        with self._config_lock:
-            pending, self._pending_smoothing = self._pending_smoothing, None
-        return pending
-
-    def run(self) -> None:  # noqa: C901 — 순차적 셋업이라 나누면 오히려 읽기 나쁨
-        settings = self.settings
-        robot = None
-        rviz = None
-        status = "finished"
-        try:
-            import torch  # noqa: F401  (정책 로딩 전에 import 비용을 여기서 치른다)
-
-            from lerobot.datasets.lerobot_dataset import LeRobotDataset
-            from lerobot.utils.utils import get_safe_torch_device
-
-            from piper_human_approved_inference import (
-                preprocess_live_camera_observation,
-                state_from_raw_observation,
-                validate_live_camera_output_size,
-            )
-            from piper_offline_chunk_rollout import (
-                load_policy,
-                make_raw_observation,
-                predict_chunk,
-            )
-
-            dataset_root = pathlib.Path(settings["dataset_root"]).expanduser().resolve()
-            self._log(f"[LOAD] dataset={dataset_root} (episode {settings['episode']})")
-            dataset = LeRobotDataset(
-                repo_id=f"local/{dataset_root.name}",
-                root=dataset_root,
-                episodes=[settings["episode"]],
-                video_backend="pyav",
-            )
-            camera_keys = list(dataset.meta.camera_keys)
-            self._log(f"[LOAD] {dataset.num_frames} frames, cameras={camera_keys}")
-
-            self._log(f"[LOAD] policy={settings['policy_path']} device={settings['device']}")
-            config, policy, preprocessor, postprocessor = load_policy(
-                settings["policy_path"], dataset.meta, settings["device"]
-            )
-            device = get_safe_torch_device(policy.config.device)
-            policy.reset()
-            chunk_size = int(getattr(config, "chunk_size", 0)) or settings["horizon"]
-            horizon = min(settings["horizon"], chunk_size)
-            self._log(f"[LOAD] policy chunk_size={chunk_size}, using horizon={horizon}")
-
-            if settings["source"] == "robot":
-                validate_live_camera_output_size(
-                    dataset.features, camera_keys, settings["camera_output_size"]
-                )
-                from piper_human_approved_inference import build_robot_from_env
-
-                self._log("[CONNECT] Piper follower + camera 연결 중…")
-                robot_args = argparse.Namespace(
-                    max_relative_target=settings["smoothing"].rate_limit
-                )
-                robot = build_robot_from_env(robot_args)
-                robot.connect()
-                self._log("[CONNECT] 연결 완료")
-
-            if settings["rviz"]:
-                try:
-                    rviz = RvizPublisher(settings["joint_state_topic"])
-                    self._log(f"[RVIZ] publishing to {rviz.topic}")
-                except Exception as error:
-                    self._log(f"[WARN] RViz publisher를 만들 수 없음 — 비활성화: {error}")
-                    rviz = None
-
-            task = settings["task"] or str(dataset[0].get("task", ""))
-            self._log(f"[TASK] {task!r}")
-
-            pipeline = SmoothingPipeline(settings["smoothing"])
-            self._log(f"[SMOOTH] {settings['smoothing'].summary()}")
-
-            fps = settings["fps"]
-            period = 1.0 / fps
-            infer_every = max(1, settings["infer_every"])
-            max_steps = settings["max_steps"]
-            cursor = 0
-            step = 0
-            first_state = None
-
-            while not self.stop_event.is_set():
-                if max_steps and step >= max_steps:
-                    self._log(f"[STOP] max_steps({max_steps}) 도달")
-                    break
-                if self.pause_event.is_set():
-                    time.sleep(0.05)
-                    continue
-
-                pending = self._take_pending_smoothing()
-                if pending is not None:
-                    pipeline.update_config(pending, state=first_state)
-                    self._log(f"[SMOOTH] 실행 중 변경 → {pending.summary()}")
-
-                loop_started = time.perf_counter()
-
-                # ── observation ────────────────────────────────
-                if settings["source"] == "dataset":
-                    if cursor >= dataset.num_frames:
-                        if not settings["loop_dataset"]:
-                            self._log("[STOP] dataset episode 끝")
-                            break
-                        cursor = 0
-                    raw_observation = make_raw_observation(dataset, dataset[cursor])
-                    observation_frame = cursor
-                else:
-                    raw_observation = preprocess_live_camera_observation(
-                        robot.get_observation(),
-                        camera_keys,
-                        settings["crops"],
-                        settings["camera_output_size"],
-                    )
-                    observation_frame = step
-                measured_state = state_from_raw_observation(raw_observation, dataset.features)
-                if first_state is None:
-                    first_state = measured_state.copy()
-                    pipeline.reset(first_state)
-
-                # ── inference ──────────────────────────────────
-                infer_seconds = 0.0
-                if step % infer_every == 0 or pipeline.pending_steps == 0:
-                    infer_started = time.perf_counter()
-                    chunk = predict_chunk(
-                        raw_observation=raw_observation,
-                        dataset_features=dataset.features,
-                        policy=policy,
-                        preprocessor=preprocessor,
-                        postprocessor=postprocessor,
-                        device=device,
-                        task=task,
-                    ).numpy().astype(np.float32, copy=False)[:horizon]
-                    infer_seconds = time.perf_counter() - infer_started
-                    if not np.isfinite(chunk).all():
-                        self._log("[ERROR] 정책이 NaN/Inf를 출력 — 중단합니다")
-                        status = "error"
-                        break
-                    self.raw_trajectory.append(chunk[0].copy())
-                    pipeline.add_chunk(chunk)
-
-                votes = pipeline.votes_for_next
-                action = pipeline.next_action()
-                self.trajectory.append(action.copy())
-
-                # ── 출력 ───────────────────────────────────────
-                if self.estop_event.is_set():
-                    break
-                if rviz is not None:
-                    rviz.publish(action)
-                safety_tripped = False
-                if robot is not None and settings["apply_to_robot"]:
-                    robot.send_action(
-                        {f"{name}.pos": float(value) for name, value in zip(MOTOR_NAMES, action)}
-                    )
-                    safety_tripped = bool(robot.safety_tripped)
-
-                self.events.put(
-                    (
-                        Event.STEP,
-                        {
-                            "step": step,
-                            "observation_frame": observation_frame,
-                            "action": action.copy(),
-                            "measured": measured_state.copy(),
-                            "votes": votes,
-                            "pending": pipeline.pending_steps,
-                            "infer_ms": infer_seconds * 1000.0,
-                            "rate_clamp": pipeline.last_rate_adjustment,
-                        },
-                    )
-                )
-
-                if safety_tripped:
-                    self._log("[SAFETY TRIP] effort 한계 초과 — 명령을 중단하고 parking합니다")
-                    status = "safety_tripped"
-                    break
-
-                cursor += 1
-                step += 1
-
-                elapsed = time.perf_counter() - loop_started
-                overrun = elapsed - period
-                if overrun > 0:
-                    if step % 30 == 0:
-                        self._log(
-                            f"[TIMING] 루프가 {overrun * 1000:.0f}ms 늦음 "
-                            f"— fps를 낮추거나 infer_every를 키우세요"
-                        )
-                else:
-                    # 남은 시간을 잘게 나눠 자면서 E-stop 반응성을 유지한다.
-                    deadline = loop_started + period
-                    while time.perf_counter() < deadline and not self.stop_event.is_set():
-                        time.sleep(min(0.005, deadline - time.perf_counter()))
-
-            if self.estop_event.is_set():
-                status = "estop"
-                self._log("[E-STOP] 명령 전송을 즉시 중단했습니다")
-
-        except Exception as error:  # worker 예외는 GUI에 그대로 보여준다
-            status = "error"
-            import traceback
-
-            self._log(f"[ERROR] {type(error).__name__}: {error}")
-            self._log(traceback.format_exc())
-        finally:
-            if robot is not None:
-                try:
-                    if getattr(robot, "is_connected", False):
-                        park = self.settings["park_on_exit"] and not robot.safety_tripped
-                        self._log(f"[DISCONNECT] park={park}")
-                        robot.disconnect(park=park)
-                except Exception as error:
-                    self._log(f"[WARN] disconnect 실패: {error}")
-            if rviz is not None:
-                rviz.close()
-            self.events.put((Event.FINISHED, status))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -368,7 +79,7 @@ class InferGui(tk.Tk):
         self.title("Piper Inference — smoothing / RViz / E-STOP")
         self.env = env
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
-        self.worker: InferenceWorker | None = None
+        self.worker: InferenceRunner | None = None
         self.history: list[np.ndarray] = []
         self.step_count = 0
 
@@ -400,19 +111,34 @@ class InferGui(tk.Tk):
         self.var_task = tk.StringVar(value=env.get("HUMAN_APPROVED_TASK", ""))
         self.var_device = tk.StringVar(value=env.get("POLICY_DEVICE", "cuda"))
         self.var_source = tk.StringVar(value="dataset")
-        # 녹화 FPS(보통 30)와 분리한다. 이 머신의 SmolVLA 추론이 1회 ~150ms라
-        # 30을 쓰면 매 루프가 밀려서 제어 주기가 들쭉날쭉해지고, 그 자체가 jerk가 된다.
-        # 실측(30k 체크포인트, 40스텝): fps=8은 유지 불가(실제 6.65Hz, 주기 125→150ms),
-        # fps=6은 5.99Hz에 지터 표준편차 7.5ms로 안정. 그래서 기본값을 6으로 둔다.
-        self.var_fps = tk.DoubleVar(value=float(env.get("INFER_FPS", "6")))
+        # 명령 주파수는 학습 데이터 fps(보통 30)와 맞춘다. 낮추면 정책이 예측한
+        # 동작이 그 비율만큼 슬로모션이 되고, 낮은 주파수 자체가 "움직였다 멈췄다"를
+        # 반복해 물리적으로 끊겨 보인다 — 실물에서 확인된 증상이다.
+        #
+        # 예전 기본값은 6이었다. "추론이 1회 ~115ms라 6Hz가 한계"라는 판단이었는데
+        # 전제가 틀렸다: chunk 하나가 이미 chunk_size(=50)스텝 분량을 담고 있어
+        # 매 스텝 추론할 필요가 없다. infer_every로 추론 빈도만 낮추면 명령은 계속
+        # 30Hz로 쏠 수 있고, 겹치는 chunk가 50/5=10개라 ensemble도 유지된다.
+        self.var_fps = tk.DoubleVar(value=float(env.get("INFER_FPS", "30")))
         self.var_horizon = tk.IntVar(value=50)
-        self.var_infer_every = tk.IntVar(value=1)
+        self.var_infer_every = tk.IntVar(value=int(env.get("INFER_EVERY", "5")))
         self.var_max_steps = tk.IntVar(value=0)
         self.var_loop_dataset = tk.BooleanVar(value=False)
 
+        # 모드는 프리셋일 뿐이다 — 고르면 아래 var들이 세팅되지만 전부 화면에
+        # 그대로 보이고 따로 바꿀 수 있다. 논문에 조건을 명시해야 하므로 값을
+        # 모드 뒤에 숨기지 않는다.
+        default_mode = env.get("INFER_MODE", "demo")
+        self.var_mode = tk.StringVar(value=default_mode if default_mode in MODES else "demo")
+        preset = mode_preset(self.var_mode.get())
+        self.var_record = tk.BooleanVar(value=preset.record_dataset)
+        self.var_record_raw = tk.BooleanVar(value=preset.record_raw_frames)
+        self.var_prompt_outcome = tk.BooleanVar(value=preset.prompt_outcome)
+        self.var_record_root = tk.StringVar(value="")
+
         self.var_ensemble = tk.BooleanVar(value=True)
         self.var_m = tk.DoubleVar(value=0.01)
-        self.var_alpha = tk.DoubleVar(value=1.0)
+        self.var_alpha = tk.DoubleVar(value=0.2)
         self.var_rate_limit = tk.DoubleVar(value=float(env.get("MAX_RELATIVE_TARGET", "5.0")))
         self.var_rate_enabled = tk.BooleanVar(value=True)
 
@@ -444,6 +170,7 @@ class InferGui(tk.Tk):
 
         left = ttk.Frame(body)
         left.pack(side="left", fill="y")
+        self._build_mode_panel(left)
         self._build_setup_panel(left)
         self._build_smoothing_panel(left)
         self._build_robot_panel(left)
@@ -483,6 +210,73 @@ class InferGui(tk.Tk):
         ttk.Label(bar, textvariable=self.var_status, font=("TkDefaultFont", 10, "bold")).pack(
             side="right", padx=12
         )
+
+    def _build_mode_panel(self, parent: ttk.Frame) -> None:
+        """모드 프리셋 + 기록 설정.
+
+        모드를 고르면 아래 체크박스들이 프리셋 값으로 바뀌지만, 그 뒤에 개별로
+        고쳐도 된다. 값을 숨기지 않는 게 요점이다 — 논문에 실행 조건을 그대로
+        옮겨 적어야 하기 때문.
+        """
+        frame = ttk.LabelFrame(parent, text="0. 모드", padding=8)
+        frame.pack(fill="x", pady=(0, 6))
+
+        row = ttk.Frame(frame)
+        row.pack(fill="x")
+        for preset in MODES.values():
+            ttk.Radiobutton(
+                row,
+                text=f"{preset.label} ({preset.name})",
+                value=preset.name,
+                variable=self.var_mode,
+                command=self._on_mode_changed,
+            ).pack(side="left", padx=(0, 12))
+
+        self.var_mode_hint = tk.StringVar()
+        ttk.Label(frame, textvariable=self.var_mode_hint, foreground="#555", wraplength=380).pack(
+            fill="x", pady=(4, 6)
+        )
+
+        ttk.Checkbutton(
+            frame, text="롤아웃을 LeRobotDataset으로 기록", variable=self.var_record
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            frame,
+            text="크롭 전 원본 프레임으로 저장 (학습 재사용용)",
+            variable=self.var_record_raw,
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            frame, text="끝나면 성공/실패 묻기", variable=self.var_prompt_outcome
+        ).pack(anchor="w")
+
+        path_row = ttk.Frame(frame)
+        path_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(path_row, text="기록 위치").pack(side="left")
+        ttk.Entry(path_row, textvariable=self.var_record_root, width=32).pack(
+            side="left", fill="x", expand=True, padx=4
+        )
+        ttk.Button(
+            path_row, text="…", width=3,
+            command=lambda: self._browse(self.var_record_root, True),
+        ).pack(side="left")
+        ttk.Label(
+            frame, text="(비워두면 records/rollout/ 아래에 자동 생성)", foreground="#777"
+        ).pack(anchor="w")
+
+        self._on_mode_changed()
+
+    def _on_mode_changed(self) -> None:
+        preset = mode_preset(self.var_mode.get())
+        self.var_record.set(preset.record_dataset)
+        self.var_record_raw.set(preset.record_raw_frames)
+        self.var_prompt_outcome.set(preset.prompt_outcome)
+        self.var_ensemble.set(preset.smoothing.temporal_ensemble)
+        self.var_m.set(preset.smoothing.ensemble_m)
+        self.var_alpha.set(preset.smoothing.ema_alpha)
+        self.var_rate_enabled.set(preset.smoothing.rate_limit is not None)
+        if preset.smoothing.rate_limit is not None:
+            self.var_rate_limit.set(preset.smoothing.rate_limit)
+        self.var_mode_hint.set(preset.description)
 
     def _build_setup_panel(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="1. 정책 / 관찰", padding=8)
@@ -691,7 +485,7 @@ class InferGui(tk.Tk):
 
         return parse_camera_crop(text)
 
-    def _collect_settings(self) -> dict:
+    def _collect_settings(self) -> RunSettings:
         policy_path = self.var_policy.get().strip()
         dataset_root = pathlib.Path(self.var_dataset.get().strip()).expanduser()
         if not policy_path:
@@ -724,29 +518,62 @@ class InferGui(tk.Tk):
                     f"(현재 {overload_mode!r})."
                 )
 
-        return {
-            "policy_path": policy_path,
-            "dataset_root": str(dataset_root),
-            "episode": int(self.var_episode.get()),
-            "task": self.var_task.get().strip(),
-            "device": self.var_device.get().strip() or "cuda",
-            "source": source,
-            "fps": float(self.var_fps.get()),
-            "horizon": int(self.var_horizon.get()),
-            "infer_every": int(self.var_infer_every.get()),
-            "max_steps": max(0, int(self.var_max_steps.get())),
-            "loop_dataset": self.var_loop_dataset.get(),
-            "smoothing": self._smoothing_config(),
-            "rviz": self.var_rviz.get(),
-            "joint_state_topic": self.var_topic.get().strip() or "/joint_states",
-            "apply_to_robot": apply_to_robot,
-            "park_on_exit": self.var_park.get(),
-            "camera_output_size": int(self.var_camera_size.get()),
-            "crops": {
+        record_root = self.var_record_root.get().strip()
+        # 모드는 프리셋일 뿐 — 화면의 값이 항상 이긴다. from_mode에 전부 넘겨서
+        # 프리셋 기본값을 덮어쓴다.
+        return RunSettings.from_mode(
+            self.var_mode.get(),
+            policy_path=policy_path,
+            dataset_root=dataset_root,
+            episode=int(self.var_episode.get()),
+            task=self.var_task.get().strip(),
+            device=self.var_device.get().strip() or "cuda",
+            source=source,
+            fps=float(self.var_fps.get()),
+            horizon=int(self.var_horizon.get()),
+            infer_every=int(self.var_infer_every.get()),
+            max_steps=max(0, int(self.var_max_steps.get())),
+            loop_dataset=self.var_loop_dataset.get(),
+            smoothing=self._smoothing_config(),
+            rviz=self.var_rviz.get(),
+            joint_state_topic=self.var_topic.get().strip() or "/joint_states",
+            apply_to_robot=apply_to_robot,
+            real_robot_confirm=self.var_confirm.get().strip(),
+            park_on_exit=self.var_park.get(),
+            camera_output_size=int(self.var_camera_size.get()),
+            crops={
                 "top": self._parse_crop(self.var_top_crop.get()),
                 "wrist": self._parse_crop(self.var_wrist_crop.get()),
             },
-        }
+            record_dataset=self.var_record.get(),
+            record_raw_frames=self.var_record_raw.get(),
+            prompt_outcome=self.var_prompt_outcome.get(),
+            record_root=pathlib.Path(record_root).expanduser() if record_root else None,
+        )
+
+    def _ask_outcome(self) -> tuple[str, str]:
+        """롤아웃이 끝나면 성공/실패를 묻는다. runner 스레드에서 호출되므로
+        Tk 위젯을 직접 만들 수 없다 — 메인 스레드에 넘기고 결과를 기다린다."""
+        result: "queue.Queue[tuple[str, str]]" = queue.Queue(maxsize=1)
+
+        def ask() -> None:
+            answer = messagebox.askyesnocancel(
+                "롤아웃 결과",
+                "이 롤아웃을 성공으로 기록할까요?\n\n"
+                "예 = 성공(success)\n아니오 = 실패(failure)\n취소 = 폐기(저장 안 함)",
+            )
+            if answer is None:
+                result.put(("discard", ""))
+                return
+            outcome = "success" if answer else "failure"
+            note = simpledialog.askstring("메모", "메모 (없으면 비워두세요):", parent=self) or ""
+            result.put((outcome, note.strip()))
+
+        self.after(0, ask)
+        try:
+            return result.get(timeout=300)
+        except queue.Empty:
+            return "unlabeled", ""
 
     # ── 액션 ─────────────────────────────────────────────────────
     def _start(self) -> None:
@@ -758,7 +585,7 @@ class InferGui(tk.Tk):
             messagebox.showerror("설정 오류", str(error))
             return
 
-        if settings["apply_to_robot"] and not messagebox.askyesno(
+        if settings.apply_to_robot and not messagebox.askyesno(
             "실물 로봇 실행",
             "실제 Piper에 명령을 전송합니다.\n"
             "주변에 사람이 없고 비상 정지가 가능한지 확인했습니까?",
@@ -769,11 +596,16 @@ class InferGui(tk.Tk):
         self.history.clear()
         self.step_count = 0
         self.text_log.delete("1.0", "end")
-        self._log(f"[START] {settings['smoothing'].summary()}")
-        if settings["smoothing"].temporal_ensemble and settings["infer_every"] != 1:
+        self._log(f"[START] {settings.describe()}")
+        if settings.smoothing.temporal_ensemble and settings.infer_every != 1:
             self._log("[WARN] infer_every != 1 — temporal ensemble 효과가 거의 없습니다")
+        if settings.record_dataset and settings.source == "dataset":
+            self._log(
+                "[WARN] source=dataset을 기록하면 원본 dataset을 정책 출력으로 되쓰는 셈입니다 "
+                "— 학습용 증강이 목적이면 source=robot으로 도세요"
+            )
 
-        self.worker = InferenceWorker(settings, self.events)
+        self.worker = InferenceRunner(settings, self.events, outcome_prompt=self._ask_outcome)
         self.worker.start()
         self._set_running(True)
         self.var_status.set("실행 중")
@@ -921,13 +753,14 @@ class InferGui(tk.Tk):
         if worker.trajectory:
             self._save_run(worker, status)
 
-    def _save_run(self, worker: InferenceWorker, status: str) -> None:
+    def _save_run(self, worker: InferenceRunner, status: str) -> None:
+        settings = worker.settings
         trajectory = np.stack(worker.trajectory)
         output_dir = REPO_ROOT / "outputs" / "infer_gui"
         output_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         path = output_dir / f"run_{stamp}.npz"
-        metrics = smoothness_metrics(trajectory, fps=worker.settings["fps"])
+        metrics = smoothness_metrics(trajectory, fps=settings.fps)
         np.savez_compressed(
             path,
             smoothed_actions=trajectory,
@@ -935,13 +768,17 @@ class InferGui(tk.Tk):
                 np.stack(worker.raw_trajectory) if worker.raw_trajectory else np.zeros((0, 7))
             ),
         )
+        measured = worker.measured_fps()
         summary = {
             "status": status,
             "steps": int(len(trajectory)),
-            "smoothing": asdict(worker.settings["smoothing"]),
-            "fps": worker.settings["fps"],
-            "infer_every": worker.settings["infer_every"],
-            "policy_path": worker.settings["policy_path"],
+            "mode": settings.mode,
+            "smoothing": asdict(settings.smoothing),
+            "fps": settings.fps,
+            "measured_fps": round(measured, 3) if measured else None,
+            "infer_every": settings.infer_every,
+            "policy_path": settings.policy_path,
+            "recorded_dataset": str(worker.recorded_path) if worker.recorded_path else None,
             "metrics": metrics,
         }
         (output_dir / f"run_{stamp}.json").write_text(
@@ -952,6 +789,8 @@ class InferGui(tk.Tk):
             f"[METRICS] TV={metrics['total_variation']:.4f} "
             f"max_step={metrics['max_step']:.3f} rms_jerk={metrics['rms_jerk']:.1f}"
         )
+        if measured:
+            self._log(f"[METRICS] 실측 제어 주기 {measured:.2f}Hz (설정 {settings.fps:g})")
 
     def _log(self, message: str) -> None:
         self.text_log.insert("end", message.rstrip() + "\n")

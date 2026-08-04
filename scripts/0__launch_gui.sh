@@ -17,36 +17,7 @@ ROS_SETUP_PATH="${ROS_SETUP_PATH:-/opt/ros/${ROS_DISTRO_NAME}/setup.bash}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-ugrp}"
 
 echo "=== [0/3] conda 가상환경 활성화 (${CONDA_ENV_NAME}) ==="
-if [[ "${CONDA_DEFAULT_ENV:-}" == "${CONDA_ENV_NAME}" ]]; then
-  echo "[INFO] 이미 ${CONDA_ENV_NAME} 활성화됨 — 건너뜀"
-else
-  # Nautilus "Run in Terminal" 등 비로그인 셸에서는 ~/.bashrc의 conda init이
-  # 실행되지 않아 PATH에 conda가 없을 수 있음 — PATH 대신 흔한 설치 위치를 직접 탐색
-  conda_base=""
-  for candidate in "${CONDA_EXE:+$(dirname "$(dirname "${CONDA_EXE}")")}" \
-                   "${HOME}/miniconda3" "${HOME}/anaconda3" "${HOME}/miniforge3" \
-                   "/opt/miniconda3" "/opt/anaconda3"; do
-    if [[ -n "${candidate}" && -f "${candidate}/etc/profile.d/conda.sh" ]]; then
-      conda_base="${candidate}"
-      break
-    fi
-  done
-
-  if [[ -z "${conda_base}" ]]; then
-    echo "[ERROR] conda 설치 위치를 찾을 수 없음 — 수동으로 '${CONDA_ENV_NAME}' 환경을 활성화한 뒤 재실행하세요." >&2
-    exit 1
-  fi
-
-  # conda.sh/activate가 내부적으로 미설정 변수를 참조해 set -u와 충돌하므로 잠시 해제
-  set +u
-  # shellcheck disable=SC1091
-  source "${conda_base}/etc/profile.d/conda.sh"
-  conda activate "${CONDA_ENV_NAME}"
-  set -u
-fi
-
-echo "[OK] conda env  = ${CONDA_DEFAULT_ENV:-<none>}"
-echo "[OK] python     = $(command -v python)"
+activate_conda_env
 echo "[OK] python ver = $(python --version 2>&1)"
 
 echo "=== [1/4] CAN 인터페이스 초기화 ==="

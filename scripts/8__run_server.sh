@@ -7,6 +7,10 @@ source "${SCRIPT_DIR}/lib/run_common.sh"
 
 load_recording_env
 
+# lerobot_robot_piper는 conda env에만 설치돼 있다 — base에서 실행하면
+# ModuleNotFoundError로 죽는다.
+activate_conda_env
+
 if [[ "${DRY_RUN:-false}" != "true" ]] && ! python -c "import grpc" >/dev/null 2>&1; then
   echo "[ERROR] grpc is not installed in this environment." >&2
   echo "[HINT] Install LeRobot async dependencies, for example: python -m pip install 'grpcio>=1.0' grpcio-tools" >&2
