@@ -1,0 +1,495 @@
+{
+  "definition": "recording frame 0 to first firmly-grasped gripper plateau after the initial closing ramp; fallback is first closing frame",
+  "eef_source": "recorded action (follower target), not observation.state",
+  "firm_grasp_signal": {
+    "search_window_after_first_close_frames": 180,
+    "minimum_action_close": 15.0,
+    "command_and_state_settled_step": 0.31,
+    "hold_frames": 8
+  },
+  "baseline": "time-normalized mean EEF trajectory over all included recordings",
+  "resampled_points_per_episode": 160,
+  "topview_background_episode": "erase_the_triangle_0727-115349",
+  "episodes": [
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0726-162803",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 171,
+      "firm_grasp_detected": true,
+      "approach_frames": 172
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0726-163254",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 370,
+      "firm_grasp_detected": true,
+      "approach_frames": 371
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0726-163611",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 245,
+      "firm_grasp_detected": true,
+      "approach_frames": 246
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0726-163930",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 226,
+      "firm_grasp_detected": true,
+      "approach_frames": 227
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0726-164049",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 231,
+      "firm_grasp_detected": true,
+      "approach_frames": 232
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0726-164200",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 208,
+      "firm_grasp_detected": true,
+      "approach_frames": 209
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0726-164325",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 253,
+      "firm_grasp_detected": true,
+      "approach_frames": 254
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0726-164510",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 245,
+      "firm_grasp_detected": true,
+      "approach_frames": 246
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0726-165719",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 264,
+      "firm_grasp_detected": true,
+      "approach_frames": 265
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0726-165848",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 285,
+      "firm_grasp_detected": true,
+      "approach_frames": 286
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0726-170001",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 219,
+      "firm_grasp_detected": true,
+      "approach_frames": 220
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0726-170124",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 221,
+      "firm_grasp_detected": true,
+      "approach_frames": 222
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0727-110917",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 251,
+      "firm_grasp_detected": true,
+      "approach_frames": 252
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0727-111036",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 262,
+      "firm_grasp_detected": true,
+      "approach_frames": 263
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0727-111212",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 253,
+      "firm_grasp_detected": true,
+      "approach_frames": 254
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0727-111340",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 270,
+      "firm_grasp_detected": true,
+      "approach_frames": 271
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0727-111813",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 409,
+      "firm_grasp_detected": true,
+      "approach_frames": 410
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0727-111943",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 304,
+      "firm_grasp_detected": true,
+      "approach_frames": 305
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0727-112133",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 327,
+      "firm_grasp_detected": true,
+      "approach_frames": 328
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_circle/erase_the_circle_0727-112529",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 344,
+      "firm_grasp_detected": true,
+      "approach_frames": 345
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-120251",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 277,
+      "firm_grasp_detected": true,
+      "approach_frames": 278
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-120407",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 248,
+      "firm_grasp_detected": true,
+      "approach_frames": 249
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-120609",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 251,
+      "firm_grasp_detected": true,
+      "approach_frames": 252
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-120733",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 238,
+      "firm_grasp_detected": true,
+      "approach_frames": 239
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-121003",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 232,
+      "firm_grasp_detected": true,
+      "approach_frames": 233
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-121135",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 247,
+      "firm_grasp_detected": true,
+      "approach_frames": 248
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-121305",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 292,
+      "firm_grasp_detected": true,
+      "approach_frames": 293
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-121435",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 288,
+      "firm_grasp_detected": true,
+      "approach_frames": 289
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-121601",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 251,
+      "firm_grasp_detected": true,
+      "approach_frames": 252
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-121732",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 257,
+      "firm_grasp_detected": true,
+      "approach_frames": 258
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-121900",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 250,
+      "firm_grasp_detected": true,
+      "approach_frames": 251
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-122053",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 258,
+      "firm_grasp_detected": true,
+      "approach_frames": 259
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-122347",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 233,
+      "firm_grasp_detected": true,
+      "approach_frames": 234
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-122516",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 254,
+      "firm_grasp_detected": true,
+      "approach_frames": 255
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-125938",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 252,
+      "firm_grasp_detected": true,
+      "approach_frames": 253
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-130104",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 231,
+      "firm_grasp_detected": true,
+      "approach_frames": 232
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-130220",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 250,
+      "firm_grasp_detected": true,
+      "approach_frames": 251
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-130339",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 234,
+      "firm_grasp_detected": true,
+      "approach_frames": 235
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-130455",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 214,
+      "firm_grasp_detected": true,
+      "approach_frames": 215
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_rectangle/erase_the_rectangle_0727-130630",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 239,
+      "firm_grasp_detected": true,
+      "approach_frames": 240
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-113015",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 192,
+      "firm_grasp_detected": true,
+      "approach_frames": 193
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-113147",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 265,
+      "firm_grasp_detected": true,
+      "approach_frames": 266
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-113311",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 252,
+      "firm_grasp_detected": true,
+      "approach_frames": 253
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-113437",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 275,
+      "firm_grasp_detected": true,
+      "approach_frames": 276
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-113600",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 283,
+      "firm_grasp_detected": true,
+      "approach_frames": 284
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-113710",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 269,
+      "firm_grasp_detected": true,
+      "approach_frames": 270
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-113836",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 282,
+      "firm_grasp_detected": true,
+      "approach_frames": 283
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-113957",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 299,
+      "firm_grasp_detected": true,
+      "approach_frames": 300
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-114215",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 295,
+      "firm_grasp_detected": true,
+      "approach_frames": 296
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-114335",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 251,
+      "firm_grasp_detected": true,
+      "approach_frames": 252
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-114515",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 273,
+      "firm_grasp_detected": true,
+      "approach_frames": 274
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-114643",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 224,
+      "firm_grasp_detected": true,
+      "approach_frames": 225
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-114759",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 289,
+      "firm_grasp_detected": true,
+      "approach_frames": 290
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-115143",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 333,
+      "firm_grasp_detected": true,
+      "approach_frames": 334
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-115349",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 244,
+      "firm_grasp_detected": true,
+      "approach_frames": 245
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-115509",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 231,
+      "firm_grasp_detected": true,
+      "approach_frames": 232
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-115632",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 260,
+      "firm_grasp_detected": true,
+      "approach_frames": 261
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-115747",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 232,
+      "firm_grasp_detected": true,
+      "approach_frames": 233
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-115901",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 268,
+      "firm_grasp_detected": true,
+      "approach_frames": 269
+    },
+    {
+      "episode": "/home/ugrp43/UGRP/lerobot_robot_piper/records/0727/erase_the_triangle/erase_the_triangle_0727-120025",
+      "included": true,
+      "approach_start_frame": 0,
+      "firm_grasp_frame": 260,
+      "firm_grasp_detected": true,
+      "approach_frames": 261
+    }
+  ]
+}
