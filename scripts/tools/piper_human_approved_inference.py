@@ -183,6 +183,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=int(env.get("HUMAN_APPROVED_EPISODE", "0")),
     )
     parser.add_argument("--policy-path", default=policy_path)
+    parser.add_argument(
+        "--policy-discover-packages-path",
+        default=env.get("HUMAN_APPROVED_POLICY_DISCOVER_PACKAGES_PATH") or None,
+        help="HAMLET 등 서드파티 policy 타입을 쓸 때 지정. lerobot-train의 "
+        "--policy.discover_packages_path와 같은 값(예: smolvla_hamlet)을 주면 "
+        "PreTrainedConfig.from_pretrained() 전에 그 패키지를 import해서 등록한다. "
+        "PYTHONPATH에 해당 패키지가 있어야 함",
+    )
     parser.add_argument("--task", default=env.get("HUMAN_APPROVED_TASK") or None)
     parser.add_argument("--device", default=env.get("POLICY_DEVICE", "cuda"))
     parser.add_argument(
@@ -785,6 +793,12 @@ def main() -> int:
     except Exception as error:
         print(f"[ERROR] {error}", file=sys.stderr)
         return 2
+
+    if args.policy_discover_packages_path:
+        import importlib
+
+        importlib.import_module(args.policy_discover_packages_path)
+        print(f"[PLUGIN] imported {args.policy_discover_packages_path!r}")
 
     # 같은 디렉터리의 검증된 offline inference helper만 사용한다.
     sys.path.insert(0, str(SCRIPT_DIR))

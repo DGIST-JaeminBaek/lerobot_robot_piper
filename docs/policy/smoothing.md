@@ -276,6 +276,92 @@ python -m pytest scripts/tools/test_action_smoothing.py scripts/tools/test_infer
 각각 smoothing 수식, runner의 모드/기록 로직, `send_action` EMA를 하드웨어 없이
 검증합니다.
 
+## SmolVLA 논문 Algorithm 1(비동기 추론)과 병합 (2026-08-11)
+
+**출처 정정**: 처음엔 이걸 Physical Intelligence의 별도 "Real-Time Chunking" 논문
+방식이라고 잘못 설명했는데, 실제 SmolVLA 논문(arXiv:2506.01844) PDF를 직접
+열어서 확인한 결과 **SmolVLA 논문 본문 Algorithm 1 "Asynchronous inference
+control-loop"** 그 자체였다 (6-7페이지). 논문이 명시:
+
+> "we ... develop an *asynchronous* (async) inference stack (Algorithm 1),
+> whereby a RobotClient sends an observation $o_t$ to a PolicyServer... we
+> avoid execution lags by triggering chunk prediction while the control loop
+> is still consuming a previously available queue, **aggregating it with the
+> newly incoming queue** whenever available."
+
+Algorithm 1의 6행이 threshold `g`(`|A_t|/n < g`), 11행이 aggregate 연산
+`A_{t+1} ← f(A_t, Ã_{t+1})`이다. lerobot의 `async_inference/robot_client.py`가
+이 Algorithm 1의 레퍼런스 구현이고 — `_ready_to_send_observation()`이 6행,
+`_aggregate_action_queues()`의 `aggregate_fn`이 11행의 `f`에 정확히 대응한다.
+(참고로 `lerobot/policies/rtc/`는 이것과 다른 별개 모듈로, inpainting 기반
+재계획을 하는 진짜 Real-Time Chunking 쪽이다 — 이번에 이식한 대상이 아니다.)
+
+lerobot은 이걸 gRPC 기반 client-server(`robot_client.py`+`policy_server.py`)로
+구현해뒀는데, 우리는 로봇 팔이 붙은 같은 머신에서 한 프로세스로 다 돌리므로
+네트워크 계층을 얹을 이유가 없다 — `piper_infer_runner.py`에는 이미
+`_start_inference_worker`/`_request_inference` 백그라운드 스레드가 있어서
+(추론 대기 중 명령 루프가 안 끊기는) 같은 이득을 프로세스 내부에서 확보하고
+있다. 그래서 gRPC 자체는 가져오지 않았고, Algorithm 1의 알고리즘 핵심(threshold
+`g` 트리거 + aggregate 함수 `f`)만 `action_smoothing.py` / `piper_infer_runner.py`에
+이식했다.
+
+**주의**: 이식 전 우리가 쓰던 `TemporalEnsemble`(exp(-m·i) 전체 평균)은 Algorithm 1의
+`f`가 아니라 **ACT 논문(Zhao et al. 2023)에서 따로 빌려온 것**이다. SmolVLA 논문
+Figure 3 설명에 Zhao et al. (2023)/Chi et al. (2024)이 인용되긴 하지만, 이건
+"g=1 극단이 그 논문들 방식과 비슷하다"는 비교일 뿐 Algorithm 1 자체의 출처가
+아니다 — Algorithm 1 자체는 SmolVLA 논문의 방법이다.
+
+### 1. 적응형 트리거 (`--trigger-mode`) — 기본값이 됨
+
+Algorithm 1 6행(`|A_t|/n < g`)을 이식했다. 남은 큐(`pending_steps`)가 `horizon`
+대비 `chunk_threshold` 이하로 떨어지면 추론을 요청한다.
+
+- `--trigger-mode threshold`(**2026-08-11부로 기본**) `--chunk-threshold 0.3`
+  : 큐 소진 비율 기반 적응형. `chunk_threshold=1-g`이므로 0.3 = 논문 Figure 3가
+  말하는 sweet spot `g=0.7`("Asynchronous inference" 시나리오).
+- `--trigger-mode fixed` : 이전 기본값이었던 `infer_every` 고정 간격 방식.
+  비교 실험이나 되돌릴 때 씀.
+
+### 2. aggregate_fn 레지스트리 (`--aggregate-fn`) — 기본값이 됨
+
+Algorithm 1 11행의 `f(A_t, Ã_{t+1})`을 이식했다. lerobot
+`configs.py::AGGREGATE_FUNCTIONS`(`weighted_average`/`latest_only`/`average`/
+`conservative`, 논문이 `f`의 구체적 형태를 못박지 않아 lerobot 구현이 고른
+후보들)를 그대로 포팅해 `action_smoothing.AGGREGATE_FUNCTIONS`로 추가하고,
+`QueueAggregateEnsemble` 클래스로 `RobotClient._aggregate_action_queues`와
+동일한 pairwise 갱신 방식을 구현했다. `TemporalEnsemble`(ACT 방식)과 인터페이스를
+맞춰서 `SmoothingPipeline`이 둘을 구분 없이 쓴다.
+
+- `--aggregate-fn weighted_average`(**2026-08-11부로 기본**) : Algorithm 1의 `f`.
+- `--aggregate-fn temporal_ensemble` : 이전 기본값이었던 ACT 방식(논문 Algorithm 1이
+  아님). 비교 실험이나 되돌릴 때 씀.
+- `--aggregate-fn latest_only|average|conservative` : lerobot이 제공하는
+  나머지 pairwise 방식들.
+
+**왜 기본값을 바꿨나**: TemporalEnsemble(ACT 방식)은 SmolVLA 논문 Algorithm 1이
+아니라 우리가 ACT에서 임의로 가져다 쓴 방식이었다. 실제로 재현·비교하려는 대상이
+SmolVLA 논문 자체의 async inference 방법이므로, 논문 Algorithm 1이 규정한 방식
+(threshold `g` 트리거 + aggregate 함수 `f`)을 기본 동작으로 맞췄다. 이전 기본값
+경로(TemporalEnsemble)는 `action_smoothing_prev.py` / `piper_infer_runner_prev.py`
+에 그대로 남아있고, `--aggregate-fn temporal_ensemble --trigger-mode fixed`로도
+언제든 재현 가능하다.
+
+### 가져오지 않은 것
+
+- gRPC client-server 분리 (이유 위에서 설명)
+- E-STOP, `I_UNDERSTAND_REAL_ROBOT` 게이트, human-approved 워크플로 — 애초에
+  Algorithm 1과 무관한 우리 쪽 안전장치라 손 안 댐
+- 진짜 Real-Time Chunking(`lerobot/policies/rtc/`, inpainting 기반 재계획) —
+  SmolVLA에 `rtc_config`로 존재하지만 `select_action()`에는 막혀 있고
+  (`assert not self._rtc_enabled()`) `predict_action_chunk()` 전용이라, 우리
+  구조에 넣으려면 별도 검토가 필요함. Algorithm 1(이번에 이식한 것)과는 다른
+  별개 메커니즘.
+
+### 백업
+
+병합 전 원본은 `piper_infer_runner_prev.py` / `action_smoothing_prev.py`로
+남겨뒀다 (git 히스토리에도 있지만 작업 트리에 바로 대조본을 둔 것).
+
 ## 참고: LoRA-SP 저장소에서 확인한 것
 
 [dhkim-furiosa/LoRA-SP](https://github.com/dhkim-furiosa/LoRA-SP)를 읽고 확인한
