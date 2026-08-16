@@ -38,101 +38,18 @@ sys.path.insert(0, str(Path(__file__).parent))
 # erase_check(cv2 의존)와 lerobot은 main()에서 늦게 import한다 —
 # 아래 중재/루프 로직은 순수 파이썬이라 하드웨어·cv2 없이 테스트된다.
 
-JOINTS = [f"joint{i}" for i in range(1, 7)]
-GRIPPER = "gripper"
-ACTION_NAMES = [f"{n}.pos" for n in JOINTS + [GRIPPER]]
-
-
-# ══════════════════════════════════════════════════════════════
-# HIL 개입 — 키보드 토글 + 델타(클러치) 인계
-#
-# 왜 키보드인가: 리더암 움직임으로 개입을 자동 감지하려면 임계값 3개를 실측으로
-#   맞춰야 하고, 진입/이탈 각각에 실패 모드가 있었다(git 히스토리 참고).
-#   명시적 토글은 그 전부를 없앤다. lerobot HIL-SERL도 space 토글을 쓴다.
-#
-# 왜 델타인가 (★ PiPER 고유 제약):
-#   PiperLeader는 **명령을 받을 수 없다**. piper_leader.py connect() 주석:
-#   "Master arm: only sends control frame messages" — EnableArm 대상이 아니고
-#   서보 활성화를 시도하면 타임아웃난다(실제 하드웨어에서 확인됨).
-#   따라서 SO101처럼 "정책 실행 중 리더가 팔로워를 따라가게 두는" 방식이 불가능하다.
-#   개입 시점에 리더와 팔로워는 반드시 어긋나 있다.
-#   → 리더의 **절대 자세**를 보내면 팔로워가 튄다.
-#   → 리더의 **변화량**만 팔로워의 현재 자세에 더한다(클러치/인덱싱).
-#     인계 순간 목표 = 팔로워 현재 자세이므로 점프가 원리적으로 0이다.
-# ══════════════════════════════════════════════════════════════
-class Clutch:
-    """개입 중 리더 변화량을 팔로워에 더해주는 델타 인계기.
-
-    engage() 시점의 리더/팔로워 자세를 기준점으로 잡고,
-        target = follower_at_engage + (leader_now - leader_at_engage)
-    를 보낸다. 인계 첫 스텝의 target이 팔로워 현재 자세와 같으므로 점프가 없다.
-    """
-
-    def __init__(self, gain: float = 1.0):
-        self.gain = gain
-        self._lead0 = None
-        self._foll0 = None
-
-    @property
-    def engaged(self) -> bool:
-        return self._lead0 is not None
-
-    def engage(self, leader_action: dict, follower_obs: dict) -> None:
-        self._lead0 = {k: leader_action[k] for k in ACTION_NAMES if k in leader_action}
-        self._foll0 = {k: follower_obs[k] for k in ACTION_NAMES if k in follower_obs}
-
-    def release(self) -> None:
-        self._lead0 = self._foll0 = None
-
-    def target(self, leader_action: dict) -> dict:
-        if not self.engaged:
-            raise RuntimeError("engage()를 먼저 호출할 것")
-        return {
-            k: self._foll0[k] + self.gain * (leader_action[k] - self._lead0[k])
-            for k in self._foll0
-            if k in leader_action
-        }
-
-
-def deviation(leader_action: dict, follower_obs: dict) -> float:
-    """리더-팔로워 최대 관절 편차. 판정에는 안 쓰고 로깅/경고용으로만 남긴다."""
-    devs = [
-        abs(leader_action[f"{j}.pos"] - follower_obs[f"{j}.pos"])
-        for j in JOINTS
-        if f"{j}.pos" in leader_action and f"{j}.pos" in follower_obs
-    ]
-    return max(devs) if devs else 0.0
-
-
-class KeyToggle:
-    """space = 개입 on/off, q = 시도 중단. pynput 전역 리스너(teleop_ui.py와 같은 의존성).
-
-    테스트에서는 이 클래스 대신 아무 객체나 넣으면 된다 — .active / .abort 두 속성만 본다.
-    """
-
-    def __init__(self):
-        self.active = False
-        self.abort = False
-        self._listener = None
-
-    def start(self):
-        from pynput import keyboard
-
-        def on_press(key):
-            if key == keyboard.Key.space:
-                self.active = not self.active
-                print(f"[HIL] {'개입 ON — 리더암 조작' if self.active else '개입 OFF — 정책 반환'}")
-            elif getattr(key, "char", None) == "q":
-                self.abort = True
-                print("[HIL] 시도 중단 요청")
-
-        self._listener = keyboard.Listener(on_press=on_press)
-        self._listener.start()
-        return self
-
-    def stop(self):
-        if self._listener:
-            self._listener.stop()
+# HIL 개입 로직(클러치/토글)은 hil_clutch.py에 있다 — InferenceRunner와 같은
+# 구현을 공유해야 해서 공용 모듈로 뺐다. 아래 이름들은 기존 호출자·테스트가
+# erase_run에서 그대로 import하고 있어 re-export로 유지한다.
+from hil_clutch import (  # noqa: E402,F401
+    ACTION_NAMES,
+    GRIPPER,
+    JOINTS,
+    Clutch,
+    ClutchMixer,
+    KeyToggle,
+    deviation,
+)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -151,6 +68,7 @@ def run_attempt(robot, policy_fn, park_fn, fps=30, max_steps=940,
     """
     dt = 1.0 / fps
     hil = toggle is not None and leader is not None and clutch is not None
+    mixer = ClutchMixer(toggle, leader, clutch) if hil else None
     log = []
     for step in range(max_steps):
         t0 = time.perf_counter()
@@ -159,16 +77,8 @@ def run_attempt(robot, policy_fn, park_fn, fps=30, max_steps=940,
         intervened = False
         dev = None
 
-        if hil:
-            lead = leader.get_action()
-            if toggle.active:
-                if not clutch.engaged:
-                    clutch.engage(lead, obs)          # 기준점 = 지금 자세 → 점프 0
-                    dev = deviation(lead, obs)        # 참고용 기록
-                action = clutch.target(lead)
-                intervened = True
-            elif clutch.engaged:
-                clutch.release()
+        if mixer is not None:
+            action, intervened, dev = mixer.step(action, obs)
 
         robot.send_action(action)
         entry = {"step": step, "intervention": intervened,
@@ -184,8 +94,8 @@ def run_attempt(robot, policy_fn, park_fn, fps=30, max_steps=940,
         if sleep > 0:
             time.sleep(sleep)
 
-    if hil:
-        clutch.release()
+    if mixer is not None:
+        mixer.release()
     park_fn()  # 정책이 park로 갈 거라고 믿지 않는다 — 러너가 강제한다
     return log
 
