@@ -28,6 +28,7 @@
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -291,7 +292,22 @@ def main():
 
     import erase_check as EC
 
-    from piper_infer_runner import REAL_ROBOT_CONFIRM, RunSettings, resolve_crops
+    from piper_infer_runner import (
+        DEFAULT_ENV_FILE,
+        REAL_ROBOT_CONFIRM,
+        RunSettings,
+        load_env_file,
+        resolve_crops,
+    )
+
+    # build_robot_from_env는 recording.env 파일이 아니라 os.environ을 읽는다.
+    # 평소에는 scripts/9__run_client.sh 같은 셸이 env를 source해서 넘겨주는데,
+    # 이 CLI를 직접 실행하면 TOP_CAM이 비어서 카메라가 아예 안 붙고, 루프 첫
+    # 스텝에서 "Live observation is missing camera 'top'"으로 죽는다.
+    # 이미 셸에서 넘어온 값이 있으면 그쪽을 존중한다.
+    env = load_env_file(DEFAULT_ENV_FILE)
+    for key, value in env.items():
+        os.environ.setdefault(key, value)
 
     # 추론·스무딩·안전은 러너가 맡는다. 여기서 정하는 건 "시도 하나가 어떤
     # 조건으로 도는가"뿐이다.
