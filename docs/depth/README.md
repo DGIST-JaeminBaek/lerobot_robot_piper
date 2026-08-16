@@ -206,16 +206,13 @@ Snapshot:
 
 - `use_depth=True`인 카메라에 `<camera>_depth` feature 추가
 - `DepthFeature(H, W)`로 메타데이터 전달
-- `cam.read_depth()` 결과를 `(H, W, 1)`로 observation에 추가
-- RGB 단계에서는 TOP/WRIST를 병렬로 읽고, 이어지는 depth 단계에서도
-  depth 사용 카메라들을 병렬로 읽음
+- Depth 카메라는 `async_read_paired()`로 같은 RealSense frameset의 RGB와 depth를 읽음
+- 카메라별 읽기를 병렬로 실행
+- Depth 결과를 `(H, W, 1)`로 observation에 추가
 
-Snapshot:
-[`modified_files/lerobot_robot_piper/lerobot_robot_piper/piper_follower.py`](modified_files/lerobot_robot_piper/lerobot_robot_piper/piper_follower.py)
-
-현재 LeRobot 0.4.0 RealSense API에는 RGB-D 한 쌍을 한 번에 반환하는
-비동기 API가 없다. 따라서 Piper 경로의 RGB와 depth는 같은 파이프라인을
-사용하지만 정확히 같은 RealSense frameset이라고 보장하지 않는다.
+이 파일은 현재 repository에서 직접 관리하므로 `modified_files`에 별도 복사본을
+두지 않는다. 실제 소스:
+[`lerobot_robot_piper/piper_follower.py`](../../lerobot_robot_piper/piper_follower.py)
 
 ## 6. 수정본 디렉터리 구조
 
@@ -223,7 +220,7 @@ Snapshot:
 docs/depth/
 ├── README.md
 ├── modified_files/
-│   ├── lerobot/
+│   └── lerobot/
 │   │   ├── src/lerobot/datasets/
 │   │   │   ├── compute_stats.py
 │   │   │   ├── depth_utils.py
@@ -231,11 +228,10 @@ docs/depth/
 │   │   │   ├── lerobot_dataset.py
 │   │   │   ├── utils.py
 │   │   │   └── video_utils.py
+│   │   ├── src/lerobot/cameras/realsense/camera_realsense.py
 │   │   ├── src/lerobot/utils/visualization_utils.py
 │   │   ├── src/lerobot/scripts/lerobot_record.py
 │   │   └── tests/datasets/test_depth_recording.py
-│   └── lerobot_robot_piper/
-│       └── lerobot_robot_piper/piper_follower.py
 └── tools/
     ├── depth_video_viewer.py
     └── realsense_depth_record_test.py
@@ -254,6 +250,9 @@ LEROBOT=/home/ugrp43/UGRP/lerobot
 cp "$DEPTH_DOC"/modified_files/lerobot/src/lerobot/datasets/*.py \
    "$LEROBOT"/src/lerobot/datasets/
 
+cp "$DEPTH_DOC"/modified_files/lerobot/src/lerobot/cameras/realsense/camera_realsense.py \
+   "$LEROBOT"/src/lerobot/cameras/realsense/camera_realsense.py
+
 cp "$DEPTH_DOC"/modified_files/lerobot/src/lerobot/utils/visualization_utils.py \
    "$LEROBOT"/src/lerobot/utils/visualization_utils.py
 
@@ -262,13 +261,6 @@ cp "$DEPTH_DOC"/modified_files/lerobot/src/lerobot/scripts/lerobot_record.py \
 
 cp "$DEPTH_DOC"/modified_files/lerobot/tests/datasets/test_depth_recording.py \
    "$LEROBOT"/tests/datasets/
-```
-
-Piper plugin 연결 코드:
-
-```bash
-cp "$DEPTH_DOC"/modified_files/lerobot_robot_piper/lerobot_robot_piper/piper_follower.py \
-   /home/ugrp43/UGRP/lerobot_robot_piper/lerobot_robot_piper/
 ```
 
 이 snapshot은 `pyproject.toml`을 포함하지 않는다. 현재 LeRobot clone에 이미
@@ -352,6 +344,26 @@ deprecated 처리했는데(내부적으로 값을 안 쓰고 경고만 찍음) �
 `logger.debug`/`print`로 프레임별·단계별(카메라 read, CAN sync_read/set_action,
 `_wait_image_writer`, `compute_episode_stats`, 영상 인코딩, `meta.save_episode`)
 소요시간을 찍는 코드를 넣어뒀다. 평소엔 이 환경변수 없이 실행하면 조용하다.
+
+### RGB-D frameset 동기화 수정 (2026-07-26)
+
+기존엔 "정확히 동기화된 RGB-D frameset이 필요하면 별도 paired read API를
+추가해야 한다"는 제약을 15번 항목에 남겨뒀는데, 실제로 원인을 추적해보니
+API를 추가하면 바로 고칠 수 있는 문제였다.
+
+`RealSenseCamera._read_loop()`는 매 반복마다 하나의 frameset에서 color/depth를
+같이 꺼내 `with self.frame_lock:` 한 블록 안에서 두 필드를 동시에 갱신한다 —
+메모리상으로는 항상 짝이 맞는 상태다. 문제는 읽는 쪽: `get_observation()`이
+`cam.async_read()`(color)와 `cam.read_depth()`(depth)를 스레드 2개로 동시에
+호출했는데, `read_depth()`가 내부적으로 `async_read()`를 한 번 더 호출해서
+둘 다 하나뿐인 `new_frame_event`를 기다렸다 지우면서 서로 경쟁했다. 그 결과
+color와 depth가 다른 순간의 frameset에서 나올 수 있었다(짝이 안 맞음).
+
+`camera_realsense.py`에 `async_read_paired()`를 추가해서 락을 한 번만 잡고
+두 필드를 같이 스냅샷 뜨도록 했다 — `_read_loop()`가 원래 보장하던 짝을
+그대로 보존해서 반환한다. `piper_follower.py`의 `get_observation()`도 depth
+카메라에 대해 `async_read()`+`read_depth()` 두 콜 대신 이 메서드 하나만
+쓰도록 바꿨다.
 
 ## 9. 사용 설정
 
@@ -515,8 +527,8 @@ python scripts/tools/depth_video_viewer.py \
   복원된다. 기존 `depth_min=0.01` 데이터의 code 0에는 0–10 mm 구간의
   정보가 이미 합쳐져 있어 원래 값을 사후에 구분할 수 없다.
 - 10 m보다 먼 값은 최대 code로 clamp된다.
-- 정확히 동기화된 RGB-D frameset이나 depth-to-color alignment가 필요하면
-  RealSense 카메라 계층에 별도의 paired read API를 추가해야 한다.
+- depth-to-color alignment(픽셀 단위 정합)는 아직 없다 — RGB-D frameset
+  동기화 자체는 `async_read_paired()`로 해결됐다(8번 항목 참고).
 
 ## 16. 참고 자료
 

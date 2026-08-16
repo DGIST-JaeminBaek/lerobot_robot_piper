@@ -1,0 +1,35 @@
+{
+  "format_version": 1,
+  "type": "board_base_correspondence_set",
+  "status": "unverified",
+  "board_unit": "mm",
+  "base_unit": "mm",
+  "note": "Illustrative numbers only. base_xyz values here are NOT measured on the real robot; do not use for real execution.",
+  "correspondences": [
+    {
+      "name": "top_left",
+      "board_xy": [0.0, 0.0],
+      "base_xyz": [350.0, 0.0, 40.0]
+    },
+    {
+      "name": "top_right",
+      "board_xy": [400.0, 0.0],
+      "base_xyz": [358.316, 399.834, 32.001]
+    },
+    {
+      "name": "bottom_right",
+      "board_xy": [400.0, 300.0],
+      "base_xyz": [58.762, 406.364, 46.991]
+    },
+    {
+      "name": "bottom_left",
+      "board_xy": [0.0, 300.0],
+      "base_xyz": [50.446, 6.53, 54.991]
+    },
+    {
+      "name": "center",
+      "board_xy": [200.0, 150.0],
+      "base_xyz": [204.381, 203.182, 43.496]
+    }
+  ]
+}

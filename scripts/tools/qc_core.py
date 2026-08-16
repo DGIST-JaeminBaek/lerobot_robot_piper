@@ -30,23 +30,6 @@ An earlier version of this file scored contact through ``joint5.effort``. It was
 checked against the video and dropped: episodes wiped clean registered as little
 as 2 contact frames against a batch median of 44, so the measure produced false
 alarms on successful episodes and is not used for anything now.
-
-Two diagnostics are reported but never change the verdict, because neither says
-anything about whether the episode is worth training on:
-
-*How saturated was the rate limit?* ``send_action`` clips every goal to
-``max_relative_target`` of the present position and stores the clipped value, so
-frames where ``|action - state|`` sits at the limit are frames where the arm was
-commanded at its ceiling. Replaying those has no room left to catch up if the
-arm falls behind, which is why a replay can miss a target that was never
-misplaced -- measured on the 0728 batch, a fifth of every episode sits there.
-This is a statement about replay reproducibility, not about the data.
-
-*How long did the offset warmup last?* While ``action_offset_warmup_s`` runs the
-offset is recomputed every frame, so ``goal + offset == present`` holds by
-construction and the stored action is a copy of the observation. Those frames
-are labels that teach nothing. ``smooth_start_frames.py`` overwrites the head of
-each episode, so run this before that, or the count reads as zero.
 """
 
 from __future__ import annotations
@@ -60,7 +43,14 @@ import cv2
 import numpy as np
 import pandas as pd
 
-from episode_segmentation import gripper_plateau, gripper_release, motion_onset, suggest_range
+from episode_segmentation import (
+    DEFAULT_END_EVENT,
+    gripper_plateau,
+    gripper_release,
+    gripper_release_done,
+    motion_onset,
+    suggest_range,
+)
 
 
 REQUIRED_SUBDIRS = ("data", "meta", "videos")
@@ -81,13 +71,6 @@ TAIL_FRAMES = 10        # after-frame is picked from this many frames at the end
 BOARD_COLUMNS = (200, 800)  # the whiteboard, used only to score how occluded a frame is
 ERASED_OK = 0.80        # target shape gone
 ERASED_PARTIAL = 0.40   # below this nothing meaningful came off
-
-# Rate limit reporting. CLIP_LIMIT must track configs/recording.env
-# MAX_RELATIVE_TARGET -- a stale value here silently reports nothing.
-CLIP_LIMIT = 5.0
-CLIP_NEAR = 0.9         # within this fraction of the limit counts as saturated
-CLIP_NOTE = 25.0        # percent of frames worth mentioning; 0728 batch ran 11-28
-WARMUP_NOTE_SECONDS = 2.0   # dead head longer than this is worth mentioning
 
 RED, YELLOW, GREEN = "red", "yellow", "green"
 LEVEL_ORDER = {RED: 0, YELLOW: 1, GREEN: 2}
@@ -111,12 +94,11 @@ class Report:
     end: int | None = None
     motion_onset: int | None = None
     gripper_release: int | None = None
+    gripper_release_done: int | None = None
     erased: float | None = None
     n_shapes: int = 0
     n_jumps: int = 0
     max_jump: float = 0.0
-    clip_pct: float = 0.0
-    warmup: int = 0
     start_pose: np.ndarray | None = None
     start_dev: float = 0.0
     length_z: float = 0.0
@@ -200,29 +182,6 @@ def erase_ratios(video: Path) -> list[float]:
     return sorted(ratios, reverse=True)
 
 
-def clip_saturation(action: np.ndarray, state: np.ndarray, limit: float = CLIP_LIMIT) -> float:
-    """Percent of frames commanded at the rate limit.
-
-    ``send_action`` stores the already-clipped goal, so the recorded gap to the
-    present position never exceeds ``limit`` -- frames sitting at it are frames
-    with no headroom left for a replay to recover in.
-    """
-    if len(action) == 0:
-        return 0.0
-    gap = np.abs(action[:, :6] - state[:, :6]).max(axis=1)
-    return 100.0 * float((gap >= limit * CLIP_NEAR).mean())
-
-
-def warmup_frames(action: np.ndarray, state: np.ndarray) -> int:
-    """Leading frames whose action is a copy of the observation.
-
-    Returns the full length when the two never diverge, which means the arm was
-    never actually commanded anywhere -- worth seeing rather than hiding.
-    """
-    moved = np.abs(action[:, :6] - state[:, :6]).max(axis=1) > 1e-6
-    return int(np.argmax(moved)) if moved.any() else len(action)
-
-
 def read_episode(root: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
     info = json.loads((root / "meta/info.json").read_text())
     files = sorted(root.glob("data/chunk-*/file-*.parquet"))
@@ -232,7 +191,13 @@ def read_episode(root: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
     return frame, info
 
 
-def inspect(path: Path, start_margin: int = 22, end_margin: int = 6, round_start: int = 10) -> Report:
+def inspect(
+    path: Path,
+    start_margin: int = 22,
+    end_margin: int | None = None,
+    round_start: int = 10,
+    end_event: str = DEFAULT_END_EVENT,
+) -> Report:
     """Everything that can be judged from one recording folder on its own."""
     report = Report(name=path.name, path=path)
 
@@ -278,21 +243,10 @@ def inspect(path: Path, start_margin: int = 22, end_margin: int = 6, round_start
     if report.n_jumps:
         report.flag(YELLOW, f"텔레옵 끊김 {report.n_jumps}회 (최대 {report.max_jump:.1f}도/프레임)")
 
-    # Notes, not verdicts -- both describe how the episode was driven and
-    # replayed, neither describes whether it is worth training on.
-    report.clip_pct = round(clip_saturation(action, state), 1)
-    report.warmup = warmup_frames(action, state)
-    if report.clip_pct > CLIP_NOTE:
-        report.notes.append(
-            f"속도 제한에 걸린 구간 {report.clip_pct:.0f}% — 리플레이 재현이 어려움")
-    if report.warmup > WARMUP_NOTE_SECONDS * report.fps:
-        report.notes.append(
-            f"앞 {report.warmup}프레임의 action이 관측 복사본 "
-            f"({report.warmup / report.fps:.1f}초)")
-
     report.motion_onset = motion_onset(action)
     report.gripper_release = gripper_release(action)
-    start, end, warnings = suggest_range(action, start_margin, end_margin, round_start)
+    report.gripper_release_done = gripper_release_done(action, report.gripper_release)
+    start, end, warnings = suggest_range(action, start_margin, end_margin, round_start, end_event)
     report.start, report.end = start, end
     for warning in warnings:
         report.flag(RED, warning)

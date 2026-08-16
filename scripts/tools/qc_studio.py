@@ -10,6 +10,11 @@ actual video stills, the traffic-light verdict from ``qc_core``, and sliders to
 move either boundary. Confirming writes to a review file of its own -- the
 recordings and any existing manifest are only ever read.
 
+The end boundary can hang off either end of the gripper release -- the frame it
+starts opening, or the frame it finishes and the eraser is down. The radio above
+the trace switches between them and re-proposes every episode not yet confirmed;
+``--end-event`` sets the one the window opens with.
+
 Half-built recordings (the retry path leaves a folder without ``videos/``) are
 collected into their own dialog and can be moved to a quarantine folder after
 a confirmation. Nothing is deleted.
@@ -34,6 +39,7 @@ import numpy as np
 from PIL import Image, ImageTk
 
 from autofill_frame_ranges import load_action
+from episode_segmentation import DEFAULT_END_EVENT, END_EVENTS, END_MARGIN
 from qc_core import GREEN, RED, YELLOW, Report, inspect_folder
 
 
@@ -46,6 +52,10 @@ TRACE_HEIGHT = 210
 LEVEL_COLOR = {GREEN: "#2e7d32", YELLOW: "#e08800", RED: "#c62828"}
 LEVEL_ROW = {GREEN: "#e8f5e9", YELLOW: "#fff8e1", RED: "#ffebee"}
 LEVEL_LABEL = {GREEN: "● 정상", YELLOW: "▲ 확인 필요", RED: "■ 사용 불가"}
+END_EVENT_LABEL = {
+    "release_start": "그리퍼가 벌어지기 시작할 때",
+    "release_done": "지우개를 놓고 다 벌어졌을 때",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,13 +65,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quarantine", type=Path, default=DEFAULT_QUARANTINE)
     parser.add_argument("--report", action="store_true", help="Print the table and exit, no window.")
     parser.add_argument("--start-margin", type=int, default=22)
-    parser.add_argument("--end-margin", type=int, default=6)
+    parser.add_argument("--end-margin", type=int, default=None,
+                        help=f"Frames dropped before the end event (default: per event, {END_MARGIN}).")
+    parser.add_argument("--end-event", choices=END_EVENTS, default=DEFAULT_END_EVENT,
+                        help=f"Which end of the gripper release closes the episode (default: {DEFAULT_END_EVENT}).")
     parser.add_argument("--round-start", type=int, default=10)
     return parser.parse_args()
 
 
-def print_report(reports: list[Report]) -> None:
+def print_report(reports: list[Report], end_event: str = DEFAULT_END_EVENT) -> None:
     counts = {level: sum(r.level == level for r in reports) for level in (GREEN, YELLOW, RED)}
+    print(f"종료 기준: {end_event} — {END_EVENT_LABEL[end_event]}\n")
     print(f"{'status':<7}{'episode':<32}{'frames':>7}{'range':>14}{'kept':>8}{'erased':>8}  notes")
     print("-" * 110)
     for report in reports:
@@ -75,7 +89,8 @@ def print_report(reports: list[Report]) -> None:
 
 
 class Studio(tk.Tk):
-    def __init__(self, reports: list[Report], output: Path, quarantine: Path):
+    def __init__(self, reports: list[Report], output: Path, quarantine: Path,
+                 end_event: str = DEFAULT_END_EVENT, end_margin: int | None = None):
         super().__init__()
         self.title("Piper QC Studio")
         self.geometry("1330x950")
@@ -84,12 +99,16 @@ class Studio(tk.Tk):
         self.broken = [r for r in reports if r.broken]
         self.output = output
         self.quarantine = quarantine
+        self.end_margin_override = end_margin
         self.index = 0
         self.captures: dict[str, cv2.VideoCapture] = {}
         self.photos: dict[str, ImageTk.PhotoImage] = {}
         self.actions: dict[str, np.ndarray | None] = {}
+        self.end_event = tk.StringVar(value=end_event)
+        # Derived rather than taken from ``report.end`` so the window is correct
+        # even if the reports were inspected under the other end event.
         self.state: dict[str, dict] = {
-            r.name: {"start": r.start, "end": r.end, "confirmed": False, "excluded": r.level == RED}
+            r.name: {"start": r.start, "end": self.auto_end(r), "confirmed": False, "excluded": r.level == RED}
             for r in self.reports
         }
 
@@ -97,6 +116,38 @@ class Studio(tk.Tk):
         if self.reports:
             self.show(0)
         self._bind_keys()
+
+    # ------------------------------------------------------------ end event
+
+    def release_of(self, report: Report, event: str | None = None) -> int | None:
+        event = event or self.end_event.get()
+        return report.gripper_release if event == "release_start" else report.gripper_release_done
+
+    def auto_end(self, report: Report) -> int:
+        """The proposed end for the currently selected event.
+
+        Recomputed from the two release frames the report already carries, so
+        switching the radio costs nothing -- no parquet or video is re-read.
+        """
+        event = self.end_event.get()
+        release = self.release_of(report, event)
+        if release is None:
+            return report.end  # qc_core already fell back to the last sustained motion
+        margin = self.end_margin_override if self.end_margin_override is not None else END_MARGIN[event]
+        return max(0, min(release - margin, report.total_frames))
+
+    def on_end_event(self) -> None:
+        """Re-propose the end of every episode the operator has not confirmed yet."""
+        touched = 0
+        for report in self.reports:
+            state = self.state[report.name]
+            if state["confirmed"]:
+                continue
+            state["end"] = self.auto_end(report)
+            touched += 1
+        self.status.configure(text=f"종료 기준: {END_EVENT_LABEL[self.end_event.get()]} — "
+                                   f"확인 전 {touched}개 에피소드의 종료 프레임을 다시 계산했습니다.")
+        self.show(self.index)
 
     # ---------------------------------------------------------------- layout
 
@@ -161,6 +212,13 @@ class Studio(tk.Tk):
             for delta in (-10, -1, +1, +10):
                 ttk.Button(nudges, text=f"{delta:+d}", width=4,
                            command=lambda d=delta, k=key: self.nudge(k, d)).pack(side="left", padx=2)
+
+        chooser = ttk.LabelFrame(right, text="종료 기준", padding=(8, 4))
+        chooser.pack(fill="x", pady=(10, 0))
+        for event in END_EVENTS:
+            ttk.Radiobutton(chooser, text=END_EVENT_LABEL[event], value=event,
+                            variable=self.end_event, command=self.on_end_event).pack(side="left", padx=(0, 18))
+        ttk.Label(chooser, text="확인 완료한 에피소드는 그대로 둡니다", foreground="#777").pack(side="left")
 
         trace_box = ttk.LabelFrame(right, text="관절 움직임 (위) · 그리퍼 (아래)  —  클릭하면 가까운 경계가 이동합니다",
                                    padding=4)
@@ -274,16 +332,22 @@ class Studio(tk.Tk):
         canvas.create_text(4, pad + 8, anchor="w", text="관절 변화량", fill="#999", font=("TkDefaultFont", 9))
         canvas.create_text(4, 2 * pad + lane + 8, anchor="w", text="그리퍼", fill="#999", font=("TkDefaultFont", 9))
 
-        def vline(frame_index: int, color: str, dash: tuple[int, int] | None, label: str) -> None:
+        def vline(frame_index: int, color: str, dash: tuple[int, int] | None, label: str, row: int = 0) -> None:
+            # ``row`` stacks the captions: the two release markers can sit four
+            # frames apart, and side by side their labels are unreadable.
             x = frame_index / total * width
             canvas.create_line(x, 0, x, height, fill=color, width=2, dash=dash)
-            canvas.create_text(min(x + 4, width - 4), 4, anchor="nw", text=label, fill=color,
+            canvas.create_text(min(x + 4, width - 4), 4 + row * 13, anchor="nw", text=label, fill=color,
                                font=("TkDefaultFont", 9, "bold"))
 
         if report.motion_onset is not None:
-            vline(report.motion_onset, "#1f77b4", (3, 3), "움직임")
+            vline(report.motion_onset, "#1f77b4", (3, 3), "움직임", row=1)
+        # Both ends of the release are drawn whichever one is selected, so the gap
+        # between "starts opening" and "eraser down" is visible while nudging.
         if report.gripper_release is not None:
-            vline(report.gripper_release, "#ff7f0e", (3, 3), "릴리즈")
+            vline(report.gripper_release, "#ff7f0e", (3, 3), "벌리기 시작", row=1)
+        if report.gripper_release_done is not None and report.gripper_release_done != report.gripper_release:
+            vline(report.gripper_release_done, "#9467bd", (3, 3), "놓기 완료", row=2)
         state = self.state[report.name]
         vline(state["start"], "#2e7d32", None, "시작")
         vline(state["end"], "#2e7d32", None, "종료")
@@ -310,10 +374,14 @@ class Studio(tk.Tk):
 
         self.title_label.configure(text=f"{report.name}   ({self.index + 1}/{len(self.reports)})")
         notes = "; ".join(report.reasons) or "특이사항 없음"
+        gap = (report.gripper_release_done - report.gripper_release
+               if report.gripper_release is not None and report.gripper_release_done is not None else None)
         self.verdict.configure(text=f"{LEVEL_LABEL[report.level]}  —  {notes}\n"
                                     f"전체 {report.total_frames}프레임 · 움직임 시작 {report.motion_onset} · "
-                                    f"그리퍼 릴리즈 {report.gripper_release} · "
-                                    f"지움 {'판정 불가' if report.erased is None else f'{report.erased * 100:.0f}%'}"
+                                    f"벌리기 시작 {report.gripper_release} · "
+                                    f"놓기 완료 {report.gripper_release_done}"
+                                    + (f" (+{gap}프레임)" if gap else "")
+                                    + f" · 지움 {'판정 불가' if report.erased is None else f'{report.erased * 100:.0f}%'}"
                                     + (f"   ({'; '.join(report.notes)})" if report.notes else ""),
                                foreground=LEVEL_COLOR[report.level])
         self.exclude_var.set(state["excluded"])
@@ -357,7 +425,7 @@ class Studio(tk.Tk):
 
     def reset_auto(self) -> None:
         report = self.reports[self.index]
-        self.state[report.name].update(start=report.start, end=report.end)
+        self.state[report.name].update(start=report.start, end=self.auto_end(report))
         self.show(self.index)
 
     def on_exclude(self) -> None:
@@ -393,13 +461,16 @@ class Studio(tk.Tk):
                 "qc_notes": report.reasons + report.notes,
                 "erased_ratio": None if report.erased is None else round(report.erased, 3),
                 "auto_start_frame": report.start,
-                "auto_end_frame": report.end,
+                "auto_end_frame": self.auto_end(report),
+                "gripper_release": report.gripper_release,
+                "gripper_release_done": report.gripper_release_done,
             })
         document = {
             "format_version": 1,
             "generated_by": "scripts/tools/qc_studio.py",
             "reviewed_at": datetime.now().isoformat(timespec="seconds"),
             "range_semantics": "start_frame is inclusive; end_frame is exclusive",
+            "end_event": self.end_event.get(),
             "episodes": episodes,
         }
         if self.output.exists():
@@ -466,17 +537,18 @@ def main() -> int:
     if not folder.is_dir():
         raise SystemExit(f"folder not found: {folder}")
 
-    reports = inspect_folder(folder, start_margin=args.start_margin,
-                             end_margin=args.end_margin, round_start=args.round_start)
+    reports = inspect_folder(folder, start_margin=args.start_margin, end_margin=args.end_margin,
+                             round_start=args.round_start, end_event=args.end_event)
     if not reports:
         raise SystemExit(f"no recordings under {folder}")
 
     if args.report:
-        print_report(reports)
+        print_report(reports, args.end_event)
         return 0
 
     output = args.output or REPO_ROOT / f"configs/qc_review_{folder.name}.json"
-    studio = Studio(reports, output.expanduser().resolve(), args.quarantine.expanduser().resolve())
+    studio = Studio(reports, output.expanduser().resolve(), args.quarantine.expanduser().resolve(),
+                    end_event=args.end_event, end_margin=args.end_margin)
     studio.mainloop()
     return 0
 

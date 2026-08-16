@@ -1,6 +1,6 @@
 # Operations
 
-이 문서는 준비된 번호형 스크립트로 Piper leader/follower 실험을 실행하는 절차만 다룹니다. 환경 준비와 설정 방법은 [../setup_guide.md](../setup_guide.md), 세부 실험 품질 기준은 [data_collection_protocol.md](data_collection_protocol.md)를 봅니다.
+이 문서는 준비된 번호형 스크립트로 Piper leader/follower 실험을 실행하는 절차만 다룹니다. 환경 준비와 설정 방법은 [setup_guide.md](setup_guide.md), ROS 2/RViz/URDF 설치는 [rviz_setup.md](rviz_setup.md), 세부 실험 품질 기준은 [data_collection_protocol.md](data_collection_protocol.md)를 봅니다.
 
 ## 1. 설치
 
@@ -31,6 +31,11 @@ cp configs/recording.env.example configs/recording.env
 | `DATASET_REPO_ID` | 저장할 LeRobotDataset repo id |
 | `DATASET_ROOT` | 로컬 dataset 저장 경로 |
 | `TASK` | episode task 문장 |
+| `ROS_DISTRO_NAME` | RViz에서 사용할 ROS2 배포판 이름. 현재 검증값 `humble` |
+| `ROS_SETUP_PATH` | ROS2 `setup.bash` 절대경로 |
+| `ROS2_WS` | `agx_arm_description`을 빌드한 ROS2 workspace 절대경로 |
+| `URDF_LOCAL_DIR` | 고정 커밋의 `agx_arm_urdf` clone 절대경로 |
+| `URDF_REPO` | `agx_arm_urdf` clone URL. 설치 절차는 [RViz 문서](rviz_setup.md) 참고 |
 
 ## 3. 실행 순서
 
@@ -100,9 +105,9 @@ DRY_RUN=true bash scripts/5__record.sh
 DRY_RUN=true bash scripts/7__train.sh
 ```
 
-## 5. Dataset 확인
+## 5. Dataset 검사 실행
 
-녹화 후 feature와 episode parquet를 확인합니다.
+녹화 후 feature와 episode parquet를 확인하는 명령입니다.
 
 ```bash
 python3 scripts/tools/wego_dataset_check.py \
@@ -110,6 +115,9 @@ python3 scripts/tools/wego_dataset_check.py \
   --dataset-root records/local/piper_write_light \
   --episode 0
 ```
+
+검사 결과의 성공·실패 판정과 episode 품질 기준은
+[data_collection_protocol.md](data_collection_protocol.md)를 따릅니다.
 
 ## 6. 스크립트 구성
 

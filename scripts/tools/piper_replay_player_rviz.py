@@ -162,27 +162,38 @@ def load_episode(dataset_root: pathlib.Path, episode: int) -> pd.DataFrame:
 
 
 def extract_joint_sequence(df: pd.DataFrame, column: str) -> np.ndarray:
-    """(frame, 7) 정규화값 배열 반환 — 순서는 [joint1..joint6, gripper]."""
+    """(frame, 7) 정규화값 배열 반환 — 순서는 [joint1..joint6, gripper].
+
+    observation.state는 position 7개 뒤에 effort/velocity가 붙을 수 있으므로
+    앞의 7개 position만 사용한다.
+    """
     if column not in df.columns:
         err(f"'{column}' 컬럼 없음. 사용 가능한 컬럼: {list(df.columns)}")
         sys.exit(1)
 
     arr = np.array(df[column].tolist())
-    if arr.ndim != 2 or arr.shape[1] != 7:
+    valid_width = arr.ndim == 2 and (
+        arr.shape[1] == 7 or (column == "observation.state" and arr.shape[1] > 7)
+    )
+    if not valid_width:
         err(f"'{column}' shape={arr.shape} — joint1~6+gripper(7) 형태가 아님. "
             f"이 스크립트는 joint-space 데이터 전용 (EEF 데이터는 지원 안 함)")
         sys.exit(1)
 
-    return arr
+    return arr[:, :7]
 
 
 def try_extract_joint_sequence(df: pd.DataFrame, column: str) -> np.ndarray | None:
     """패널 표시용 — extract_joint_sequence와 같지만 컬럼이 없거나 모양이 안 맞으면
-    (프로그램을 죽이지 않고) None을 반환함."""
+    (프로그램을 죽이지 않고) None을 반환함. observation.state는 패널에서
+    effort/velocity까지 전부 표시해야 하므로 전체 배열을 반환함."""
     if column not in df.columns:
         return None
     arr = np.array(df[column].tolist())
-    if arr.ndim != 2 or arr.shape[1] != 7:
+    valid_width = arr.ndim == 2 and (
+        arr.shape[1] == 7 or (column == "observation.state" and arr.shape[1] >= 7)
+    )
+    if not valid_width:
         return None
     return arr
 
@@ -318,8 +329,16 @@ def build_panel(
 
     for i, name in enumerate(joint_names):
         draw_text(panel, name[:16], (x_name, y))
-        draw_text(panel, f"{state[i]: >7.2f}" if state is not None else "-", (x_state, y))
-        draw_text(panel, f"{action[i]: >7.2f}" if action is not None else "-", (x_action, y))
+        draw_text(
+            panel,
+            f"{state[i]: >7.2f}" if state is not None and i < len(state) else "-",
+            (x_state, y),
+        )
+        draw_text(
+            panel,
+            f"{action[i]: >7.2f}" if action is not None and i < len(action) else "-",
+            (x_action, y),
+        )
         y += 21
 
     y += 10
@@ -363,6 +382,20 @@ def build_canvas(
         strips.append(frame)
 
     video_strip = cv2.vconcat(strips) if strips else placeholder_frame(video_height, 424, "no video")
+
+    # position 7개뿐 아니라 effort 7개와 velocity 6개까지 표시할 때도 하단
+    # 컨트롤 안내와 겹치지 않도록 영상 영역을 패널의 최소 높이에 맞춰 확장한다.
+    min_panel_height = 130 + len(joint_names) * 21 + 115
+    if video_strip.shape[0] < min_panel_height:
+        video_strip = cv2.copyMakeBorder(
+            video_strip,
+            0,
+            min_panel_height - video_strip.shape[0],
+            0,
+            0,
+            cv2.BORDER_CONSTANT,
+            value=(20, 20, 20),
+        )
 
     panel = build_panel(
         width=panel_width,
@@ -542,12 +575,17 @@ def main():
     seq = extract_joint_sequence(df, args.column)
     range_check(seq, args.column)
 
-    # 패널에는 항상 action/observation.state 둘 다 보여줌 (있는 쪽만)
+    # 패널에는 항상 action/observation.state 둘 다 보여줌 (있는 쪽만).
+    # state는 position 뒤에 effort/velocity가 붙은 전체 20차원을 유지한다.
     action_seq = try_extract_joint_sequence(df, "action")
     state_seq = try_extract_joint_sequence(df, "observation.state")
-    joint_names = JOINT_NAMES + [GRIPPER_NAME]
 
     meta = load_meta(root)
+    state_names = meta.features.get("observation.state", {}).get("names")
+    if state_seq is not None and state_names and len(state_names) == state_seq.shape[1]:
+        joint_names = list(state_names)
+    else:
+        joint_names = JOINT_NAMES + [GRIPPER_NAME]
     rate = args.rate if args.rate is not None else 1.0 / float(meta.fps or 30)
     video_frames = load_video_frames(meta, args.episode, args.video_key, args.view)
 

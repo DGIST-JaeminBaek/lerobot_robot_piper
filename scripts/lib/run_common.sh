@@ -17,6 +17,46 @@ load_recording_env() {
   fi
 }
 
+activate_conda_env() {
+  # lerobot_robot_piper는 conda env(기본 ugrp)에만 설치돼 있다. base에서 실행하면
+  # ModuleNotFoundError로 죽으므로 실행 스크립트는 전부 이걸 먼저 불러야 한다.
+  # (0__launch_gui.sh에만 있던 걸 함수로 빼서 다른 스크립트도 쓰게 함 —
+  #  11__infer_gui.sh가 이게 없어서 base로 실행되며 터졌다.)
+  local env_name="${CONDA_ENV_NAME:-ugrp}"
+
+  if [[ "${CONDA_DEFAULT_ENV:-}" == "${env_name}" ]]; then
+    echo "[INFO] 이미 ${env_name} 활성화됨 — 건너뜀"
+    return 0
+  fi
+
+  # Nautilus "Run in Terminal" 등 비로그인 셸에서는 ~/.bashrc의 conda init이
+  # 실행되지 않아 PATH에 conda가 없을 수 있음 — 흔한 설치 위치를 직접 탐색
+  local conda_base="" candidate
+  for candidate in "${CONDA_EXE:+$(dirname "$(dirname "${CONDA_EXE}")")}" \
+                   "${HOME}/miniconda3" "${HOME}/anaconda3" "${HOME}/miniforge3" \
+                   "/opt/miniconda3" "/opt/anaconda3"; do
+    if [[ -n "${candidate}" && -f "${candidate}/etc/profile.d/conda.sh" ]]; then
+      conda_base="${candidate}"
+      break
+    fi
+  done
+
+  if [[ -z "${conda_base}" ]]; then
+    echo "[ERROR] conda 설치 위치를 찾을 수 없음 — 수동으로 '${env_name}' 환경을 활성화한 뒤 재실행하세요." >&2
+    return 1
+  fi
+
+  # conda.sh/activate가 내부적으로 미설정 변수를 참조해 set -u와 충돌하므로 잠시 해제
+  set +u
+  # shellcheck disable=SC1091
+  source "${conda_base}/etc/profile.d/conda.sh"
+  conda activate "${env_name}"
+  set -u
+
+  echo "[OK] conda env  = ${CONDA_DEFAULT_ENV:-<none>}"
+  echo "[OK] python     = $(command -v python)"
+}
+
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "[ERROR] Required command not found: $1" >&2
@@ -117,9 +157,39 @@ robot_safety_args() {
   # DISABLE_TORQUE_ON_DISCONNECT=false로 두면 disconnect() 시 parking 자세로는
   # 이동하되 torque는 자동으로 풀지 않음 — scripts/tools/safe_release_torque.py로
   # 사람이 팔을 잡은 상태에서 수동으로 torque를 해제하는 루틴과 짝을 이룸.
+  #
+  # MAX_RELATIVE_TARGET=off(또는 none/null/disabled, 대소문자 무관)로 두면 상대
+  # 이동량 제한을 완전히 끔(draccus에 --robot.max_relative_target=null로 전달 —
+  # 이 필드가 float | dict | None이라 파이썬 문자열 "None"은 안 먹히고 YAML
+  # null/~ 표기만 None으로 디코딩됨). 리더-팔로워 괴리감이 큰 상황에서 5.0이
+  # 너무 자주 걸릴 때 임시로 끄고 조심스럽게 테스트할 용도 — 상시 끄기보다는
+  # 필요할 때만 켰다 끄는 걸 권장.
+  local max_rel="${MAX_RELATIVE_TARGET:-5.0}"
+  case "${max_rel,,}" in
+    off | none | null | disabled) max_rel="null" ;;
+  esac
+  # SAFETY_ON_OVERLOAD=park면 임계값 초과 시 parking 자세로 복귀하고 그 뒤 명령을
+  # 전부 차단(래치), hold면 기존처럼 그 자리에서 명령만 보류한다.
+  #
+  # PARK_RELEASE_MODE는 종료 시 "어떤 자세에서 torque를 푸는지"를 정한다 —
+  # lower(팔은 그대로, 손목만 PARK_RELEASE_WRIST_REST_DEG 각도까지 미리 내린 뒤 해제) /
+  # in_place(그 자리에서 바로) / park(기존: 파킹 자세로 이동 후).
+  # 실측상 torque를 풀 때 떨어지는 건 손목뿐이라(joint1~4/6은 0.00도) lower가 기본.
   printf '%s\n' \
-    "--robot.max_relative_target=${MAX_RELATIVE_TARGET:-5.0}" \
-    "--robot.disable_torque_on_disconnect=$(bool_default "${DISABLE_TORQUE_ON_DISCONNECT:-}" true)"
+    "--robot.max_relative_target=${max_rel}" \
+    "--robot.disable_torque_on_disconnect=$(bool_default "${DISABLE_TORQUE_ON_DISCONNECT:-}" true)" \
+    "--robot.safety_enabled=$(bool_default "${SAFETY_ENABLED:-}" true)" \
+    "--robot.safety_effort_limit=${SAFETY_EFFORT_LIMIT:-8.0}" \
+    "--robot.safety_on_overload=${SAFETY_ON_OVERLOAD:-park}" \
+    "--robot.safety_park_ramp_s=${SAFETY_PARK_RAMP_S:-4.0}" \
+    "--robot.safety_hold_resend=$(bool_default "${SAFETY_HOLD_RESEND:-}" true)" \
+    "--robot.park_release_mode=${PARK_RELEASE_MODE:-lower}" \
+    "--robot.park_release_wrist_rest_deg=${PARK_RELEASE_WRIST_REST_DEG:-24.4}" \
+    "--robot.park_release_gripper_cycle=$(bool_default "${PARK_RELEASE_GRIPPER_CYCLE:-}" true)" \
+    "--robot.park_release_gripper_open=${PARK_RELEASE_GRIPPER_OPEN:-100.0}" \
+    "--robot.park_release_gripper_wait_s=${PARK_RELEASE_GRIPPER_WAIT_S:-1.5}" \
+    "--robot.park_release_ramp_s=${PARK_RELEASE_RAMP_S:-2.0}" \
+    "--robot.park_release_settle_s=${PARK_RELEASE_SETTLE_S:-0.5}"
 }
 
 plugin_discovery_args() {
