@@ -76,6 +76,17 @@ RED, YELLOW, GREEN = "red", "yellow", "green"
 LEVEL_ORDER = {RED: 0, YELLOW: 1, GREEN: 2}
 
 
+# Rate limit / warmup 진단. 판정(verdict)은 바꾸지 않는다 — 둘 다 "이 에피소드를
+# 학습에 쓸 만한가"가 아니라 "어떻게 구동·재생됐나"를 말할 뿐이다.
+#
+# CLIP_LIMIT은 configs/recording.env의 MAX_RELATIVE_TARGET과 같아야 한다.
+# 값이 낡으면 조용히 아무것도 보고하지 않는다.
+CLIP_LIMIT = 5.0
+CLIP_NEAR = 0.9         # 한계의 이 비율 이상이면 포화로 센다
+CLIP_NOTE = 25.0        # 언급할 만한 프레임 비율(%) — 0728 배치는 11~28%였다
+WARMUP_NOTE_SECONDS = 2.0   # 이보다 긴 dead head는 언급할 가치가 있다
+
+
 @dataclass
 class Report:
     """One recording folder, whether or not it holds a usable episode."""
@@ -98,6 +109,8 @@ class Report:
     erased: float | None = None
     n_shapes: int = 0
     n_jumps: int = 0
+    clip_pct: float = 0.0
+    warmup: int = 0
     max_jump: float = 0.0
     start_pose: np.ndarray | None = None
     start_dev: float = 0.0
@@ -191,6 +204,31 @@ def read_episode(root: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
     return frame, info
 
 
+def clip_saturation(action: np.ndarray, state: np.ndarray, limit: float = CLIP_LIMIT) -> float:
+    """속도 제한에 걸린 채 명령된 프레임 비율(%).
+
+    send_action은 클램프된 goal을 저장하므로 기록된 present position과의 간격은
+    limit을 넘지 않는다 — 거기에 붙어 있는 프레임은 리플레이가 뒤처졌을 때
+    따라잡을 여유가 없는 프레임이다. 데이터 품질이 아니라 재현성에 대한 진술이다.
+    """
+    if len(action) == 0:
+        return 0.0
+    gap = np.abs(action[:, :6] - state[:, :6]).max(axis=1)
+    return 100.0 * float((gap >= limit * CLIP_NEAR).mean())
+
+
+def warmup_frames(action: np.ndarray, state: np.ndarray) -> int:
+    """action이 관측의 복사본인 선두 프레임 수.
+
+    action_offset_warmup_s 동안은 offset이 매 프레임 재계산되어
+    goal + offset == present가 항상 성립한다 — 아무것도 가르치지 않는 라벨이다.
+    smooth_start_frames.py가 에피소드 앞부분을 덮어쓰므로 그 전에 돌려야 한다.
+    끝까지 안 벌어지면 전체 길이를 돌려준다(숨기지 않고 보이게).
+    """
+    moved = np.abs(action[:, :6] - state[:, :6]).max(axis=1) > 1e-6
+    return int(np.argmax(moved)) if moved.any() else len(action)
+
+
 def inspect(
     path: Path,
     start_margin: int = 22,
@@ -242,6 +280,17 @@ def inspect(
     report.max_jump = float(step.max()) if len(step) else 0.0
     if report.n_jumps:
         report.flag(YELLOW, f"텔레옵 끊김 {report.n_jumps}회 (최대 {report.max_jump:.1f}도/프레임)")
+
+    # 진단(판정 아님) — 어떻게 구동·재생됐는지에 대한 기록
+    report.clip_pct = round(clip_saturation(action, state), 1)
+    report.warmup = warmup_frames(action, state)
+    if report.clip_pct > CLIP_NOTE:
+        report.notes.append(
+            f"속도 제한에 걸린 구간 {report.clip_pct:.0f}% — 리플레이 재현이 어려움")
+    if report.warmup > WARMUP_NOTE_SECONDS * report.fps:
+        report.notes.append(
+            f"앞 {report.warmup}프레임의 action이 관측 복사본 "
+            f"({report.warmup / report.fps:.1f}초)")
 
     report.motion_onset = motion_onset(action)
     report.gripper_release = gripper_release(action)
