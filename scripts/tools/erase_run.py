@@ -143,7 +143,7 @@ def build_leader(leader_port):
 # 판정하고 재시도를 결정하는 바깥 루프만 담당한다.
 
 
-def grab_judge_frame(serial: str, width=1280, height=720, warmup=45):
+def grab_judge_frame(serial: str, width=1280, height=720, warmup_s=3.0, fps=30):
     """판정용 프레임을 top 카메라에서 직접 뜬다 (BGR HWC).
 
     정책 관측과 분리해서 읽는 이유: InferenceRunner가 시도마다 로봇·카메라를
@@ -159,11 +159,25 @@ def grab_judge_frame(serial: str, width=1280, height=720, warmup=45):
     cfg.enable_stream(rs.stream.color, width, height, rs.format.bgr8, 30)
     pipe.start(cfg)
     try:
-        for _ in range(warmup):  # 자동 노출이 자리잡을 때까지 버린다
+        # 자동 노출이 자리잡을 때까지 버린다. 프레임 수가 아니라 시간 기준이어야
+        # 한다 — recording.env의 REALSENSE_WARMUP_S=3.0과 같은 근거이고, 1.5초로
+        # 줄였다가 덜 밝은 프레임이 나와 도형 검출이 통째로 실패한 적이 있다.
+        deadline = time.time() + warmup_s
+        frames = pipe.wait_for_frames()
+        while time.time() < deadline:
             frames = pipe.wait_for_frames()
-        return np.asanyarray(frames.get_color_frame().get_data()).copy()
+        image = np.asanyarray(frames.get_color_frame().get_data()).copy()
     finally:
         pipe.stop()
+
+    # 판정 전체가 이 프레임 하나에 걸려 있으므로, 쓸 수 없는 프레임이면 여기서
+    # 분명하게 죽는다. 아래로 흘려보내면 "도형을 못 찾음"으로 나와 원인이 가려진다.
+    if float(image.max()) < 40:
+        raise RuntimeError(
+            f"판정용 프레임이 거의 검다 (max={image.max()}). "
+            f"카메라 워밍업({warmup_s:g}s)이 짧거나 시리얼 {serial}이 틀렸을 수 있다."
+        )
+    return image
 
 
 def run_attempt_with_runner(settings, on_log=None) -> dict:
