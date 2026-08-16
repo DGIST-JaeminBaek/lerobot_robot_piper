@@ -407,6 +407,12 @@ class RunSettings:
     # vel_ref 배율. 0이면 속도 피드포워드를 완전히 끈다(순수 위치 임피던스) —
     # 흔들림 원인이 속도항인지 가려낼 때 쓴다.
     mit_vel_scale: float = 1.0
+    # HIL 개입(리더암 클러치). 기본 꺼짐 — 켜지 않으면 아래 경로는 통째로 비활성이라
+    # 기존 동작과 바이트 단위로 같다. 켜면 space로 정책↔사람 제어권을 토글한다.
+    # 상세는 docs/erase_run_design.md §5, 구현은 hil_clutch.py.
+    hil: bool = False
+    leader_port: str = "can_leader"
+    clutch_gain: float = 1.0
     smoothing: SmoothingConfig = dataclasses.field(default_factory=SmoothingConfig)
     # 모드 프리셋에서 오는 값들 — 개별 수정 가능
     mode: str = DEMO_MODE.name
@@ -480,6 +486,11 @@ class InferenceRunner(threading.Thread):
         self.status = "not_started"
         self.recorded_path: pathlib.Path | None = None
 
+        # HIL 개입 집계 — 개입률은 §8 보고 지표라 러너가 직접 센다.
+        self.intervention_steps = 0
+        self.engage_deviations: list[float] = []
+        self.hil_aborted = False
+
         self._pending_smoothing: SmoothingConfig | None = None
         self._smoothing_lock = threading.Lock()
         self._clamp_window: list[bool] = []
@@ -523,6 +534,9 @@ class InferenceRunner(threading.Thread):
         robot = None
         rviz = None
         recorder = None
+        leader = None
+        toggle = None
+        mixer = None
         status = "finished"
         try:
             import torch  # noqa: F401  (정책 로딩 전에 import 비용을 여기서 치른다)
@@ -619,6 +633,29 @@ class InferenceRunner(threading.Thread):
                     self._log(f"[ROBOT] move_mode={settings.move_mode} {label}")
                 robot.connect()
                 self._log("[CONNECT] 연결 완료")
+
+            # ── HIL(리더암 개입) 준비 ──────────────────────────
+            # 실물에 명령이 나가는 경우에만 의미가 있다. dataset 소스나 apply_to_robot이
+            # 꺼진 상태에서 리더를 잡으면 CAN만 점유하고 하는 일이 없다.
+            if settings.hil:
+                if not settings.real_robot_enabled():
+                    self._log("[HIL] 실물 전송이 꺼져 있어 개입을 활성화하지 않습니다")
+                else:
+                    from hil_clutch import Clutch, ClutchMixer, KeyToggle
+
+                    from lerobot_robot_piper import PiperLeader, PiperLeaderConfig
+
+                    self._log(f"[HIL] 리더암 연결 중… port={settings.leader_port}")
+                    leader = PiperLeader(
+                        PiperLeaderConfig(id="infer_runner", port=settings.leader_port)
+                    )
+                    leader.connect()
+                    toggle = KeyToggle().start()
+                    mixer = ClutchMixer(toggle, leader, Clutch(settings.clutch_gain))
+                    self._log(
+                        f"[HIL] 활성 — space = 개입 on/off, q = 중단 "
+                        f"(clutch_gain={settings.clutch_gain:g})"
+                    )
 
             if settings.rviz:
                 try:
@@ -792,6 +829,42 @@ class InferenceRunner(threading.Thread):
 
                 votes = pipeline.votes_for_next
                 action = pipeline.next_action()
+
+                # ── HIL 개입 ───────────────────────────────────
+                # 사람이 잡은 동안에는 정책 대신 리더암 델타가 목표가 된다.
+                # 기록되는 action도 이 값이어야 영상↔움직임 인과가 맞는다
+                # (개입 궤적을 나중에 BC 재학습에 쓰는 게 목적이므로).
+                intervened = False
+                if mixer is not None:
+                    follower_pose = {
+                        name: float(value)
+                        for name, value in zip(state_names, measured_state)
+                    }
+                    policy_action = {
+                        f"{name}.pos": float(value)
+                        for name, value in zip(MOTOR_NAMES, action)
+                    }
+                    mixed, intervened, engage_dev = mixer.step(policy_action, follower_pose)
+                    if engage_dev is not None:
+                        self.engage_deviations.append(engage_dev)
+                        self._log(f"[HIL] 인계 — engage_deviation={engage_dev:.2f}")
+                    if intervened:
+                        self.intervention_steps += 1
+                        action = np.asarray(
+                            [mixed[f"{name}.pos"] for name in MOTOR_NAMES], dtype=np.float32
+                        )
+                        # 개입 중 스무딩 파이프라인은 계속 정책 궤적을 밀고 있으므로,
+                        # 반환 시점에 파이프라인 상태가 팔의 실제 위치와 어긋나 있다.
+                        # 그대로 두면 반환 첫 스텝에서 목표가 튀고, max_relative_target
+                        # 클램프에 걸려 팔이 기어간다. 매 스텝 현재 자세로 리셋해두면
+                        # 반환이 지금 위치에서 이어진다.
+                        pipeline.reset(action)
+                    if toggle is not None and toggle.abort:
+                        self._log("[HIL] q — 시도 중단 요청")
+                        self.hil_aborted = True
+                        status = "hil_abort"
+                        break
+
                 self.trajectory.append(action.copy())
 
                 # 스무딩된 궤적 자체의 속도(정규화 단위/초). 룩어헤드와 MIT가
@@ -866,6 +939,7 @@ class InferenceRunner(threading.Thread):
                             "infer_ms": infer_seconds * 1000.0,
                             "rate_clamp": pipeline.last_rate_adjustment,
                             "recorded": recorder.frames_written if recorder else 0,
+                            "intervention": intervened,
                         },
                     )
                 )
@@ -906,6 +980,29 @@ class InferenceRunner(threading.Thread):
                 self._infer_requests.put_nowait(None)
             if self._infer_thread is not None:
                 self._infer_thread.join(timeout=10)
+            # 키 리스너와 리더는 로봇보다 먼저 놓는다 — park 중에 space가 눌려
+            # 개입 상태로 바뀌어도 반영될 곳이 없어야 한다.
+            if toggle is not None:
+                with contextlib.suppress(Exception):
+                    toggle.stop()
+            if mixer is not None:
+                with contextlib.suppress(Exception):
+                    mixer.release()
+            if leader is not None:
+                try:
+                    leader.disconnect()
+                except Exception as error:
+                    self._log(f"[WARN] 리더 disconnect 실패: {error}")
+            if self.intervention_steps:
+                self._log(
+                    f"[HIL] 개입 스텝 {self.intervention_steps}회, "
+                    f"인계 {len(self.engage_deviations)}회"
+                    + (
+                        f", engage_deviation 최대 {max(self.engage_deviations):.2f}"
+                        if self.engage_deviations
+                        else ""
+                    )
+                )
             if recorder is not None:
                 with contextlib.suppress(Exception):
                     self._finalize_recording(recorder, status)
@@ -1407,6 +1504,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     robot.add_argument("--apply-to-robot", action="store_true")
     robot.add_argument("--real-robot-confirm", default="")
     robot.add_argument("--no-park-on-exit", dest="park_on_exit", action="store_false")
+
+    hil = parser.add_argument_group("HIL 개입 (리더암 클러치)")
+    hil.add_argument(
+        "--hil",
+        action="store_true",
+        help="리더암 개입 활성화. space=개입 on/off, q=중단. 실물 전송이 열려 있어야 동작",
+    )
+    hil.add_argument("--leader-port", default="can_leader", help="리더암 CAN 인터페이스")
+    hil.add_argument(
+        "--clutch-gain",
+        type=float,
+        default=1.0,
+        help="리더 변화량 -> 팔로워 반영 비율 (1.0=등배, <1이면 정밀 보정이 쉬워진다)",
+    )
     robot.add_argument(
         "--move-mode",
         type=int,
@@ -1512,6 +1623,9 @@ def settings_from_args(args: argparse.Namespace) -> RunSettings:
         "apply_to_robot": args.apply_to_robot,
         "real_robot_confirm": args.real_robot_confirm,
         "park_on_exit": args.park_on_exit,
+        "hil": args.hil,
+        "leader_port": args.leader_port,
+        "clutch_gain": args.clutch_gain,
         "camera_output_size": camera_output_size,
         "move_mode": args.move_mode,
         "move_speed_rate": args.move_speed_rate,
