@@ -133,39 +133,74 @@ def build_leader(leader_port):
     return leader
 
 
-def build_policy_fn(policy_path, dataset_root, task, device):
-    """관측 dict -> action dict 함수를 만든다.
+# build_policy_fn은 제거했다. 자체 추론 경로를 들고 있었는데 두 가지가 틀렸다:
+#   1) 카메라 크롭·리사이즈를 안 거치고 raw 관측을 그대로 정책에 먹였다. 학습은
+#      512x512 크롭본으로 했고 실제 카메라는 1280x720이라 화각이 다르다.
+#      (piper_infer_runner는 preprocess_live_camera_observation을 지난다)
+#   2) predict_action은 1스텝만 반환하고 chunk를 노출하지 않아 temporal ensemble이
+#      원리적으로 불가능했다 — 스무딩 없이 도는 셈이라 흔들림이 그대로 남는다.
+# 이제 추론·스무딩·안전은 전부 InferenceRunner가 맡고, 이 파일은 시도 경계에서
+# 판정하고 재시도를 결정하는 바깥 루프만 담당한다.
 
-    호출 경로는 piper_infer_preview.py와 동일(= lerobot_record.py의 record_loop).
-    robot.get_observation()이 이미 build_dataset_frame이 기대하는 raw 형식
-    ({"joint1.pos": float, ..., "top": HWC uint8})이라 변환이 필요 없다.
+
+def grab_judge_frame(serial: str, width=1280, height=720, warmup=45):
+    """판정용 프레임을 top 카메라에서 직접 뜬다 (BGR HWC).
+
+    정책 관측과 분리해서 읽는 이유: InferenceRunner가 시도마다 로봇·카메라를
+    잡았다 놓으므로, 시도 사이에는 러너의 카메라 핸들이 없다. 판정기는 크롭 전
+    원본 1280x720을 봐야 하고(board ROI가 그 좌표계다) 정책 입력과 요구가 달라서,
+    따로 읽는 편이 결합도 낮다 — 설계 문서 §4.4의 "판정기 전용 센서" 방향과 같다.
     """
-    from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
-    from lerobot.datasets.utils import OBS_STR, build_dataset_frame
-    from lerobot.policies.utils import make_robot_action
-    from lerobot.utils.control_utils import predict_action
-    from lerobot.utils.utils import get_safe_torch_device
+    import pyrealsense2 as rs
 
-    root = Path(dataset_root)
-    ds_meta = LeRobotDatasetMetadata(repo_id=root.name, root=root)
+    pipe = rs.pipeline()
+    cfg = rs.config()
+    cfg.enable_device(serial)
+    cfg.enable_stream(rs.stream.color, width, height, rs.format.bgr8, 30)
+    pipe.start(cfg)
+    try:
+        for _ in range(warmup):  # 자동 노출이 자리잡을 때까지 버린다
+            frames = pipe.wait_for_frames()
+        return np.asanyarray(frames.get_color_frame().get_data()).copy()
+    finally:
+        pipe.stop()
 
-    from piper_infer_preview import load_policy  # 같은 디렉터리
 
-    cfg, policy, pre, post = load_policy(policy_path, ds_meta, device)
-    torch_device = get_safe_torch_device(policy.config.device)
-    features = ds_meta.features
+def run_attempt_with_runner(settings, on_log=None) -> dict:
+    """InferenceRunner로 시도 1회. 반환: 요약 dict.
 
-    def policy_fn(obs: dict) -> dict:
-        frame = build_dataset_frame(features, obs, prefix=OBS_STR)
-        values = predict_action(
-            observation=frame, policy=policy, device=torch_device,
-            preprocessor=pre, postprocessor=post,
-            use_amp=getattr(policy.config, "use_amp", False),
-            task=task, robot_type="piper_follower",
-        )
-        return make_robot_action(values, features)
+    러너는 스레드라 events 큐로 진행상황이 나온다. 여기서는 로그만 흘려보내고
+    FINISHED를 기다린다. park는 러너가 disconnect(park=True)로 강제한다.
+    """
+    import queue as _queue
 
-    return policy_fn
+    from piper_infer_runner import Event, InferenceRunner
+
+    run = InferenceRunner(settings)
+    run.start()
+    while True:
+        try:
+            kind, payload = run.events.get(timeout=1.0)
+        except _queue.Empty:
+            if not run.is_alive():
+                break
+            continue
+        if kind == Event.LOG:
+            if on_log:
+                on_log(payload)
+            else:
+                print(f"    {payload}")
+        elif kind == Event.FINISHED:
+            break
+    run.join(timeout=30)
+    return {
+        "status": run.status,
+        "steps": len(run.trajectory),
+        "interventions": run.intervention_steps,
+        "engage_deviations": [round(d, 2) for d in run.engage_deviations],
+        "measured_fps": round(run.measured_fps(), 2),
+        "aborted": run.hil_aborted,
+    }
 
 
 def make_park_fn(robot, park_pose: dict | None):
@@ -195,18 +230,30 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--policy_path")
     p.add_argument("--dataset_root", help="학습에 쓴 LeRobotDataset 루트 (features 참조용)")
-    p.add_argument("--task", default="erase the triangle")
+    # ★ 학습 데이터의 task 문장 그대로여야 한다. 이 리포의 erase 데이터셋은 전부
+    #   도형 이름이 없는 단일 문장이다("erase the shape" / "pick up the eraser and
+    #   erase the shape"). 도형 이름을 넣으면 분포 밖이라 정책이 본 적 없는 입력이
+    #   된다. --target(판정 대상)은 우리가 쥔 라벨이라 task와 별개다.
+    p.add_argument("--task", default="pick up the eraser and erase the shape")
     p.add_argument("--target", default="triangle", choices=["circle", "triangle", "rectangle"])
     p.add_argument("--follower-port", default="can_follower1")
     p.add_argument("--leader-port", default="can_leader1")
-    p.add_argument("--top-cam", default="")
+    p.add_argument("--top-cam", default="327122074262", help="판정용 top 카메라 시리얼")
     p.add_argument("--wrist-cam", default="")
     p.add_argument("--cam-type", default="realsense")
     p.add_argument("--device", default="cuda")
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--max-steps", type=int, default=940, help="시도당 상한 (중앙값 720의 약 1.3배)")
     p.add_argument("--max-attempts", type=int, default=3)
-    p.add_argument("--park-pose", default="", help='예: "joint1.pos=0,joint2.pos=0,..." (미지정 시 robot.parking())')
+    p.add_argument("--mode", default="demo", help="러너 모드 프리셋 (demo | augment)")
+    p.add_argument(
+        "--top-crop",
+        default="280,0,720",
+        help="X,Y,SIZE. 학습 데이터를 만든 값과 같아야 한다 "
+             "(docs/training/smolvla_finetuning.md 기준 280,0,720)",
+    )
+    p.add_argument("--wrist-crop", default="", help="X,Y,SIZE. top_only 체크포인트면 비워둔다")
+    p.add_argument("--camera-output-size", type=int, default=512)
     p.add_argument("--hil", action="store_true", help="리더암 개입 활성화")
     p.add_argument("--clutch-gain", type=float, default=1.0, help="리더 변화량 -> 팔로워 반영 비율 (1.0=등배)")
     p.add_argument("--probe-leader", action="store_true", help="리더암 노이즈 플로어만 측정하고 종료")
@@ -228,52 +275,74 @@ def main():
         print("      실행 전 확인: park 자세가 카메라 시야를 안 가리는지, CAN이 비어있는지.")
         return 0
 
-    park_pose = None
-    if args.park_pose:
-        park_pose = {k: float(v) for k, v in (kv.split("=") for kv in args.park_pose.split(","))}
-
     import erase_check as EC
 
-    robot = build_robot(args.follower_port, args.top_cam, args.wrist_cam, args.cam_type)
-    leader = build_leader(args.leader_port) if args.hil else None
-    clutch = Clutch(args.clutch_gain) if args.hil else None
-    toggle = KeyToggle().start() if args.hil else None
+    from piper_infer_runner import REAL_ROBOT_CONFIRM, RunSettings, resolve_crops
+
+    # 추론·스무딩·안전은 러너가 맡는다. 여기서 정하는 건 "시도 하나가 어떤
+    # 조건으로 도는가"뿐이다.
+    base = dict(
+        dataset_root=Path(args.dataset_root).expanduser().resolve(),
+        policy_path=args.policy_path,
+        task=args.task,
+        device=args.device,
+        source="robot",
+        apply_to_robot=True,
+        real_robot_confirm=REAL_ROBOT_CONFIRM,
+        fps=float(args.fps),
+        max_steps=args.max_steps,
+        rviz=False,
+        park_on_exit=True,          # 시도 끝 park는 러너가 강제한다
+        crops=resolve_crops({}, args.top_crop, args.wrist_crop or None),
+        camera_output_size=args.camera_output_size,
+        hil=args.hil,
+        leader_port=args.leader_port,
+        clutch_gain=args.clutch_gain,
+    )
     if args.hil:
         print("[HIL] space = 개입 on/off,  q = 시도 중단")
-    policy_fn = build_policy_fn(args.policy_path, args.dataset_root, args.task, args.device)
-    park_fn = make_park_fn(robot, park_pose)
 
     checker = EC.EraseChecker()
     attempts = []
 
     def grab():
-        return grab_park_frame(robot, park_fn)
+        return grab_judge_frame(args.top_cam)
 
     try:
-        checker.set_reference(grab())
+        # ★ 기준은 시도 1 이전에 딱 한 번만 잡는다. 지운 마카는 되돌릴 수 없어서
+        #   재시도는 항상 이전 시도 위에 쌓이고, erased_frac은 누적값이어야 맞다.
+        ref = checker.set_reference(grab())
+        print(f"[INFO] 기준 프레임 — 검출된 도형: {[k for k, _ in ref['shapes']]}")
+        if not any(k.startswith(args.target) for k, _ in ref["shapes"]):
+            print(f"[WARN] target '{args.target}'을 기준 프레임에서 못 찾았다 — "
+                  f"판정이 무의미하다. 보드/조명 확인 후 다시 실행할 것.")
+            return 2
+
         for i in range(1, args.max_attempts + 1):
-            print(f"[INFO] 시도 {i}/{args.max_attempts} 시작")
-            steps = run_attempt(robot, policy_fn, park_fn, args.fps, args.max_steps,
-                                toggle, leader, clutch)
+            print(f"[INFO] ── 시도 {i}/{args.max_attempts} ──")
+            summary = run_attempt_with_runner(RunSettings.from_mode(args.mode, **base))
             r = checker.check(grab(), args.target)
             r["attempt"] = i
-            r["steps"] = len(steps)
-            r["interventions"] = sum(s["intervention"] for s in steps)
-            attempts.append({"result": r, "log": steps})
+            r.update(summary)
+            attempts.append(r)
             print(f"  → success={r['success']} target_erased={r.get('target_erased')} "
-                  f"max_distractor={r.get('max_distractor_erased')} interventions={r['interventions']}")
+                  f"max_distractor={r.get('max_distractor_erased')} "
+                  f"steps={summary['steps']} interventions={summary['interventions']} "
+                  f"fps={summary['measured_fps']}")
+            if summary["status"] not in ("finished", "hil_abort"):
+                print(f"[STOP] 러너가 {summary['status']}로 끝났다 — 재시도하지 않는다.")
+                break
             if r["success"]:
                 break
     finally:
-        if toggle is not None:
-            toggle.stop()
-        park_fn()
         Path(args.out).write_text(json.dumps(attempts, ensure_ascii=False, indent=2))
         print(f"[INFO] 로그 저장: {args.out}")
 
-    ok = bool(attempts) and attempts[-1]["result"]["success"]
-    total = sum(a["result"]["steps"] for a in attempts)
-    print(f"[결과] success={ok}  attempts={len(attempts)}  total_steps={total}")
+    ok = bool(attempts) and attempts[-1]["success"]
+    total = sum(a["steps"] for a in attempts)
+    intervened = sum(a["interventions"] for a in attempts)
+    print(f"[결과] success={ok}  attempts={len(attempts)}  total_steps={total}  "
+          f"intervention_rate={100*intervened/total if total else 0:.1f}%")
     return 0 if ok else 1
 
 
