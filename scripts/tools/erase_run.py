@@ -192,6 +192,7 @@ def run_attempt_with_runner(settings, on_log=None) -> dict:
     from piper_infer_runner import Event, InferenceRunner
 
     run = InferenceRunner(settings)
+    steps: list[dict] = []
     run.start()
     while True:
         try:
@@ -205,6 +206,20 @@ def run_attempt_with_runner(settings, on_log=None) -> dict:
                 on_log(payload)
             else:
                 print(f"    {payload}")
+        elif kind == Event.STEP:
+            # 스텝별 진단. 요약만 남기면 "왜 실패했는지"를 사후에 못 가린다 —
+            # 클램프 포화가 원인인지 결과인지 같은 질문이 여기서 갈린다.
+            steps.append(
+                {
+                    "step": payload["step"],
+                    "action": payload["action"],
+                    "measured": payload["measured"],
+                    "votes": payload["votes"],
+                    "rate_clamp": payload["rate_clamp"],
+                    "intervention": payload.get("intervention", False),
+                    "infer_ms": payload["infer_ms"],
+                }
+            )
         elif kind == Event.FINISHED:
             break
     run.join(timeout=30)
@@ -215,7 +230,35 @@ def run_attempt_with_runner(settings, on_log=None) -> dict:
         "engage_deviations": [round(d, 2) for d in run.engage_deviations],
         "measured_fps": round(run.measured_fps(), 2),
         "aborted": run.hil_aborted,
+        "_steps": steps,
     }
+
+
+def save_step_traces(attempts: list[dict], out_path: Path) -> Path | None:
+    """스텝별 궤적을 npz로 따로 뺀다 (JSON에 넣으면 수십 MB가 된다)."""
+    arrays = {}
+    for entry in attempts:
+        steps = entry.pop("_steps", None)
+        if not steps:
+            continue
+        i = entry["attempt"]
+        arrays[f"attempt{i}_action"] = np.array([s["action"] for s in steps], dtype=np.float32)
+        arrays[f"attempt{i}_measured"] = np.array([s["measured"] for s in steps], dtype=np.float32)
+        # rate_clamp는 구현에 따라 스칼라이거나 관절별 배열이라 평균으로 눕힌다.
+        arrays[f"attempt{i}_rate_clamp"] = np.array(
+            [float(np.mean(np.asarray(s["rate_clamp"], dtype=np.float64)))
+             if s["rate_clamp"] is not None else 0.0
+             for s in steps],
+            dtype=np.float32,
+        )
+        arrays[f"attempt{i}_intervention"] = np.array(
+            [bool(s["intervention"]) for s in steps], dtype=bool
+        )
+    if not arrays:
+        return None
+    path = out_path.with_suffix(".steps.npz")
+    np.savez_compressed(path, **arrays)
+    return path
 
 
 def make_park_fn(robot, park_pose: dict | None):
@@ -269,6 +312,13 @@ def main():
     )
     p.add_argument("--wrist-crop", default="", help="X,Y,SIZE. top_only 체크포인트면 비워둔다")
     p.add_argument("--camera-output-size", type=int, default=512)
+    # 제어 인터페이스 노브 2개를 러너로 흘려보낸다. 실측에서 팔이 목표를 약 5.8만큼
+    # 뒤처져 따라가 클램프(기본 5)에 상시 걸렸고, 그 구간에서는 명령이 '실측+5'로
+    # 덮여 스무딩이 무의미해진다. 원인 가르기에 필요한 값들이다.
+    p.add_argument("--max-relative-target", type=float, default=None,
+                   help="send_action 클램프. None이면 recording.env의 MAX_RELATIVE_TARGET(5)")
+    p.add_argument("--move-speed-rate", type=int, default=None,
+                   help="컨트롤러 이동 속도 %% (기본 30). 팔이 목표를 못 쫓아가면 이걸 올린다")
     p.add_argument("--hil", action="store_true", help="리더암 개입 활성화")
     p.add_argument("--clutch-gain", type=float, default=1.0, help="리더 변화량 -> 팔로워 반영 비율 (1.0=등배)")
     p.add_argument("--probe-leader", action="store_true", help="리더암 노이즈 플로어만 측정하고 종료")
@@ -328,6 +378,8 @@ def main():
         hil=args.hil,
         leader_port=args.leader_port,
         clutch_gain=args.clutch_gain,
+        max_relative_target=args.max_relative_target,
+        move_speed_rate=args.move_speed_rate,
     )
     if args.hil:
         print("[HIL] space = 개입 on/off,  q = 시도 중단")
@@ -365,8 +417,9 @@ def main():
             if r["success"]:
                 break
     finally:
+        traces = save_step_traces(attempts, Path(args.out))
         Path(args.out).write_text(json.dumps(attempts, ensure_ascii=False, indent=2))
-        print(f"[INFO] 로그 저장: {args.out}")
+        print(f"[INFO] 로그 저장: {args.out}" + (f" / {traces}" if traces else ""))
 
     ok = bool(attempts) and attempts[-1]["success"]
     total = sum(a["steps"] for a in attempts)
