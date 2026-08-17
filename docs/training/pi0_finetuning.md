@@ -246,6 +246,7 @@ lerobot-train \
 SmolVLA와 다른 점만 짚으면:
 
 - **`--policy.dtype=bfloat16`** — pi0 기본값이 `float32`라 그냥 두면 VRAM이 2배 든다
+  (근거는 아래 "BF16 정밀도" 절 참고)
 - **`--peft.*`** — LoRA. `target_modules`는 안 줘도 된다(`modeling_pi0.py:1301`에
   `gemma_expert`의 q/v_proj + action/state projection이 기본값으로 정의돼 있음)
 - **`--rename_map`** — 위 참고
@@ -253,6 +254,57 @@ SmolVLA와 다른 점만 짚으면:
   `~/.cache/wandb/artifacts`에 캐시가 쌓인다(SmolVLA 학습 때 29GB까지 쌓인 적 있음)
 - **`--policy.freeze_vision_encoder` / `--policy.train_expert_only` 없음** — LoRA라
   어차피 어댑터만 학습하므로 불필요
+
+## BF16 정밀도
+
+### `--policy.dtype`의 실제 기본값은 `float32`다
+
+`PI0Config.dtype`의 클래스 기본값은 `"float32"`다
+(`configuration_pi0.py:34`, `dtype: str = "float32"  # Options: "bfloat16", "float32"`).
+그냥 두면 pi0(3.5B)를 fp32로 올리게 되어 VRAM이 두 배로 들고, 32GB 카드 한 장에서는
+LoRA를 써도 못 들어간다. 그래서 `--policy.dtype=bfloat16`을 **명시적으로** 줘야 한다.
+
+`PaliGemmaWithExpertModel.__init__`의 `precision` 파라미터 자체는 기본값이
+`"bfloat16"`이지만(`modeling_pi0.py:340`), 실제로는 이 값이 쓰이지 않는다 —
+`PI0Policy`가 이 클래스를 만들 때 `precision=config.dtype`으로 **config 값을 그대로
+전달**하기 때문이다(`modeling_pi0.py:556`). 즉 클래스 시그니처만 보고 "pi0는 기본이
+bf16"이라고 판단하면 틀린다. 우리가 실제로 쓰는 `PI0Config` 경로의 기본값은 float32다.
+
+### bf16이어도 일부 파라미터는 fp32로 유지된다
+
+`--policy.dtype=bfloat16`을 줘도 다음은 자동으로 fp32에 남는다
+(`to_bfloat16_for_selected_params()`, `modeling_pi0.py:392-412`):
+
+```
+vision_tower.vision_model.embeddings.patch_embedding.weight/bias
+vision_tower.vision_model.embeddings.position_embedding.weight
+input_layernorm / post_attention_layernorm / model.norm  (모든 LayerNorm)
+```
+
+이름에 이 문자열이 들어간 파라미터는 `.to(bfloat16)` 이후에 다시 `.to(float32)`로
+덮어써진다. Vision patch/position embedding과 모든 정규화 레이어는 정밀도에 민감해서
+원저자가 의도적으로 남겨둔 것 — 우리가 조정한 값이 아니라 pi0/OpenPI 자체 구현이다.
+
+### 공식 근거 — bf16이 loss는 더 높다
+
+OpenPI 공식 저장소(https://github.com/Physical-Intelligence/openpi) 문서:
+
+> The system supports either **full bfloat16 (default) or full float32** [...]
+> **Mixed precision is not yet supported.** [...] bfloat16 uses less memory but
+> **exhibits higher losses compared to float32**.
+
+즉 원저자들 스스로 "bf16이 float32보다 loss가 높다"고 명시한다. JAX 구현은 weight/grad는
+fp32, activation만 bf16으로 섞는 진짜 mixed precision을 기본으로 쓰지만, PyTorch
+구현(우리가 쓰는 lerobot 포트의 기반)은 그 기능이 없어 **전체를 bf16 아니면 전체를
+fp32 중 하나로 선택**해야 한다. 우리가 bf16을 택한 이유는 SmolVLA와 동일하게 32GB VRAM
+제약 때문이고(§"왜 LoRA인가" 참고), loss가 float32보다 다소 높게 나올 수 있다는 걸
+감안해야 한다 — 실측 최종 loss 0.081(요약 표 참고)을 다른 정밀도 설정과 직접 비교할 때
+이 차이를 고려할 것.
+
+SmolVLA의 bf16 근거는 `docs/training/smolvla_finetuning.md`의 "BF16 mixed precision"
+절 참고 — 그쪽은 원저자가 애초에 bf16 + Accelerate mixed precision을 학습 레시피로
+채택했고(SmolVLA 논문 4.3절), pi0처럼 "float32가 기본, bf16을 명시로 켜야 함" 구조가
+아니라는 점이 다르다.
 
 ## 실측값
 
