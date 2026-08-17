@@ -538,6 +538,9 @@ class InferenceRunner(threading.Thread):
         self.hil_aborted = False
         # HIL 개입 토글. --hil일 때 루프가 채운다 (그 전에는 None).
         self.hil_toggle = None
+        # 개입 명령이 관절 범위를 벗어나 잘린 스텝 수. 0이 아니면 리더암이
+        # 팔로워가 갈 수 없는 곳을 가리키고 있다는 뜻이다.
+        self._hil_clipped_steps = 0
 
         self._pending_smoothing: SmoothingConfig | None = None
         self._smoothing_lock = threading.Lock()
@@ -899,7 +902,19 @@ class InferenceRunner(threading.Thread):
 
                     # 쓸 게 떨어졌으면 어쩔 수 없이 기다린다 — 목표 없이 보내느니
                     # 한 스텝 늦는 게 낫다.
-                    if pipeline.pending_steps == 0:
+                    #
+                    # 단 **개입 중에는 기다리지 않는다.** 개입 중에는 매 스텝
+                    # pipeline.reset()으로 버퍼를 비우므로 pending_steps가 항상 0이고,
+                    # 그대로 두면 매 스텝 추론 1회(약 113ms)를 기다리게 된다.
+                    # 실물 첫 HIL에서 개입 108스텝 동안 큐 대기가 107회 발생했고
+                    # 제어 주기가 29.4fps -> 17.5fps로 떨어졌다 — 하필 사람이 팔을
+                    # 몰고 있는 구간에서 제어가 느려진다.
+                    # 어차피 이 스텝의 목표는 리더암이 정하므로 정책 chunk가 필요없다.
+                    # 아래 HIL 분기가 pipeline.next_action() 결과를 통째로 버린다.
+                    intervening_now = (
+                        toggle is not None and getattr(toggle, "active", False)
+                    )
+                    if pipeline.pending_steps == 0 and not intervening_now:
                         waited = self._await_chunk(5.0, step, settings.latency_align)
                         if waited is None:
                             self._log("[ERROR] 추론 결과를 기다리다 시간 초과 — 중단합니다")
@@ -940,6 +955,27 @@ class InferenceRunner(threading.Thread):
                         action = np.asarray(
                             [mixed[f"{name}.pos"] for name in MOTOR_NAMES], dtype=np.float32
                         )
+                        # ★ 개입 명령도 관절 범위로 자른다. 정책 경로는
+                        # SmoothingPipeline의 clip_to_range를 지나는데 개입 명령은
+                        # 그 파이프라인 출력을 통째로 대체하므로 안 잘리고 있었다.
+                        # 실물 첫 HIL에서 joint5 목표가 240.42까지 나갔다(정규화
+                        # 범위는 -100~100). 팔로워의 max_relative_target 클램프가
+                        # 막아줘서 사고는 없었지만, 그건 '상대 변화량' 안전장치라
+                        # 절대 범위를 보장하지 않는다 — 매 스텝 클램프 한도만큼씩
+                        # 범위 밖으로 기어갈 수 있다.
+                        # 클러치가 foll0 + gain*(leader - lead0)로 델타를 쌓기
+                        # 때문에, 리더를 크게 움직이면 원리적으로 범위를 넘는다.
+                        clipped = np.clip(action, GLOBAL_LOW, GLOBAL_HIGH)
+                        if not np.array_equal(clipped, action):
+                            self._hil_clipped_steps += 1
+                            if self._hil_clipped_steps in (1, 30, 300):
+                                worst = int(np.argmax(np.abs(action - clipped)))
+                                self._log(
+                                    f"[HIL] 개입 명령이 관절 범위를 벗어나 잘렸다 "
+                                    f"({MOTOR_NAMES[worst]}: {action[worst]:.1f} -> "
+                                    f"{clipped[worst]:.1f}). 리더암을 반대로 되돌리세요."
+                                )
+                        action = clipped
                         # 개입 중 스무딩 파이프라인은 계속 정책 궤적을 밀고 있으므로,
                         # 반환 시점에 파이프라인 상태가 팔의 실제 위치와 어긋나 있다.
                         # 그대로 두면 반환 첫 스텝에서 목표가 튀고, max_relative_target
