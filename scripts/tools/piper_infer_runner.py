@@ -1551,6 +1551,10 @@ class InferenceRunner(threading.Thread):
         episode_index = recorder.episodes_written
         frames = recorder.frames_written
         recorder.save_episode()
+        # 수동 녹화 요약이 이 카운터를 읽는다. 여기서 안 올리면 실행 끝에 저장된
+        # 에피소드를 '0개'로 보고하게 된다 — 실제로 296프레임을 저장하고도
+        # "저장된 에피소드가 없다"고 찍혀 사람을 헷갈리게 했다.
+        self.recorded_episodes += 1
 
         raw = np.stack(self.raw_trajectory) if self.raw_trajectory else np.zeros((0, 7), np.float32)
         raw_path = recorder.write_raw_actions(raw, episode_index)

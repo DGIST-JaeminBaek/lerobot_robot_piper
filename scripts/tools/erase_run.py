@@ -370,6 +370,9 @@ def main():
     p.add_argument("--no-record-on-intervention", action="store_true",
                    help="space(개입 토글)에 녹화를 묶지 않는다. 기본은 묶여 있어서 "
                         "개입 시작=녹화 시작, 반환=에피소드 저장이 된다")
+    p.add_argument("--record-raw-frames", action="store_true",
+                   help="크롭 전 원본(1280x720)을 담는다. 기본은 정책 입력과 같은 "
+                        "512x512 크롭본 — raw는 30Hz를 못 지킨다(실측 19.5Hz)")
     p.add_argument("--record-root", default=None,
                    help="수동 녹화 데이터셋 루트 (기본: records/hil/<시각>/dataset)")
     p.add_argument("--record-repo-id", default=None,
@@ -497,7 +500,14 @@ def main():
             args.record_root or (run_dir / "dataset")
         ).expanduser().resolve()
         base["record_repo_id"] = args.record_repo_id or f"local/hil_{stamp}"
-        base["record_raw_frames"] = True
+        # ★ raw(1280x720) 대신 정책 입력과 같은 크롭본(512x512)을 담는다.
+        # 이유 두 가지:
+        #  - 비용. raw는 카메라 2대 × 1280×720×3 ≈ 5.5MB/프레임이라 30Hz를 못 지킨다.
+        #    실측에서 제어 주기가 30 -> 19.53Hz로 떨어졌고, 데이터셋 meta에는 fps가
+        #    30으로 적혀 학습 때 시간축이 어긋난다.
+        #  - 일관성. 기존 학습 데이터셋이 전부 512x512 크롭본이다. 같은 형식이어야
+        #    바로 이어붙여 재학습할 수 있다.
+        base["record_raw_frames"] = args.record_raw_frames
         print(f"[INFO] 수동 녹화 켜짐 — 데이터셋: {base['record_root']}")
         if args.no_record_on_intervention:
             print("       패널의 '● 녹화 시작' / '■ 녹화 종료'로 구간을 담습니다.")
