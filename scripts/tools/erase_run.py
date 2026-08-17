@@ -181,6 +181,15 @@ def grab_judge_frame(serial: str, width=1280, height=720, warmup_s=3.0, fps=30):
     return image
 
 
+# 상태 블록을 쓰는 동안에도 반드시 보여야 하는 로그. 나머지는 삼킨다.
+IMPORTANT_LOG_TAGS = ("[RECORD]", "[HIL]", "[ERROR]", "[STOP]", "[WARN]", "[SAFETY]")
+
+
+def _filtered_log(message: str) -> None:
+    if any(tag in message for tag in IMPORTANT_LOG_TAGS):
+        print(f"    {message}", flush=True)
+
+
 def run_attempt_with_runner(settings, on_log=None, on_step=None,
                             on_runner=None) -> dict:
     """InferenceRunner로 시도 1회. 반환: 요약 dict.
@@ -517,6 +526,15 @@ def main():
             panel.set_phase("판정용 프레임 촬영 (park)")
         return grab_judge_frame(args.top_cam)
 
+    # 러너 참조를 붙잡아 둔다. 패널 버튼(녹화·개입)이 이걸 통해 러너를 제어하고,
+    # 끝나고 녹화 결과를 요약할 때도 필요하다.
+    runner_ref = {}
+
+    def on_runner(run):
+        runner_ref["run"] = run
+        if panel:
+            panel.attach_runner(run)
+
     def on_step(payload):
         if status:
             status.on_step(payload)
@@ -543,13 +561,15 @@ def main():
                 panel.start_attempt(i)
             summary = run_attempt_with_runner(
                 RunSettings.from_mode(args.mode, **base),
-                # 러너 로그를 그대로 찍으면 상태 블록이 흐트러진다 — 상태창을 쓰는
-                # 동안에는 로그를 삼키고, 끝나고 한 번에 낸다.
-                on_log=(lambda m: None) if status else None,
+                # 러너 로그를 다 찍으면 상태 블록이 흐트러진다. 그렇다고 전부
+                # 삼키면 안 된다 — 처음엔 전부 삼켰는데, 그 바람에 녹화가 안 된
+                # 실행에서 '[RECORD] 녹화 시작'이 찍혔는지조차 알 수 없었다.
+                # 사람이 놓치면 안 되는 것만 통과시킨다.
+                on_log=_filtered_log if status else None,
                 on_step=on_step,
                 # 패널 버튼이 누를 개입 토글은 러너가 만든다. 러너가 뜬 직후에
                 # 건네받아야 첫 개입부터 버튼이 먹는다.
-                on_runner=(lambda run: panel.attach_runner(run)) if panel else None,
+                on_runner=on_runner,
             )
             if status:
                 status.set_phase("판정 중")
@@ -575,6 +595,15 @@ def main():
                   f"fps={summary['measured_fps']}")
             # 실패했으면 "어디가" 남았는지를 사람이 보고 다음 판단을 한다.
             # 이 정보를 정책에 넣을 통로는 아직 없다 (설계 문서 §4.6-③).
+            if args.record_manual:
+                run = runner_ref.get("run")
+                n = int(getattr(run, "recorded_episodes", 0)) if run else 0
+                if n:
+                    print(f"  녹화: 에피소드 {n}개 저장 -> {base['record_root']}")
+                else:
+                    # 조용히 넘어가면 나중에야 빈 데이터셋을 발견하게 된다.
+                    print("  녹화: ★ 저장된 에피소드가 없다 — 패널의 '● 녹화 시작'을 "
+                          "누르고 '■ 녹화 종료'로 끊어야 담긴다")
             if r.get("residual"):
                 print(f"  잔여: {ES.format_residual(r['residual'])}")
                 for line in ES.format_grid(r["residual"]):
