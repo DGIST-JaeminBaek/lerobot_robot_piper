@@ -260,6 +260,7 @@ class RolloutRecorder:
         features: dict,
         task: str,
         robot_type: str = "piper_follower",
+        max_pending: int = 300,
     ) -> None:
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
@@ -269,6 +270,26 @@ class RolloutRecorder:
         self.fps = fps
         self.frames_written = 0
         self.episodes_written = 0
+        # ── 비동기 기록 ────────────────────────────────────
+        # LeRobotDataset.add_frame은 이미지를 그 자리에서 디스크에 쓴다. 실측(실제
+        # 카메라 프레임, 카메라 2대):
+        #     raw 1280x720  80.5ms/프레임  -> 30Hz 예산(33.3ms)의 241%
+        #     crop 512x512  25.3ms/프레임  -> 76%
+        # 즉 크롭본으로 줄여도 예산의 3/4를 녹화가 먹어서 제어 루프가 아슬아슬해진다.
+        # 실물에서 raw로 녹화했을 때 제어 주기가 30 -> 19.53Hz로 떨어졌고, 데이터셋
+        # meta에는 fps가 30으로 적혀 시간축이 어긋난 채 남았다.
+        # 그래서 제어 루프는 큐에 넣기만 하고 쓰기는 별도 스레드가 한다.
+        self._queue: queue.Queue = queue.Queue(maxsize=max_pending)
+        self._dropped = 0
+        # 큐에 넣었지만 아직 dataset에 반영되지 않은 프레임 수.
+        # queue.empty()로 기다리면 안 된다 — 마지막 항목을 '꺼낸' 순간 empty가
+        # True가 되는데 그때는 아직 쓰는 중이라, 프레임 하나가 빠진 채 에피소드가
+        # 닫힌다(실측: 300개 넣고 299개만 반영돼 parquet 길이 불일치로 죽었다).
+        self._inflight = 0
+        self._inflight_lock = threading.Lock()
+        self._idle = threading.Condition(self._inflight_lock)
+        self._writer_error: str | None = None
+        self._stop = threading.Event()
         self.dataset = LeRobotDataset.create(
             repo_id=repo_id,
             fps=fps,
@@ -277,6 +298,44 @@ class RolloutRecorder:
             robot_type=robot_type,
             use_videos=True,
         )
+        self._writer = threading.Thread(target=self._writer_loop, name="rollout-writer",
+                                        daemon=True)
+        self._writer.start()
+
+    def _writer_loop(self) -> None:
+        """큐를 비우며 실제 디스크 쓰기를 담당한다. 이 스레드만 dataset을 만진다."""
+        while True:
+            item = self._queue.get()
+            if item is None:           # 종료 신호
+                self._queue.task_done()
+                return
+            try:
+                self.dataset.add_frame(item)
+            except Exception as exc:   # 한 프레임 실패로 실행을 멈추지 않는다
+                self._writer_error = f"{type(exc).__name__}: {exc}"
+            finally:
+                self._queue.task_done()
+                with self._idle:
+                    self._inflight -= 1
+                    if self._inflight == 0:
+                        self._idle.notify_all()
+
+    def drain(self, timeout: float = 60.0) -> None:
+        """큐가 빌 때까지 기다린다. save_episode 전에 반드시 불러야 한다 —
+        안 그러면 아직 안 쓰인 프레임이 있는 채로 에피소드를 닫는다."""
+        with self._idle:
+            if self._inflight:
+                self._idle.wait_for(lambda: self._inflight == 0, timeout=timeout)
+        if self._inflight:
+            self._log_drain_timeout()
+
+    def _log_drain_timeout(self) -> None:
+        print(f"[RECORD] 경고: 쓰기가 밀려 {self._inflight}프레임이 반영되지 않았습니다")
+
+    @property
+    def dropped_frames(self) -> int:
+        """큐가 꽉 차서 버린 프레임 수. 0이 아니면 기록이 제어 주기를 못 따라간 것."""
+        return self._dropped
 
     def add_frame(
         self,
@@ -291,13 +350,31 @@ class RolloutRecorder:
             "task": self.task,
         }
         for camera, image in images.items():
-            frame[f"observation.images.{camera}"] = np.asarray(image)
-        self.dataset.add_frame(frame)
+            # 복사한다. 호출자가 다음 스텝에 같은 버퍼를 재사용하면 쓰기 스레드가
+            # 뒤바뀐 내용을 저장하게 된다.
+            frame[f"observation.images.{camera}"] = np.asarray(image).copy()
+        with self._idle:
+            self._inflight += 1
+        try:
+            self._queue.put_nowait(frame)
+        except queue.Full:
+            with self._idle:
+                self._inflight -= 1
+            # 버리는 편이 낫다 — 여기서 블로킹하면 제어 루프가 멈춘다.
+            # 몇 장 버렸는지는 세서 실행 끝에 보고한다.
+            self._dropped += 1
+            return
         self.frames_written += 1
 
     def save_episode(self) -> None:
         if self.frames_written == 0:
             return
+        self.drain()          # 쓰기 스레드가 밀린 프레임을 다 반영할 때까지
+        if self._writer_error:
+            print(f"[RECORD] 경고: 쓰기 스레드 오류 — {self._writer_error}")
+        if self._dropped:
+            print(f"[RECORD] 경고: 큐가 밀려 {self._dropped}프레임을 버렸습니다 "
+                  f"— 학습에 쓰기 전에 확인하세요")
         self.dataset.save_episode()
         self.episodes_written += 1
         # 다음 에피소드를 위해 리셋한다. 수동 녹화는 한 실행에서 구간을 여러 번
@@ -306,6 +383,8 @@ class RolloutRecorder:
         self.frames_written = 0
 
     def discard_episode(self) -> None:
+        # 쓰기가 밀린 채로 지우면 버퍼에 남은 프레임이 다음 에피소드로 새어든다.
+        self.drain()
         buffer = getattr(self.dataset, "episode_buffer", None)
         if buffer is not None:
             episode_index = self._current_episode_index(buffer)

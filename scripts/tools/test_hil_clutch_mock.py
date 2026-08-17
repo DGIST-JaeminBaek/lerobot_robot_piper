@@ -316,3 +316,31 @@ def test_record_arm_stop_are_idempotent():
     r._record_stop_requested = False
     R.InferenceRunner.stop_recording(r)         # 이미 꺼져 있으면 아무 일 없어야 한다
     assert r._record_stop_requested is False
+
+
+def test_recorder_is_asynchronous_and_drains_by_completion():
+    """녹화가 제어 루프를 막으면 안 되고, drain은 '쓰기 완료' 기준이어야 한다.
+
+    실측: 동기 방식은 실제 카메라 프레임(512x512, 카메라 2대)에서 25.3ms/프레임으로
+    30Hz 예산(33.3ms)의 76%를 먹었다. raw 1280x720이면 80.5ms(241%)라 실물에서
+    제어 주기가 19.53Hz로 떨어졌다.
+
+    drain을 queue.empty()로 구현하면 안 된다 — 마지막 항목을 '꺼낸' 순간 empty가
+    True가 되는데 아직 쓰는 중이라, 프레임 하나가 빠진 채 에피소드가 닫히고
+    parquet 길이 불일치로 죽는다(실측: 300개 중 299개).
+    """
+    import pathlib as _p
+
+    src = (_p.Path(__file__).parent / "piper_infer_runner.py").read_text()
+    # 쓰기는 별도 스레드
+    assert "rollout-writer" in src
+    assert "def _writer_loop" in src
+    # 제어 루프는 큐에 넣기만 한다
+    assert "self._queue.put_nowait(frame)" in src
+    # drain은 완료 카운터 기준 (empty() 폴링이 아니라)
+    assert "self._idle.wait_for(lambda: self._inflight == 0" in src
+    assert "while not self._queue.empty()" not in src
+    # save_episode 전에 반드시 drain
+    assert "self.drain()          # 쓰기 스레드가 밀린 프레임을 다 반영할 때까지" in src
+    # 큐가 차면 버리되 세어서 보고 (블로킹하면 제어 루프가 멈춘다)
+    assert "self._dropped += 1" in src

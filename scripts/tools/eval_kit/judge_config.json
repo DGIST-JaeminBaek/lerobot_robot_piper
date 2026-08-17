@@ -1,0 +1,18 @@
+{
+  "_comment": "판정기 동결 설정. 캘리브레이션이 끝나면 이 파일을 고치지 말 것 — 이 값이 논문 숫자의 정의다. 바꿔야 하면 judge_version을 올리고 CSV에 두 버전이 섞이지 않게 한다.",
+  "judge_version": "1.0.0",
+
+  "theta": 0.9,
+  "max_damage": 0.10,
+
+  "board": [228, 0, 515, 720],
+  "dark_ratio": 0.72,
+  "max_sat": 25,
+  "min_shape_area": 2000,
+  "max_aspect": 4.0,
+  "max_span": 0.7,
+  "merge_gap": 30,
+  "pad": 12,
+
+  "_theta_note": "게이트(ink_metric.SUCCESS_ERASED)와 지금은 같은 값이지만 의도적으로 별도 파일이다. calibrate.py로 사람 라벨과 맞춘 뒤 이 값만 갱신하고, 게이트 값은 건드리지 않는다."
+}

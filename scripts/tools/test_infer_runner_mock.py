@@ -313,6 +313,7 @@ def test_recorder_writes_task_and_action_on_every_frame(recorder):
         action=np.full(7, 2.0, np.float32),
         images={"top": np.zeros((8, 8, 3), np.uint8)},
     )
+    recorder.drain()   # 기록은 비동기 — 확인 전에 반영을 기다린다
     frame = recorder.dataset.frames[0]
     assert frame["task"] == "erase the shape"
     assert frame["observation.images.top"].shape == (8, 8, 3)

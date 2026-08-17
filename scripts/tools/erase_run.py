@@ -618,7 +618,14 @@ def main():
                 run = runner_ref.get("run")
                 n = int(getattr(run, "recorded_episodes", 0)) if run else 0
                 if n:
-                    print(f"  녹화: 에피소드 {n}개 저장 -> {base['record_root']}")
+                    fps = summary.get("measured_fps", 0.0)
+                    note = ""
+                    if fps and abs(fps - args.fps) / args.fps > 0.1:
+                        # 데이터셋 meta에는 설정 fps가 적히므로, 실측이 크게 다르면
+                        # 그대로 학습에 쓸 때 시간축이 어긋난다.
+                        note = (f"  ★ 실측 {fps:.1f}Hz vs 설정 {args.fps}Hz — "
+                                f"학습 전 확인 필요")
+                    print(f"  녹화: 에피소드 {n}개 저장 -> {base['record_root']}{note}")
                 else:
                     # 조용히 넘어가면 나중에야 빈 데이터셋을 발견하게 된다.
                     print("  녹화: ★ 저장된 에피소드가 없다 — 패널의 '● 녹화 시작'을 "
