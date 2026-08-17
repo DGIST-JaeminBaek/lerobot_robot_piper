@@ -57,7 +57,14 @@ TARGET="${TARGET:-triangle}"
 
 STAGE="${STAGE:-dry}"
 ATTEMPTS="${ATTEMPTS:-1}"
+# 정책에게 주는 스텝 예산. 개입 스텝은 여기서 빠지므로(러너가 제외) 사람이
+# 오래 조작해도 정책 시간이 줄지 않는다.
 MAX_STEPS="${MAX_STEPS:-940}"
+# demo   = 기록 없음. 게이트/HIL 동작만 볼 때.
+# augment= 롤아웃을 LeRobotDataset으로 기록 + 원본 프레임 저장.
+#          ★ 개입 궤적을 학습에 쓰려면 반드시 이쪽이어야 한다. demo로 돌리면
+#            JSON/npz만 남고 데이터셋이 안 생겨서 나중에 학습에 못 쓴다.
+MODE="${MODE:-demo}"
 # aggregate_fn은 조건 전체에서 고정해야 한다 — 안 그러면 게이트 효과와
 # 스무딩 방식 효과가 섞인다 (설계 문서 §5.5, §8.1).
 AGGREGATE="${AGGREGATE:-weighted_average}"
@@ -91,6 +98,7 @@ ARGS=(
   --target "${TARGET}"
   --max-attempts "${ATTEMPTS}"
   --max-steps "${MAX_STEPS}"
+  --mode "${MODE}"
   --aggregate-fn "${AGGREGATE}"
   --top-crop "${TOP_CROP}"
   --top-cam "${TOP_CAM:-327122074262}"
@@ -122,6 +130,7 @@ echo "  정책   : ${POLICY}"
 echo "  데이터 : ${DATASET}"
 echo "  task   : ${ERASE_TASK}"
 echo "  target : ${TARGET}   시도 상한: ${ATTEMPTS}   aggregate: ${AGGREGATE}"
+echo "  mode   : ${MODE}$([ "${MODE}" = demo ] && echo '   (기록 안 함 — 개입 궤적을 학습에 쓰려면 MODE=augment)')"
 echo "  로그   : ${OUT}"
 echo
 

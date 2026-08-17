@@ -207,3 +207,23 @@ def test_runner_source_guards_next_action_when_intervening():
     src = (_p.Path(__file__).parent / "piper_infer_runner.py").read_text()
     assert "if pipeline.pending_steps == 0 and intervening_now:" in src
     assert "if pipeline.pending_steps == 0 and not intervening_now:" in src
+
+
+def test_intervention_steps_do_not_consume_the_policy_budget():
+    """개입 스텝은 max_steps에서 빠져야 한다.
+
+    실물 3차 HIL에서 26초 지점에 개입했더니 5.3초 만에 940스텝 상한에 걸려
+    끊겼다. 사람이 조작한 시간이 정책 예산을 깎으면 '개입할수록 정책에게
+    남는 시간이 줄어드는' 이상한 구조가 된다.
+    """
+    import pathlib as _p
+
+    src = (_p.Path(__file__).parent / "piper_infer_runner.py").read_text()
+    assert "policy_steps = step - self.intervention_steps" in src
+    assert "if max_steps and policy_steps >= max_steps:" in src
+
+    # 계산 자체 확인: 전체 1100스텝 중 개입 200이면 정책은 900만 쓴 것
+    step, interventions, max_steps = 1100, 200, 940
+    assert (step - interventions) < max_steps      # 아직 안 끝난다
+    step = 1141
+    assert (step - interventions) >= max_steps     # 정책 940스텝을 채우면 끝

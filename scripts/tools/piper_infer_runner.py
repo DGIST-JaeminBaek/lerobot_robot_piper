@@ -812,8 +812,17 @@ class InferenceRunner(threading.Thread):
             last_loop_start: float | None = None
 
             while not self.stop_event.is_set():
-                if max_steps and step >= max_steps:
-                    self._log(f"[STOP] max_steps({max_steps}) 도달")
+                # 개입 스텝은 정책 예산에서 깎지 않는다.
+                # max_steps는 '정책이 너무 오래 끈다'에 대한 안전장치인데, 사람이
+                # 조작한 시간까지 여기서 빼면 개입할수록 정책에게 남는 시간이 줄어든다.
+                # 실물 3차 HIL에서 26.0초 지점에 개입했더니 5.3초 만에 상한에 걸려
+                # 끊겼다 — 손을 뗀 게 아니라 예산이 없어서 끝난 것이다.
+                policy_steps = step - self.intervention_steps
+                if max_steps and policy_steps >= max_steps:
+                    self._log(
+                        f"[STOP] max_steps({max_steps}) 도달 "
+                        f"(전체 {step}스텝 중 개입 {self.intervention_steps}스텝 제외)"
+                    )
                     break
                 if self.pause_event.is_set():
                     time.sleep(0.05)
