@@ -257,6 +257,68 @@ def aggregate(per_shape, label):
     }
 
 
+# ── 잔여 잉크의 양과 위치 ──────────────────────────────────────
+# 설계 문서 §4.6-③. erased_frac은 "얼마나 지웠나"만 말해주고 "어디가 남았나"는
+# 말해주지 않는다. 재시도를 몇 번 해도 같은 자리가 남는다면 그건 정책이 못 닿는
+# 자리라는 뜻이고, 그건 리커버리 데이터를 어디에 모을지를 정하는 근거가 된다.
+#
+# 주의 — 이 값을 정책에 프롬프트로 넣을 통로는 아직 없다(§4.6-③ 표 참고).
+# 학습 데이터에 방향 어휘가 없어서 "왼쪽 아래를 지워라"는 분포 밖이다.
+# 그래서 이건 **진단·라벨링용**이지 제어 신호가 아니다.
+
+# 3x3 격자 이름 — 사람이 로그를 읽고 바로 어디인지 알아야 해서 좌표 대신 말로 낸다
+_ROW_NAMES = ("위", "중간", "아래")
+_COL_NAMES = ("왼쪽", "가운데", "오른쪽")
+
+
+def residual(frame, box, ink_thr, grid=3):
+    """bbox 안에 남은 잉크의 양·무게중심·격자 분포. -> dict
+
+    frame은 BGR, box는 (x, y, w, h), ink_thr은 set_reference가 잡은 절대 임계값.
+    임계값을 인자로 받는 이유: 시도 전 프레임에서 정한 값을 그대로 써야
+    전/후가 같은 자로 재진다(EraseChecker.reference["ink_thr"]와 같은 근거).
+    """
+    x, y, w, h = box
+    g = cv2.cvtColor(frame[y : y + h, x : x + w], cv2.COLOR_BGR2GRAY)
+    mask = g < ink_thr
+    n = int(mask.sum())
+    if n == 0:
+        return {"ink_frac": 0.0, "centroid": None, "where": None, "grid": None,
+                "spread_px": 0.0}
+
+    ys, xs = np.nonzero(mask)
+    cx, cy = float(xs.mean()), float(ys.mean())
+
+    # 격자 분포 — 어느 칸에 몰려 있는지. 셀별 "그 셀 픽셀 중 잉크 비율"이 아니라
+    # "전체 잔여 잉크 중 이 셀이 차지하는 비율"이다. 어디가 남았는지를 묻고 있으므로.
+    gy = np.clip((ys * grid // max(h, 1)), 0, grid - 1)
+    gx = np.clip((xs * grid // max(w, 1)), 0, grid - 1)
+    cells = np.zeros((grid, grid), float)
+    np.add.at(cells, (gy, gx), 1.0)
+    cells /= n
+
+    # 이름표는 격자 최대칸이 아니라 **무게중심**에서 뽑는다.
+    # 최대칸을 쓰면 속이 빈 도형(원·사각형 테두리)에서 가운데 칸이 0이 되고 테두리
+    # 셀들이 거의 동점이라, argmax가 그중 아무 칸이나 집어 "위 가운데" 같은 엉뚱한
+    # 이름이 나온다. 무게중심은 그런 경우 정직하게 가운데를 가리킨다(=고르게 남음).
+    rx, ry = cx / max(w, 1), cy / max(h, 1)
+    where = None
+    if grid == 3:  # 이름표는 3x3에서만 의미가 있다
+        band = lambda v: 0 if v < 1 / 3 else (1 if v < 2 / 3 else 2)  # noqa: E731
+        where = f"{_ROW_NAMES[band(ry)]} {_COL_NAMES[band(rx)]}"
+
+    return {
+        "ink_frac": round(n / mask.size, 5),
+        # bbox 기준 상대 좌표 (0~1) — bbox 크기가 도형마다 달라서 절대 픽셀은 못 비교한다
+        "centroid": (round(rx, 3), round(ry, 3)),
+        "where": where,
+        # float()으로 눕힌다 — np.float64가 섞이면 json.dumps가 죽는다
+        "grid": [[round(float(v), 3) for v in row] for row in cells],
+        # 흩어져 남았나(얼룩) 한 곳에 뭉쳐 남았나(안 닿은 구석) — 처방이 다르다
+        "spread_px": round(float(np.hypot(xs - cx, ys - cy).mean()), 1),
+    }
+
+
 def top_video(ep_dir: Path) -> Path:
     hits = sorted(ep_dir.glob("videos/observation.images.top/**/*.mp4"))
     if not hits:

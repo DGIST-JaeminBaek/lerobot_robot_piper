@@ -181,7 +181,7 @@ def grab_judge_frame(serial: str, width=1280, height=720, warmup_s=3.0, fps=30):
     return image
 
 
-def run_attempt_with_runner(settings, on_log=None) -> dict:
+def run_attempt_with_runner(settings, on_log=None, on_step=None) -> dict:
     """InferenceRunner로 시도 1회. 반환: 요약 dict.
 
     러너는 스레드라 events 큐로 진행상황이 나온다. 여기서는 로그만 흘려보내고
@@ -220,6 +220,8 @@ def run_attempt_with_runner(settings, on_log=None) -> dict:
                     "infer_ms": payload["infer_ms"],
                 }
             )
+            if on_step:
+                on_step(payload)
         elif kind == Event.FINISHED:
             break
     run.join(timeout=30)
@@ -323,6 +325,13 @@ def main():
     p.add_argument("--clutch-gain", type=float, default=1.0, help="리더 변화량 -> 팔로워 반영 비율 (1.0=등배)")
     p.add_argument("--probe-leader", action="store_true", help="리더암 노이즈 플로어만 측정하고 종료")
     p.add_argument("--out", default="erase_run_log.json")
+    p.add_argument("--no-status", action="store_true",
+                   help="실시간 상태 블록을 끄고 러너 로그를 그대로 흘린다 (디버깅용)")
+    p.add_argument("--aggregate-fn", default=None,
+                   choices=["weighted_average", "latest_only", "temporal_ensemble"],
+                   help="chunk 합치는 방식. 기본은 러너 프리셋 값 "
+                        "(weighted_average). 게이트/HIL과의 상호작용은 "
+                        "docs/erase_run_design.md §5.5 참고")
     p.add_argument("--confirm", action="store_true", help="실물 로봇에 명령 전송을 허용")
     args = p.parse_args()
 
@@ -384,10 +393,30 @@ def main():
     if args.hil:
         print("[HIL] space = 개입 on/off,  q = 시도 중단")
 
+    import erase_status as ES
+
+    # aggregate_fn은 RunSettings 최상위가 아니라 smoothing 안에 있다. 모드 프리셋이
+    # 정해준 SmoothingConfig를 그대로 두고 이 필드만 갈아끼운다 — ema_alpha 0.2 같은
+    # 실측 최적값을 덮어쓰면 안 된다(docs/policy/smoothing.md).
+    if args.aggregate_fn:
+        import dataclasses as _dc
+
+        preset = RunSettings.from_mode(args.mode)
+        base["smoothing"] = _dc.replace(preset.smoothing, aggregate_fn=args.aggregate_fn)
+        print(f"[INFO] aggregate_fn = {args.aggregate_fn}")
+
     checker = EC.EraseChecker()
     attempts = []
+    # 진행 상황 표시. 여기서 보여주는 퍼센트가 두 종류라는 게 중요하다 —
+    # [진행]은 시간축, [측정]은 park에서 실제로 잰 잉크 값이다. 자세한 근거는
+    # erase_status 모듈 docstring (시도 도중에는 잉크를 잴 방법이 없다).
+    status = None if args.no_status else ES.LiveStatus(
+        max_attempts=args.max_attempts, max_steps=args.max_steps, hil=args.hil
+    )
 
     def grab():
+        if status:
+            status.set_phase("판정용 프레임 촬영 (park)")
         return grab_judge_frame(args.top_cam)
 
     try:
@@ -402,15 +431,35 @@ def main():
 
         for i in range(1, args.max_attempts + 1):
             print(f"[INFO] ── 시도 {i}/{args.max_attempts} ──")
-            summary = run_attempt_with_runner(RunSettings.from_mode(args.mode, **base))
+            if status:
+                status.start_attempt(i)
+            summary = run_attempt_with_runner(
+                RunSettings.from_mode(args.mode, **base),
+                # 러너 로그를 그대로 찍으면 상태 블록이 흐트러진다 — 상태창을 쓰는
+                # 동안에는 로그를 삼키고, 끝나고 한 번에 낸다.
+                on_log=(lambda m: None) if status else None,
+                on_step=status.on_step if status else None,
+            )
+            if status:
+                status.set_phase("판정 중")
             r = checker.check(grab(), args.target)
             r["attempt"] = i
             r.update(summary)
             attempts.append(r)
+            if status:
+                status.set_measurement(r)
+                status.finish()
             print(f"  → success={r['success']} target_erased={r.get('target_erased')} "
+                  f"남음={r.get('remaining_frac')} "
                   f"max_distractor={r.get('max_distractor_erased')} "
                   f"steps={summary['steps']} interventions={summary['interventions']} "
                   f"fps={summary['measured_fps']}")
+            # 실패했으면 "어디가" 남았는지를 사람이 보고 다음 판단을 한다.
+            # 이 정보를 정책에 넣을 통로는 아직 없다 (설계 문서 §4.6-③).
+            if r.get("residual"):
+                print(f"  잔여: {ES.format_residual(r['residual'])}")
+                for line in ES.format_grid(r["residual"]):
+                    print(line)
             if summary["status"] not in ("finished", "hil_abort"):
                 print(f"[STOP] 러너가 {summary['status']}로 끝났다 — 재시도하지 않는다.")
                 break

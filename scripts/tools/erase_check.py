@@ -88,11 +88,28 @@ class EraseChecker:
                 "detected": [k for k, _ in ref["shapes"]],
             }
         success = target_erased >= SUCCESS_ERASED and max_distractor <= MAX_DISTRACTOR
+
+        # 실패했을 때 "얼마나, 어디가" 남았는지. 성공했으면 안 잰다 — 남은 게 없다.
+        # 이 값은 진단·리커버리 데이터 수집용이지 정책에 넣는 신호가 아니다
+        # (docs/erase_run_design.md §4.6-③: 전달할 통로가 없다).
+        residual = None
+        if not success and target_erased < SUCCESS_ERASED:
+            worst = min(
+                (kv for kv in erased.items() if kv[0].split("#")[0] == target),
+                key=lambda kv: kv[1],
+            )[0]
+            box = dict(ref["shapes"])[worst]
+            residual = M.residual(frame, box, thr)
+            residual["shape"] = worst
+
         return {
             "success": bool(success),
             "target_found": True,
             "target_erased": round(target_erased, 4),
             "max_distractor_erased": round(max_distractor, 4),
+            # 사람이 바로 읽는 값 — "몇 % 남았나". erased의 여집합이다.
+            "remaining_frac": round(1.0 - target_erased, 4),
+            "residual": residual,
             "reason": None
             if success
             else ("target 덜 지워짐" if target_erased < SUCCESS_ERASED else "distractor 침범"),
@@ -222,6 +239,16 @@ def _selftest():
 
     r = c.check(scene(), "circle")  # 아무것도 안 지움
     assert not r["success"] and r["reason"] == "target 덜 지워짐", r
+    assert r["remaining_frac"] == 1.0, r
+    # 잔여 위치: 원이 bbox를 꽉 채우므로 무게중심은 가운데여야 한다
+    assert r["residual"] and r["residual"]["where"] == "중간 가운데", r["residual"]
+
+    # 잔여가 한쪽에 몰려 있으면 그쪽으로 잡히는가 — 아래 절반만 지운 원
+    half = scene()
+    cv2.rectangle(half, (50, 100), (150, 160), board_bgr, -1)  # 원의 아래쪽을 덮는다
+    r = c.check(half, "circle")
+    assert not r["success"], r
+    assert r["residual"]["centroid"][1] < 0.5, r["residual"]  # 무게중심이 위쪽
 
     r = c.check(scene(erase_circle=True, erase_rect=True), "circle")  # distractor까지 지움
     assert not r["success"] and r["reason"] == "distractor 침범", r
