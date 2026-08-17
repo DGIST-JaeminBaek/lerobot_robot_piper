@@ -279,12 +279,19 @@ def residual(frame, box, ink_thr, grid=3):
     전/후가 같은 자로 재진다(EraseChecker.reference["ink_thr"]와 같은 근거).
     """
     x, y, w, h = box
-    g = cv2.cvtColor(frame[y : y + h, x : x + w], cv2.COLOR_BGR2GRAY)
-    mask = g < ink_thr
+    sub = frame[y : y + h, x : x + w]
+    g = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
+    # ★ 채도 필터를 여기서도 걸어야 한다. detect_shapes는 나무 지우개 블록(채도 ≈45)을
+    #   걸러내는데 residual()은 처음에 그냥 어두운 픽셀을 셌다. 실물 검증에서 정책이
+    #   지우개를 삼각형 위에 올려놓고 끝냈고, 그 프레임에서 잔여 잉크가 기준(3.4%)보다
+    #   많은 15.2%로 나왔다 — 블록을 잉크로 센 것이다. 검은 마커는 채도 ≈10이라
+    #   안 걸린다.
+    chromatic = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)[:, :, 1] > MAX_SAT
+    mask = (g < ink_thr) & ~chromatic
     n = int(mask.sum())
     if n == 0:
         return {"ink_frac": 0.0, "centroid": None, "where": None, "grid": None,
-                "spread_px": 0.0}
+                "spread_px": 0.0, "occluded_frac": round(float(chromatic.mean()), 4)}
 
     ys, xs = np.nonzero(mask)
     cx, cy = float(xs.mean()), float(ys.mean())
@@ -316,6 +323,9 @@ def residual(frame, box, ink_thr, grid=3):
         "grid": [[round(float(v), 3) for v in row] for row in cells],
         # 흩어져 남았나(얼룩) 한 곳에 뭉쳐 남았나(안 닿은 구석) — 처방이 다르다
         "spread_px": round(float(np.hypot(xs - cx, ys - cy).mean()), 1),
+        # bbox 안에서 유채색(지우개 블록·팔)이 덮은 비율. 이게 크면 잔여 추정이
+        # 그만큼 가려진 상태로 나온 것이므로 값을 곧이곧대로 믿으면 안 된다.
+        "occluded_frac": round(float(chromatic.mean()), 4),
     }
 
 

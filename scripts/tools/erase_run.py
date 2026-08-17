@@ -233,6 +233,11 @@ def run_attempt_with_runner(settings, on_log=None, on_step=None) -> dict:
         "measured_fps": round(run.measured_fps(), 2),
         "aborted": run.hil_aborted,
         "_steps": steps,
+        # ★ 스무딩 이전의 정책 원출력(각 chunk의 첫 스텝). 실물 검증에서
+        #   "그리퍼가 시연의 강한 폐합 명령(80~100)을 한 번도 안 낸다"가 나왔는데,
+        #   그게 정책 원출력이 낮아서인지 EMA가 피크를 깎아서인지 가를 수 없었다.
+        #   최종 action만 저장하면 그 질문에 영원히 답을 못 한다.
+        "_raw": [a.tolist() for a in run.raw_trajectory],
     }
 
 
@@ -242,6 +247,7 @@ def save_step_traces(attempts: list[dict], out_path: Path) -> Path | None:
     for entry in attempts:
         steps = entry.pop("_steps", None)
         if not steps:
+            entry.pop("_raw", None)  # JSON에 수천 줄이 새어나가지 않게
             continue
         i = entry["attempt"]
         arrays[f"attempt{i}_action"] = np.array([s["action"] for s in steps], dtype=np.float32)
@@ -263,6 +269,10 @@ def save_step_traces(attempts: list[dict], out_path: Path) -> Path | None:
         arrays[f"attempt{i}_votes"] = np.array(
             [int(s["votes"]) for s in steps], dtype=np.int16
         )
+        raw = entry.pop("_raw", None)
+        if raw:
+            # 스텝 수와 길이가 다르다 — chunk가 도착한 횟수만큼만 있다.
+            arrays[f"attempt{i}_raw"] = np.array(raw, dtype=np.float32)
     if not arrays:
         return None
     path = out_path.with_suffix(".steps.npz")
@@ -366,6 +376,7 @@ def main():
         REAL_ROBOT_CONFIRM,
         RunSettings,
         load_env_file,
+        mode_preset,
         resolve_crops,
     )
 
@@ -411,9 +422,13 @@ def main():
     if args.aggregate_fn:
         import dataclasses as _dc
 
-        preset = RunSettings.from_mode(args.mode)
+        # mode_preset()으로 프리셋만 꺼낸다. RunSettings.from_mode(mode)를 쓰면
+        # dataset_root/policy_path가 필수 인자라 그 자리에서 TypeError로 죽는다.
+        preset = mode_preset(args.mode)
         base["smoothing"] = _dc.replace(preset.smoothing, aggregate_fn=args.aggregate_fn)
-        print(f"[INFO] aggregate_fn = {args.aggregate_fn}")
+        print(f"[INFO] aggregate_fn = {args.aggregate_fn} "
+              f"(나머지 스무딩은 '{args.mode}' 프리셋 그대로: "
+              f"{preset.smoothing.summary()})")
 
     checker = EC.EraseChecker()
     attempts = []

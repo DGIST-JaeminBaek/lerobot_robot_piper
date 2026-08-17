@@ -71,7 +71,9 @@ class LiveStatus:
         self.attempt = 0
         self.step = 0
         self.fps = 0.0
-        self.lag = 0
+        # 큐가 완전히 말라 루프가 추론을 기다린 횟수. 0이면 비동기 추론이
+        # 제대로 앞서 나가고 있다는 뜻이다.
+        self.starved = 0
         self.intervening = False
         self.intervention_steps = 0
         self.phase = "준비"
@@ -80,6 +82,7 @@ class LiveStatus:
         self.measured_erased = None
         self.measured_residual = None
 
+        self._t_first = None
         self._last_draw = 0.0
         self._lines_drawn = 0
         self._t0 = time.perf_counter()
@@ -87,18 +90,30 @@ class LiveStatus:
     # ── 상태 갱신 ──────────────────────────────────────
     def start_attempt(self, i: int):
         self.attempt, self.step, self.phase = i, 0, "추론 중"
-        self._t0 = time.perf_counter()
+        self._t_first = None
         self.draw(force=True)
 
     def on_step(self, payload: dict):
         self.step = payload.get("step", self.step) + 1
-        infer_ms = payload.get("infer_ms")
-        if infer_ms:
-            # 33ms(30fps 주기)를 넘으면 chunk가 도착할 때 이미 과거다 — 지연 스텝 수
-            self.lag = int(infer_ms // (1000.0 / 30.0))
-        elapsed = time.perf_counter() - self._t0
-        if elapsed > 0:
-            self.fps = self.step / elapsed
+
+        # ★ infer_ms는 매 스텝 오는 값이 아니다. 러너는 큐가 완전히 마른 스텝에서만
+        #   이걸 채운다(piper_infer_runner의 infer_seconds는 스텝마다 0으로 초기화되고
+        #   _await_chunk를 탄 경우에만 설정된다). 실질적으로는 시작 첫 추론에서 한 번
+        #   찍히고 그 뒤로는 계속 0이다.
+        #   처음엔 0이 아닌 값을 계속 붙들고 있었는데, 그러면 화면에 시작 시점의
+        #   콜드 스타트 지연(약 400~600ms = 19스텝)이 실행 내내 고정으로 남아
+        #   "추론이 19스텝씩 밀리고 있다"고 오독하게 된다. 실측 정상 추론은 113ms(3.4스텝)다.
+        #   그래서 큐가 마른 횟수로만 센다 — 그게 이 값이 실제로 뜻하는 바다.
+        if payload.get("infer_ms"):
+            self.starved += 1
+
+        # 첫 스텝이 올 때 시계를 시작한다. start_attempt에서 재면 정책 로딩
+        # 시간(수 초)이 분모에 들어가 fps가 29가 아니라 19로 보인다.
+        if self._t_first is None:
+            self._t_first = time.perf_counter()
+        elapsed = time.perf_counter() - self._t_first
+        if elapsed > 0 and self.step > 1:
+            self.fps = (self.step - 1) / elapsed
         if payload.get("intervention"):
             self.intervening = True
             self.intervention_steps += 1
@@ -131,7 +146,7 @@ class LiveStatus:
         lines.append(
             f"  {DIM}[진행]{RESET} {CYAN}{bar(p)}{RESET} "
             f"{self.step:4d}/{self.max_steps} ({p:4.0%})   "
-            f"{self.fps:4.1f} fps  {DIM}추론지연 {self.lag}스텝{RESET}"
+            f"{self.fps:4.1f} fps  {DIM}큐 대기 {self.starved}회{RESET}"
         )
 
         # 측정값 — 없으면 없다고 쓴다
