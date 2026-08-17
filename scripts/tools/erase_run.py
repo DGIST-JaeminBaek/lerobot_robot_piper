@@ -354,6 +354,14 @@ def main():
     # 원인을 볼 수 있다. 지금까지는 판정 프레임을 그냥 버려서 매번 다시 찍어야 했다.
     p.add_argument("--hil-dir", default="records/hil",
                    help="HIL/게이트 산출물(로그·궤적·판정 프레임)을 모을 폴더")
+    p.add_argument("--record-manual", action="store_true",
+                   help="패널의 '녹화 시작/종료' 버튼으로 구간을 골라 LeRobotDataset에 "
+                        "담는다. --mode augment(전 구간 자동 녹화)와 달리 개입 구간만 "
+                        "골라 담을 수 있다")
+    p.add_argument("--record-root", default=None,
+                   help="수동 녹화 데이터셋 루트 (기본: records/hil/<시각>/dataset)")
+    p.add_argument("--record-repo-id", default=None,
+                   help="수동 녹화 repo_id (기본: local/hil_<시각>)")
     p.add_argument("--no-save-frames", action="store_true",
                    help="판정 프레임을 저장하지 않는다")
     p.add_argument("--panel", dest="panel", action="store_true", default=None,
@@ -426,6 +434,7 @@ def main():
         clutch_gain=args.clutch_gain,
         max_relative_target=args.max_relative_target,
         move_speed_rate=args.move_speed_rate,
+        record_manual=args.record_manual,
     )
     if args.hil:
         print("[HIL] space = 개입 on/off,  q = 시도 중단")
@@ -467,6 +476,17 @@ def main():
         "wrist_crop": args.wrist_crop,
         "max_relative_target": args.max_relative_target,
     }, ensure_ascii=False, indent=2))
+    if args.record_manual:
+        # 데이터셋도 이 실행 폴더 안에 둔다 — 로그·판정 프레임과 같이 있어야
+        # 나중에 "이 개입이 어떤 판정에서 나온 것인지"를 이어붙일 수 있다.
+        stamp = run_dir.name
+        base["record_root"] = Path(
+            args.record_root or (run_dir / "dataset")
+        ).expanduser().resolve()
+        base["record_repo_id"] = args.record_repo_id or f"local/hil_{stamp}"
+        base["record_raw_frames"] = True
+        print(f"[INFO] 수동 녹화 켜짐 — 데이터셋: {base['record_root']}")
+        print("       패널의 '● 녹화 시작' / '■ 녹화 종료'로 구간을 담습니다.")
     print(f"[INFO] 산출물 폴더: {run_dir}")
 
     def save_frame(name, frame):

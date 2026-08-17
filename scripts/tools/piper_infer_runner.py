@@ -300,6 +300,10 @@ class RolloutRecorder:
             return
         self.dataset.save_episode()
         self.episodes_written += 1
+        # 다음 에피소드를 위해 리셋한다. 수동 녹화는 한 실행에서 구간을 여러 번
+        # 끊어 담으므로, 안 지우면 두 번째 에피소드부터 프레임 수가 누적돼
+        # "쌓인 프레임이 없다" 판정과 로그가 전부 틀어진다.
+        self.frames_written = 0
 
     def discard_episode(self) -> None:
         buffer = getattr(self.dataset, "episode_buffer", None)
@@ -457,6 +461,10 @@ class RunSettings:
     # 모드 프리셋에서 오는 값들 — 개별 수정 가능
     mode: str = DEMO_MODE.name
     record_dataset: bool = False
+    # 수동 녹화. True면 녹화기와 이미지 캡처는 준비하되 프레임은 사람이
+    # '녹화 시작'을 누른 구간에만 쌓는다. record_dataset(전체 자동 녹화)과 배타적이
+    # 아니라 보완재다 — HIL에서는 개입 구간만 골라 담고 싶기 때문.
+    record_manual: bool = False
     record_raw_frames: bool = False
     prompt_outcome: bool = False
     record_root: pathlib.Path | None = None
@@ -544,6 +552,11 @@ class InferenceRunner(threading.Thread):
         # 개입 명령이 관절 범위를 벗어나 잘린 스텝 수. 0이 아니면 리더암이
         # 팔로워가 갈 수 없는 곳을 가리키고 있다는 뜻이다.
         self._hil_clipped_steps = 0
+        # 수동 녹화 상태. 패널/외부 스레드가 건드리므로 lock으로 감싼다.
+        self.record_armed = False
+        self.recorded_episodes = 0
+        self._record_lock = threading.Lock()
+        self._record_stop_requested = False
 
         self._pending_smoothing: SmoothingConfig | None = None
         self._smoothing_lock = threading.Lock()
@@ -572,6 +585,21 @@ class InferenceRunner(threading.Thread):
         self._last_infer_seconds = 0.0
 
     # ── 바깥에서 거는 제어 ─────────────────────────────────
+    def arm_recording(self) -> None:
+        """지금부터 프레임을 쌓기 시작한다 (수동 녹화)."""
+        with self._record_lock:
+            self.record_armed = True
+        self._log("[RECORD] 녹화 시작")
+
+    def stop_recording(self) -> None:
+        """지금까지 쌓은 프레임을 한 에피소드로 저장하고 멈춘다."""
+        with self._record_lock:
+            if not self.record_armed:
+                return
+            self.record_armed = False
+            self._record_stop_requested = True
+        self._log("[RECORD] 녹화 종료 요청 — 다음 스텝에서 에피소드를 저장한다")
+
     def apply_smoothing(self, config: SmoothingConfig) -> None:
         with self._smoothing_lock:
             self._pending_smoothing = config
@@ -861,7 +889,7 @@ class InferenceRunner(threading.Thread):
                         cursor = 0
                     raw_observation = make_raw_observation(dataset, dataset[cursor])
                     observation_frame = cursor
-                    if settings.record_dataset:
+                    if settings.record_dataset or settings.record_manual:
                         record_images = {
                             key.removeprefix("observation.images."): np.asarray(
                                 raw_observation[key.removeprefix("observation.images.")]
@@ -870,7 +898,7 @@ class InferenceRunner(threading.Thread):
                         }
                 else:
                     live_observation = robot.get_observation()
-                    if settings.record_dataset and settings.record_raw_frames:
+                    if (settings.record_dataset or settings.record_manual) and settings.record_raw_frames:
                         # 정책에 먹이기 전, 크롭/리사이즈 전 원본 프레임을 따로 잡아둔다.
                         record_images = {
                             key.removeprefix("observation.images."): np.asarray(
@@ -884,7 +912,7 @@ class InferenceRunner(threading.Thread):
                         settings.crops,
                         settings.camera_output_size,
                     )
-                    if settings.record_dataset and not settings.record_raw_frames:
+                    if (settings.record_dataset or settings.record_manual) and not settings.record_raw_frames:
                         record_images = {
                             key.removeprefix("observation.images."): np.asarray(
                                 raw_observation[key.removeprefix("observation.images.")]
@@ -898,7 +926,9 @@ class InferenceRunner(threading.Thread):
                 if first_state is None:
                     first_state = measured_state.copy()
                     pipeline.reset(first_state)
-                    if settings.record_dataset:
+                    if settings.record_dataset or settings.record_manual:
+                        # 자동 녹화면 처음부터 무장, 수동이면 사람이 누를 때까지 대기
+                        self.record_armed = settings.record_dataset
                         recorder = self._make_recorder(
                             settings=settings,
                             record_images=record_images,
@@ -1093,11 +1123,25 @@ class InferenceRunner(threading.Thread):
 
                 # ── 기록 ───────────────────────────────────────
                 # 기록하는 action은 스무딩을 거쳐 실제로 나간 값이다(raw 아님).
-                if recorder is not None and record_images:
+                if recorder is not None and record_images and self.record_armed:
                     with self._phase("record"):
                         recorder.add_frame(
                             state=measured_state, action=action, images=record_images
                         )
+                # 사람이 '녹화 종료'를 누르면 여기서 에피소드를 끊는다. 루프를
+                # 멈추지 않는다 — 이어서 다음 구간을 또 녹화할 수 있어야 한다.
+                if self._record_stop_requested and recorder is not None:
+                    self._record_stop_requested = False
+                    if recorder.frames_written:
+                        n = recorder.frames_written
+                        recorder.save_episode()
+                        self.recorded_episodes += 1
+                        self._log(
+                            f"[RECORD] 에피소드 저장 ({n}프레임, "
+                            f"누적 {self.recorded_episodes}개)"
+                        )
+                    else:
+                        self._log("[RECORD] 쌓인 프레임이 없어 저장하지 않는다")
 
                 self.events.put(
                     (

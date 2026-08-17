@@ -68,6 +68,11 @@ MODE="${MODE:-demo}"
 # HIL/게이트 산출물이 쌓이는 곳. 녹화 데이터셋(records/local/) 바로 옆이라
 # 나중에 찾기 쉽다. 실행마다 records/hil/<시각>/ 하위에 로그·궤적·판정 프레임이 남는다.
 HIL_DIR="${HIL_DIR:-records/hil}"
+# RECORD=manual: 패널 버튼으로 구간을 골라 녹화한다(개입 구간만 담고 싶을 때).
+#                데이터셋은 records/hil/<시각>/dataset 에 생긴다.
+# RECORD=off   : 녹화 안 함 (기본)
+# 전 구간 자동 녹화는 MODE=augment 쪽이다.
+RECORD="${RECORD:-off}"
 # aggregate_fn은 조건 전체에서 고정해야 한다 — 안 그러면 게이트 효과와
 # 스무딩 방식 효과가 섞인다 (설계 문서 §5.5, §8.1).
 AGGREGATE="${AGGREGATE:-weighted_average}"
@@ -108,6 +113,7 @@ ARGS=(
   --out "${OUT}"
   --hil-dir "${HIL_DIR}"
 )
+[[ "${RECORD}" == manual ]] && ARGS+=(--record-manual)
 [[ -n "${WRIST_CROP}" ]] && ARGS+=(--wrist-crop "${WRIST_CROP}")
 
 case "${STAGE}" in
@@ -134,9 +140,14 @@ echo "  정책   : ${POLICY}"
 echo "  데이터 : ${DATASET}"
 echo "  task   : ${ERASE_TASK}"
 echo "  target : ${TARGET}   시도 상한: ${ATTEMPTS}   aggregate: ${AGGREGATE}"
-echo "  mode   : ${MODE}$([ "${MODE}" = demo ] && echo '   (기록 안 함 — 개입 궤적을 학습에 쓰려면 MODE=augment)')"
+if [[ "${MODE}" == demo && "${RECORD}" != manual ]]; then
+  echo "  mode   : ${MODE}   (기록 안 함 — 개입 궤적을 담으려면 RECORD=manual 또는 MODE=augment)"
+else
+  echo "  mode   : ${MODE}"
+fi
 echo "  로그   : ${OUT}"
 echo "  산출물 : ${HIL_DIR}/<시각>/  (log.json, *.steps.npz, 판정 프레임 png)"
+echo "  녹화   : ${RECORD}$([ "${RECORD}" = manual ] && echo '   (패널 버튼으로 구간 선택)')"
 echo
 
 exec python scripts/tools/erase_run.py "${ARGS[@]}"

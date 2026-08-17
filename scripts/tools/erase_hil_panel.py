@@ -78,6 +78,7 @@ def _panel_process(state_q, cmd_q, max_attempts, max_steps, title):
     l_align = label("", DIM)
     l_hil = label("[HIL] 정책 주행", DIM, mid)
     l_hil_sub = label("space = 개입 전환   q = 시도 중단  (창 포커스 불필요)", DIM)
+    l_rec = label("", DIM)
 
     btns = tk.Frame(root, bg=BG)
     btns.pack(fill="x", padx=14, pady=8)
@@ -92,10 +93,17 @@ def _panel_process(state_q, cmd_q, max_attempts, max_steps, title):
               bg="#2b2f36", fg=FG, relief="flat", padx=10, pady=4).pack(side="left")
     tk.Button(btns, text="시도 중단 (q)", command=lambda: cmd_q.put("abort"),
               bg="#3a2626", fg=FG, relief="flat", padx=10, pady=4).pack(side="left", padx=8)
+    # 녹화는 러너가 한다. 별도 프로세스로 녹화하면 CAN·카메라를 두 곳에서
+    # 잡으려다 충돌하는데, 러너는 이미 둘 다 쥐고 있어서 그 문제가 없다.
+    tk.Button(btns, text="● 녹화 시작", command=lambda: cmd_q.put("rec_start"),
+              bg="#2b3a2b", fg=FG, relief="flat", padx=10, pady=4).pack(side="left")
+    tk.Button(btns, text="■ 녹화 종료", command=lambda: cmd_q.put("rec_stop"),
+              bg="#2b2f36", fg=FG, relief="flat", padx=10, pady=4).pack(side="left", padx=8)
 
     state = {"attempt": 0, "step": 0, "fps": 0.0, "phase": "준비",
              "intervening": False, "intervention_steps": 0,
-             "erased": None, "where": None, "starved": 0, "leader_dev": None}
+             "erased": None, "where": None, "starved": 0, "leader_dev": None,
+             "recording": False, "rec_episodes": 0}
 
     def pump():
         closing = False
@@ -143,6 +151,11 @@ def _panel_process(state_q, cmd_q, max_attempts, max_steps, title):
             l_hil.config(text="[HIL] 정책 주행", fg=DIM)
         l_hil_sub.config(text=f"개입 누적 {s['intervention_steps']}스텝   "
                               f"space = 개입 전환,  q = 시도 중단")
+
+        if s.get("recording"):
+            l_rec.config(text=f"●  녹화 중   (저장된 에피소드 {s['rec_episodes']}개)", fg=RED)
+        else:
+            l_rec.config(text=f"녹화 대기   (저장된 에피소드 {s['rec_episodes']}개)", fg=DIM)
 
         if closing:
             root.after(1200, root.destroy)  # 마지막 판정값을 잠깐 보여주고 닫는다
@@ -209,6 +222,7 @@ class HilPanel:
             kw["leader_dev"] = payload["leader_dev"]
         self._push(**kw)
         self.poll()
+        self.sync_recording()
 
     def set_phase(self, phase: str):
         self._push(phase=phase)
@@ -220,6 +234,14 @@ class HilPanel:
 
     def set_fps(self, fps: float, starved: int = 0, intervention_steps: int = 0):
         self._push(fps=fps, starved=starved, intervention_steps=intervention_steps)
+
+    def sync_recording(self):
+        """러너의 녹화 상태를 창에 반영한다. poll()과 같이 자주 부른다."""
+        run = self._runner
+        if run is None:
+            return
+        self._push(recording=bool(getattr(run, "record_armed", False)),
+                   rec_episodes=int(getattr(run, "recorded_episodes", 0)))
 
     def attach_runner(self, run):
         """러너가 뜬 직후 호출 — 개입 토글을 건네받는다.
@@ -250,6 +272,15 @@ class HilPanel:
                 t = self.toggle
                 if t is None:
                     print("[PANEL] 아직 개입 토글이 없다 (--hil 없이 실행 중?)")
+                    continue
+                if cmd in ("rec_start", "rec_stop"):
+                    run = self._runner
+                    if run is None:
+                        print("[PANEL] 러너가 아직 없다 — 녹화 제어 불가")
+                    elif cmd == "rec_start":
+                        run.arm_recording()
+                    else:
+                        run.stop_recording()
                     continue
                 if cmd == "toggle":
                     t.active = not t.active
