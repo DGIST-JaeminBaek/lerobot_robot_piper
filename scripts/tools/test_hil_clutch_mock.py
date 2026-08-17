@@ -227,3 +227,92 @@ def test_intervention_steps_do_not_consume_the_policy_budget():
     assert (step - interventions) < max_steps      # 아직 안 끝난다
     step = 1141
     assert (step - interventions) >= max_steps     # 정책 940스텝을 채우면 끝
+
+
+# ── 그리퍼 절대값 통과 ────────────────────────────────────
+# 실물 HIL에서 "리더 그리퍼를 끝까지 닫아도 팔로워가 안 닫혀 물건을 못 잡는다"가
+# 나왔다. 델타 규칙을 그리퍼에 걸면 끝까지 닫는 게 원리적으로 불가능하다.
+
+
+def test_gripper_passes_leader_absolute_value():
+    from hil_clutch import Clutch, GRIPPER_KEY
+
+    c = Clutch()
+    # 인계 시점: 팔로워 그리퍼 30, 리더 60
+    lead0 = {"joint1.pos": 0.0, GRIPPER_KEY: 60.0}
+    foll0 = {"joint1.pos": 10.0, GRIPPER_KEY: 30.0}
+    c.engage(lead0, foll0)
+
+    # 리더를 끝까지(100) 닫는다
+    out = c.target({"joint1.pos": 0.0, GRIPPER_KEY: 100.0})
+    # 델타였다면 30 + (100-60) = 70에서 멈춘다. 절대값이면 100에 도달한다.
+    assert out[GRIPPER_KEY] == 100.0, out
+    # 관절은 여전히 델타 — 인계 순간 점프 0이 유지돼야 한다
+    assert out["joint1.pos"] == 10.0, out
+
+
+def test_gripper_absolute_does_not_jump_the_joints():
+    """그리퍼만 절대값이고 나머지는 그대로 클러치여야 한다."""
+    from hil_clutch import Clutch, GRIPPER_KEY
+
+    c = Clutch()
+    lead = {"joint1.pos": -50.0, GRIPPER_KEY: 0.0}
+    foll = {"joint1.pos": 40.0, GRIPPER_KEY: 80.0}   # 관절이 90 어긋난 상태
+    c.engage(lead, foll)
+    out = c.target(lead)                              # 리더가 안 움직였으면
+    assert out["joint1.pos"] == 40.0                  # 관절 목표 = 팔로워 현재 (점프 0)
+    assert out[GRIPPER_KEY] == 0.0                    # 그리퍼는 리더 값 그대로
+
+
+def test_gripper_absolute_can_be_turned_off():
+    from hil_clutch import Clutch, GRIPPER_KEY
+
+    c = Clutch(absolute_keys=())
+    c.engage({GRIPPER_KEY: 60.0}, {GRIPPER_KEY: 30.0})
+    assert c.target({GRIPPER_KEY: 100.0})[GRIPPER_KEY] == 70.0   # 예전 델타 동작
+
+
+def test_recording_is_tied_to_the_intervention_toggle():
+    """space로 개입하면 녹화가 켜지고 반환하면 에피소드가 저장돼야 한다.
+
+    손이 리더암에 묶여 있어 녹화 버튼을 따로 누르기 어렵다. HIL 데이터 수집의
+    목적이 정확히 '개입 구간'이라 토글 경계가 그대로 녹화 경계가 된다.
+    """
+    import pathlib as _p
+
+    src = (_p.Path(__file__).parent / "piper_infer_runner.py").read_text()
+    assert "if settings.record_manual and settings.record_on_intervention:" in src
+    assert "if intervened and not self.record_armed:" in src
+    assert "self.arm_recording()" in src
+    assert "elif not intervened and self.record_armed:" in src
+    assert "self.stop_recording()" in src
+
+
+def test_record_arm_stop_are_idempotent():
+    """중복 호출로 에피소드가 두 번 저장되거나 카운터가 어긋나면 안 된다."""
+    import threading
+
+    class Runner:
+        def __init__(self):
+            self.record_armed = False
+            self.recorded_episodes = 0
+            self._record_lock = threading.Lock()
+            self._record_stop_requested = False
+            self.logs = []
+
+        def _log(self, m):
+            self.logs.append(m)
+
+        arm_recording = None  # 아래에서 실제 구현을 빌려온다
+
+    import piper_infer_runner as R
+
+    r = Runner()
+    R.InferenceRunner.arm_recording(r)
+    R.InferenceRunner.arm_recording(r)          # 두 번 켜도
+    assert r.record_armed is True
+    R.InferenceRunner.stop_recording(r)
+    assert r.record_armed is False and r._record_stop_requested is True
+    r._record_stop_requested = False
+    R.InferenceRunner.stop_recording(r)         # 이미 꺼져 있으면 아무 일 없어야 한다
+    assert r._record_stop_requested is False

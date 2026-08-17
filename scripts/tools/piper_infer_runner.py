@@ -465,6 +465,10 @@ class RunSettings:
     # '녹화 시작'을 누른 구간에만 쌓는다. record_dataset(전체 자동 녹화)과 배타적이
     # 아니라 보완재다 — HIL에서는 개입 구간만 골라 담고 싶기 때문.
     record_manual: bool = False
+    # space(개입 토글)에 녹화를 묶는다. 개입 시작 = 녹화 시작, 반환 = 에피소드 저장.
+    # 손이 리더암에 묶여 있어 버튼을 따로 누르기 어렵고, HIL 데이터 수집의 목적이
+    # 정확히 '개입 구간'이라 경계가 그대로 맞는다.
+    record_on_intervention: bool = True
     record_raw_frames: bool = False
     prompt_outcome: bool = False
     record_root: pathlib.Path | None = None
@@ -1029,6 +1033,12 @@ class InferenceRunner(threading.Thread):
                             f"[HIL] 인계 — engage_deviation={engage_dev:.2f} "
                             f"(최대 {worst}) 관절별={per}"
                         )
+                    # 개입 시작/반환 경계에서 녹화를 자동으로 켜고 끈다.
+                    if settings.record_manual and settings.record_on_intervention:
+                        if intervened and not self.record_armed:
+                            self.arm_recording()
+                        elif not intervened and self.record_armed:
+                            self.stop_recording()
                     if intervened:
                         self.intervention_steps += 1
                         action = np.asarray(

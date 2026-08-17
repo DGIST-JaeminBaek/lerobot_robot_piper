@@ -367,6 +367,9 @@ def main():
                    help="패널의 '녹화 시작/종료' 버튼으로 구간을 골라 LeRobotDataset에 "
                         "담는다. --mode augment(전 구간 자동 녹화)와 달리 개입 구간만 "
                         "골라 담을 수 있다")
+    p.add_argument("--no-record-on-intervention", action="store_true",
+                   help="space(개입 토글)에 녹화를 묶지 않는다. 기본은 묶여 있어서 "
+                        "개입 시작=녹화 시작, 반환=에피소드 저장이 된다")
     p.add_argument("--record-root", default=None,
                    help="수동 녹화 데이터셋 루트 (기본: records/hil/<시각>/dataset)")
     p.add_argument("--record-repo-id", default=None,
@@ -444,6 +447,7 @@ def main():
         max_relative_target=args.max_relative_target,
         move_speed_rate=args.move_speed_rate,
         record_manual=args.record_manual,
+        record_on_intervention=not args.no_record_on_intervention,
     )
     if args.hil:
         print("[HIL] space = 개입 on/off,  q = 시도 중단")
@@ -495,7 +499,12 @@ def main():
         base["record_repo_id"] = args.record_repo_id or f"local/hil_{stamp}"
         base["record_raw_frames"] = True
         print(f"[INFO] 수동 녹화 켜짐 — 데이터셋: {base['record_root']}")
-        print("       패널의 '● 녹화 시작' / '■ 녹화 종료'로 구간을 담습니다.")
+        if args.no_record_on_intervention:
+            print("       패널의 '● 녹화 시작' / '■ 녹화 종료'로 구간을 담습니다.")
+        else:
+            print("       space로 개입하면 자동으로 녹화가 시작되고, 반환하면 "
+                  "그 구간이 에피소드로 저장됩니다.")
+            print("       (버튼으로 직접 제어하려면 --no-record-on-intervention)")
     print(f"[INFO] 산출물 폴더: {run_dir}")
 
     def save_frame(name, frame):

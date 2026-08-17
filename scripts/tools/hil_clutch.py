@@ -31,6 +31,7 @@ from __future__ import annotations
 JOINTS = [f"joint{i}" for i in range(1, 7)]
 GRIPPER = "gripper"
 ACTION_NAMES = [f"{n}.pos" for n in JOINTS + [GRIPPER]]
+GRIPPER_KEY = f"{GRIPPER}.pos"   # action dict의 실제 키. GRIPPER 자체가 아니다.
 
 
 class Clutch:
@@ -41,8 +42,22 @@ class Clutch:
     를 보낸다. 인계 첫 스텝의 target이 팔로워 현재 자세와 같으므로 점프가 없다.
     """
 
-    def __init__(self, gain: float = 1.0):
+    def __init__(self, gain: float = 1.0, absolute_keys: tuple[str, ...] = (GRIPPER_KEY,)):
+        """absolute_keys에 든 축은 델타가 아니라 **리더 절대값**을 그대로 보낸다.
+
+        기본값이 그리퍼인 이유 — 델타 규칙을 그리퍼에 걸면 끝까지 닫는 게
+        원리적으로 불가능하다. 인계 시점 팔로워 30 / 리더 60이면 리더를 100까지
+        닫아도 목표는 30+(100-60)=70이다. 실물에서 "리더 그리퍼를 끝까지 닫아도
+        팔로워가 안 닫혀 물건을 잡을 수조차 없다"로 나타났다.
+
+        델타 규칙의 존재 이유는 '리더와 팔로워가 크게 어긋난 상태에서 절대값을
+        보내면 팔이 튄다'인데, 그리퍼는 1자유도에 가동범위가 막혀 있어 그 위험이
+        관절과 다르다. 게다가 사람의 의도 자체가 절대값이다("닫아라").
+        인계 순간 그리퍼가 급히 닫히는 건 팔로워의 max_relative_target 클램프가
+        스텝당 변화량을 잘라 완만하게 만든다.
+        """
         self.gain = gain
+        self.absolute_keys = tuple(absolute_keys)
         self._lead0: dict | None = None
         self._foll0: dict | None = None
 
@@ -60,11 +75,15 @@ class Clutch:
     def target(self, leader_action: dict) -> dict:
         if not self.engaged:
             raise RuntimeError("engage()를 먼저 호출할 것")
-        return {
-            k: self._foll0[k] + self.gain * (leader_action[k] - self._lead0[k])
-            for k in self._foll0
-            if k in leader_action
-        }
+        out = {}
+        for k in self._foll0:
+            if k not in leader_action:
+                continue
+            if k in self.absolute_keys:
+                out[k] = leader_action[k]          # 절대값 통과 (그리퍼)
+            else:
+                out[k] = self._foll0[k] + self.gain * (leader_action[k] - self._lead0[k])
+        return out
 
 
 def deviation_per_joint(leader_action: dict, follower_obs: dict) -> dict:
