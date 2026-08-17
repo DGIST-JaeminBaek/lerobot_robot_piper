@@ -515,12 +515,40 @@ class PiperFollower(Robot):
     def safety_tripped(self) -> bool:
         return self._safety_tripped
 
+    def _join_safety_park(self, timeout: float = 15.0) -> None:
+        """safety 트립이 띄운 parking 스레드가 끝날 때까지 기다린다.
+
+        _trip_safety()는 parking()을 별도 스레드로 돌린다 — 최대 10초 블로킹이라
+        제어 루프를 그만큼 세우면 카메라/데이터셋이 타임아웃으로 깨지기 때문이다.
+        문제는 그 스레드가 도는 동안 release_torque_safely()가 겹쳐 돌 수 있다는
+        것이다. 그러면 두 경로가 동시에 CAN 명령을 쏘고, parking 이동이 끝나기도
+        전에 DisablePiper()가 나가서 팔이 중간 자세에서 힘을 잃는다.
+
+        실물에서 확인됨(2026-08-16, pi0 연속 추론 중 effort 트립):
+            safety trip -> parking 자세로 복귀 중 (천천히 4.0s)
+            [DISCONNECT] park=False              <- 여기서 토크 해제가 시작됐고
+            safety trip -> parking 완료           <- parking은 그 뒤에 끝났다
+        마지막 줄의 "torque는 켜진 상태"는 그 시점에 이미 사실이 아니었다.
+        """
+        thread = getattr(self, "_safety_park_thread", None)
+        if thread is None or not thread.is_alive():
+            return
+        logger.warning(
+            f"{self} safety parking 진행 중 — 완료까지 대기한다 (최대 {timeout:.0f}s)"
+        )
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            # 기다려도 안 끝나면 여기서 막고 있을 수는 없다. 다만 이 뒤의 토크
+            # 해제가 이동 중에 걸린다는 뜻이므로 조용히 넘기지 않는다.
+            logger.error(
+                f"{self} safety parking이 {timeout:.0f}s 안에 안 끝났다 — "
+                f"토크 해제가 이동 중에 걸릴 수 있다"
+            )
+
     def reset_safety(self) -> None:
         """트립 래치 해제 — 원인을 제거한 뒤 같은 프로세스에서 다시 움직이고 싶을 때만.
         parking 스레드가 아직 돌고 있으면 끝날 때까지 기다린다(명령 충돌 방지)."""
-        thread = getattr(self, "_safety_park_thread", None)
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=15.0)
+        self._join_safety_park()
         self._safety_tripped = False
         self._safety_park_thread = None
         self._safety_park_active = False
@@ -600,6 +628,10 @@ class PiperFollower(Robot):
     def disconnect(self, disable_torque: bool | None = None, park: bool | None = None) -> None:
         if disable_torque is None:
             disable_torque = self.config.disable_torque_on_disconnect
+        # ★ 토크를 건드리기 전에 safety parking이 끝났는지부터 확인한다. 트립 직후
+        #   종료하면 parking 스레드가 아직 이동 중인데 아래 release 시퀀스가 겹쳐
+        #   돌아 팔이 중간 자세에서 힘을 잃는다(_join_safety_park 주석 참고).
+        self._join_safety_park()
         self._disconnect_cameras()
         # 기본값(park=None)은 기존과 동일하게 항상 parking. park=False를 명시하면
         # (예: 사람이 녹화를 조기 종료했을 때) parking 이동 없이 그 자리에서 바로

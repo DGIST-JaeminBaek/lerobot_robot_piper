@@ -14,6 +14,7 @@ observation이다. 정책의 chunk 궤적, 정답 action과의 차이 및 chunk 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import pathlib
 import sys
@@ -110,14 +111,35 @@ def make_raw_observation(dataset, item: dict) -> dict:
     return raw
 
 
-def load_policy(policy_path: str, dataset_meta, device: str):
+def load_policy(policy_path: str, dataset_meta, device: str, rename_map: dict | None = None):
+    """정책과 전/후처리기를 불러온다.
+
+    rename_map은 데이터셋의 카메라 키를 정책이 기대하는 이름으로 바꾼다. pi0처럼
+    고정된 카메라 이름(base_0_rgb / left_wrist_0_rgb / right_wrist_0_rgb)을 쓰는
+    정책은 우리 top/wrist와 이름이 달라 이게 없으면 feature mismatch로 죽는다.
+    안 주면 체크포인트의 preprocessor에 저장된 값을 그대로 쓴다 — 학습 때
+    --rename_map으로 준 값이 거기 남아 있다.
+    """
     from lerobot.configs.policies import PreTrainedConfig
     from lerobot.policies.factory import make_policy, make_pre_post_processors
 
     config = PreTrainedConfig.from_pretrained(policy_path)
     config.pretrained_path = policy_path
     config.device = device
-    policy = make_policy(config, ds_meta=dataset_meta)
+
+    if rename_map is None:
+        # 학습 때 쓴 rename_map은 preprocessor 설정에 저장돼 있다. make_policy는
+        # 그걸 안 보므로 여기서 꺼내 넘겨야 feature 검증을 통과한다.
+        preprocessor_file = pathlib.Path(policy_path) / "policy_preprocessor.json"
+        if preprocessor_file.is_file():
+            with contextlib.suppress(json.JSONDecodeError, OSError, KeyError):
+                steps = json.loads(preprocessor_file.read_text(encoding="utf-8"))["steps"]
+                for step in steps:
+                    if step.get("registry_name") == "rename_observations_processor":
+                        rename_map = step.get("config", {}).get("rename_map") or None
+                        break
+
+    policy = make_policy(config, ds_meta=dataset_meta, rename_map=rename_map)
     preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=config,
         pretrained_path=config.pretrained_path,

@@ -106,6 +106,11 @@ def parse_args() -> argparse.Namespace:
         help="RGB keyframe interval (default: 250, matching the source recordings).",
     )
     parser.add_argument(
+        "--cameras",
+        default="top,wrist",
+        help="Comma-separated camera subset to include, e.g. 'top' or 'top,wrist' (default: top,wrist).",
+    )
+    parser.add_argument(
         "--top-crop",
         type=parse_crop,
         metavar="X,Y,SIZE",
@@ -524,17 +529,11 @@ def build_dataset(
     print(f"Selected frames: {expected_frames}")
     print(f"Output codec: {vcodec}")
     print(f"GOP size: {gop_size}")
+    print(f"Cameras: {', '.join(RGB_VIDEO_KEYS)}")
     if crops is not None:
-        print(
-            f"TOP crop: {crops['observation.images.top'].x},"
-            f"{crops['observation.images.top'].y},"
-            f"{crops['observation.images.top'].size}"
-        )
-        print(
-            f"WRIST crop: {crops['observation.images.wrist'].x},"
-            f"{crops['observation.images.wrist'].y},"
-            f"{crops['observation.images.wrist'].size}"
-        )
+        for key in RGB_VIDEO_KEYS:
+            crop = crops[key]
+            print(f"{key} crop: {crop.x},{crop.y},{crop.size}")
         print(f"Output image size: {image_size}x{image_size}")
     print(f"Output: {output_path}")
 
@@ -599,14 +598,23 @@ def build_dataset(
 
 
 def main() -> int:
+    global RGB_VIDEO_KEYS
     args = parse_args()
     manifest_path = args.manifest.expanduser().resolve()
     output_path = args.output.expanduser().resolve()
-    crop_values = (args.top_crop, args.wrist_crop)
+
+    camera_names = [name.strip() for name in args.cameras.split(",") if name.strip()]
+    if not camera_names or not set(camera_names) <= {"top", "wrist"}:
+        raise ValueError(f"--cameras must be a subset of 'top,wrist', got: {args.cameras!r}")
+    RGB_VIDEO_KEYS = tuple(f"observation.images.{name}" for name in camera_names)
+
+    crop_by_camera = {"top": args.top_crop, "wrist": args.wrist_crop}
+    selected_crops = {name: crop_by_camera[name] for name in camera_names}
+    crop_values = tuple(selected_crops.values())
     if any(crop is not None for crop in crop_values) != all(
         crop is not None for crop in crop_values
     ):
-        raise ValueError("--top-crop and --wrist-crop must be provided together.")
+        raise ValueError("A crop must be provided for every selected camera, or none at all.")
     if args.image_size is not None and args.image_size <= 0:
         raise ValueError("--image-size must be positive.")
     if all(crop is not None for crop in crop_values) and args.image_size is None:
@@ -614,13 +622,10 @@ def main() -> int:
     if args.image_size is not None and not all(
         crop is not None for crop in crop_values
     ):
-        raise ValueError("--top-crop and --wrist-crop are required with --image-size.")
+        raise ValueError("Crops for every selected camera are required with --image-size.")
     crops = (
-        {
-            "observation.images.top": args.top_crop,
-            "observation.images.wrist": args.wrist_crop,
-        }
-        if args.top_crop is not None
+        {f"observation.images.{name}": crop for name, crop in selected_crops.items()}
+        if all(crop is not None for crop in crop_values)
         else None
     )
 

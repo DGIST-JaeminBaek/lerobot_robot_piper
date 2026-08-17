@@ -46,7 +46,6 @@ import argparse
 import contextlib
 import dataclasses
 import json
-import logging
 import os
 import pathlib
 import queue
@@ -64,7 +63,6 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from action_smoothing import (  # noqa: E402
-    AGGREGATE_FUNCTIONS,
     GLOBAL_HIGH,
     GLOBAL_LOW,
     SmoothingConfig,
@@ -78,26 +76,6 @@ REAL_ROBOT_CONFIRM = "I_UNDERSTAND_REAL_ROBOT"
 # 의미가 달라진다. 실물 확인 문구와 별개로 하나 더 요구한다.
 MIT_CONFIRM = "I_UNDERSTAND_TORQUE_CONTROL"
 DEFAULT_ENV_FILE = REPO_ROOT / "configs" / "recording.env"
-
-
-class _GripperClampWarningFilter(logging.Filter):
-    """그리퍼만 클램프됐다고 알리는 lerobot 경고를 걸러낸다.
-
-    lerobot의 ensure_safe_goal_position()(robots/utils.py)은 클램프가 생길 때마다
-    매 스텝 logging.warning을 낸다. 그런데 그리퍼는 물체를 쥐고 있으면 "더 조여"라는
-    명령이 물리적으로 막혀 항상 클램프되므로(학습 데이터에서도 동일), 30Hz로 로그가
-    도배돼 정작 봐야 할 줄이 묻힌다.
-
-    관절 이름이 하나라도 들어 있으면 통과시킨다 — 그건 진짜 봐야 하는 경고다.
-    """
-
-    JOINT_NAMES = tuple(MOTOR_NAMES[:6])
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        if "had to be clamped to be safe" not in message:
-            return True
-        return any(joint in message for joint in self.JOINT_NAMES)
 
 
 class RvizPublisher:
@@ -368,11 +346,6 @@ class RunSettings:
 
     dataset_root: pathlib.Path
     policy_path: str
-    # HAMLET 등 서드파티 policy 타입을 쓸 때 지정. lerobot-train의
-    # --policy.discover_packages_path와 같은 값(예: smolvla_hamlet)을 주면
-    # load_policy() 전에 그 패키지를 import해서 등록한다. PYTHONPATH에 해당
-    # 패키지가 있어야 함(예: PYTHONPATH=/home/ugrp43/jmbaek:$PYTHONPATH).
-    policy_discover_packages_path: str | None = None
     episode: int = 0
     task: str = ""
     device: str = "cuda"
@@ -388,19 +361,6 @@ class RunSettings:
     # 없다. 5스텝마다 추론하면 30Hz에서 추론 간격이 167ms라 115ms 추론이 여유 있게
     # 들어가고, 겹치는 chunk가 50/5=10개라 temporal ensemble도 유지된다.
     infer_every: int = 5
-    # lerobot async_inference의 chunk_size_threshold(= SmolVLA 논문 Algorithm 1의
-    # threshold g)를 이식한 것. "threshold"(기본, 2026-08-11부로 전환)면 남은
-    # 큐(pending_steps) 비율이 chunk_threshold 이하로 떨어질 때마다 추론을
-    # 요청한다 — 논문이 말하는 "aggregating queues" 방식(g=0.7 sweet spot ↔
-    # chunk_threshold=1-g=0.3).
-    # "fixed"를 주면 이전 기본값이었던 infer_every 고정 간격 방식으로 돌아간다.
-    # 이전 동작은 piper_infer_runner_prev.py에 그대로 남아있다.
-    trigger_mode: str = "threshold"
-    chunk_threshold: float = 0.3
-    # 추론 지연 보정. chunk[0]은 요청 시점의 예측인데 도착까지 3~4스텝이 흐르므로,
-    # 그만큼 앞을 잘라 '지금'에 맞춘다(_align_chunk 참고). 끄면 2026-08-12 이전
-    # 동작과 같아진다 — A/B 비교용으로 남겨둔다.
-    latency_align: bool = True
     horizon: int = 50
     max_steps: int = 0
     loop_dataset: bool = False
@@ -447,12 +407,6 @@ class RunSettings:
     # vel_ref 배율. 0이면 속도 피드포워드를 완전히 끈다(순수 위치 임피던스) —
     # 흔들림 원인이 속도항인지 가려낼 때 쓴다.
     mit_vel_scale: float = 1.0
-    # HIL 개입(리더암 클러치). 기본 꺼짐 — 켜지 않으면 아래 경로는 통째로 비활성이라
-    # 기존 동작과 바이트 단위로 같다. 켜면 space로 정책↔사람 제어권을 토글한다.
-    # 상세는 docs/erase_run_design.md §5, 구현은 hil_clutch.py.
-    hil: bool = False
-    leader_port: str = "can_leader"
-    clutch_gain: float = 1.0
     smoothing: SmoothingConfig = dataclasses.field(default_factory=SmoothingConfig)
     # 모드 프리셋에서 오는 값들 — 개별 수정 가능
     mode: str = DEMO_MODE.name
@@ -487,15 +441,9 @@ class RunSettings:
     def describe(self) -> str:
         preset = mode_preset(self.mode)
         record = "on" if self.record_dataset else "off"
-        trigger = (
-            f"infer_every={self.infer_every}"
-            if self.trigger_mode == "fixed"
-            else f"chunk_threshold={self.chunk_threshold:g}"
-        )
         return (
             f"mode={preset.name}({preset.label}) source={self.source} "
-            f"record={record} fps={self.fps:g} trigger={self.trigger_mode}({trigger}) "
-            f"latency_align={'on' if self.latency_align else 'off'} "
+            f"record={record} fps={self.fps:g} infer_every={self.infer_every} "
             f"smoothing={self.smoothing.summary()}"
         )
 
@@ -532,32 +480,16 @@ class InferenceRunner(threading.Thread):
         self.status = "not_started"
         self.recorded_path: pathlib.Path | None = None
 
-        # HIL 개입 집계 — 개입률은 §8 보고 지표라 러너가 직접 센다.
-        self.intervention_steps = 0
-        self.engage_deviations: list[float] = []
-        self.hil_aborted = False
-
         self._pending_smoothing: SmoothingConfig | None = None
         self._smoothing_lock = threading.Lock()
-        self._clamp_window: list[bool] = []          # 관절 6개만
-        self._gripper_clamp_window: list[bool] = []  # 그리퍼는 따로 — _track_send 주석 참고
-        self._gripper_clamp_reported = False
+        self._clamp_window: list[bool] = []
         self._clamp_saturated_reports = 0
-        # smoothing의 rate_limit이 실제로 얼마나 잘라내는지. max_relative_target과
-        # 다른 것이다 — 이건 "직전 명령 대비" 제한이라 먼저 걸리면 명령이 애초에
-        # 커지지 못해 max_relative_target에는 도달조차 안 한다.
-        self._rate_adjustments: list[float] = []
         self._phase_totals: dict[str, list[float]] = {
             name: [] for name in ("loop", "observe", "infer", "send", "record")
         }
         self._late_steps = 0
-        # 요청에는 (요청 시점 step, 관찰)을, 결과에는 (요청 시점 step, chunk)를 싣는다.
-        # 추론이 도는 동안에도 제어 루프는 큐를 계속 소비하므로, chunk가 도착했을 때
-        # 몇 스텝이 흘렀는지 알아야 제자리에 붙일 수 있다. _align_chunk() 참고.
-        self._infer_requests: "queue.Queue[tuple[int, dict] | None]" = queue.Queue(maxsize=1)
-        self._infer_results: "queue.Queue[tuple[int, np.ndarray]]" = queue.Queue()
-        self._infer_lags: list[int] = []
-        self._stale_chunks = 0
+        self._infer_requests: "queue.Queue[dict | None]" = queue.Queue(maxsize=1)
+        self._infer_results: "queue.Queue[np.ndarray]" = queue.Queue()
         self._infer_busy = threading.Event()
         self._infer_thread: threading.Thread | None = None
         self._infer_error: str | None = None
@@ -591,9 +523,6 @@ class InferenceRunner(threading.Thread):
         robot = None
         rviz = None
         recorder = None
-        leader = None
-        toggle = None
-        mixer = None
         status = "finished"
         try:
             import torch  # noqa: F401  (정책 로딩 전에 import 비용을 여기서 치른다)
@@ -629,12 +558,6 @@ class InferenceRunner(threading.Thread):
             # 텐서 크기 불일치로 죽는데, 그 시점엔 이미 팔이 연결돼 있다.
             check_policy_dataset_match(settings.policy_path, dataset_root)
 
-            if settings.policy_discover_packages_path:
-                import importlib
-
-                importlib.import_module(settings.policy_discover_packages_path)
-                self._log(f"[PLUGIN] imported {settings.policy_discover_packages_path!r}")
-
             self._log(f"[LOAD] policy={settings.policy_path} device={settings.device}")
             config, policy, preprocessor, postprocessor = load_policy(
                 settings.policy_path, dataset.meta, settings.device
@@ -649,11 +572,6 @@ class InferenceRunner(threading.Thread):
                 validate_live_camera_output_size(
                     dataset.features, camera_keys, settings.camera_output_size
                 )
-                # 그리퍼 전용 클램프 경고가 30Hz로 도배되는 걸 막는다. 관절이 걸리면
-                # 그대로 통과하므로 진짜 문제는 여전히 보인다.
-                logging.getLogger().addFilter(_GripperClampWarningFilter())
-                self._log("[LOG] 그리퍼 전용 클램프 경고는 숨깁니다 (관절 경고는 그대로 표시)")
-
                 from piper_human_approved_inference import build_robot_from_env
 
                 self._log("[CONNECT] Piper follower + camera 연결 중…")
@@ -702,29 +620,6 @@ class InferenceRunner(threading.Thread):
                 robot.connect()
                 self._log("[CONNECT] 연결 완료")
 
-            # ── HIL(리더암 개입) 준비 ──────────────────────────
-            # 실물에 명령이 나가는 경우에만 의미가 있다. dataset 소스나 apply_to_robot이
-            # 꺼진 상태에서 리더를 잡으면 CAN만 점유하고 하는 일이 없다.
-            if settings.hil:
-                if not settings.real_robot_enabled():
-                    self._log("[HIL] 실물 전송이 꺼져 있어 개입을 활성화하지 않습니다")
-                else:
-                    from hil_clutch import Clutch, ClutchMixer, KeyToggle
-
-                    from lerobot_robot_piper import PiperLeader, PiperLeaderConfig
-
-                    self._log(f"[HIL] 리더암 연결 중… port={settings.leader_port}")
-                    leader = PiperLeader(
-                        PiperLeaderConfig(id="infer_runner", port=settings.leader_port)
-                    )
-                    leader.connect()
-                    toggle = KeyToggle().start()
-                    mixer = ClutchMixer(toggle, leader, Clutch(settings.clutch_gain))
-                    self._log(
-                        f"[HIL] 활성 — space = 개입 on/off, q = 중단 "
-                        f"(clutch_gain={settings.clutch_gain:g})"
-                    )
-
             if settings.rviz:
                 try:
                     rviz = RvizPublisher(settings.joint_state_topic)
@@ -770,15 +665,8 @@ class InferenceRunner(threading.Thread):
                     f"--fps {train_fps:g} --infer-every {max(1, round(chunk_size / 10))} 권장"
                 )
             if settings.smoothing.temporal_ensemble:
-                if settings.trigger_mode == "threshold":
-                    votes = max(1, round(1.0 / max(settings.chunk_threshold, 1e-6)))
-                    self._log(
-                        f"[SMOOTH] trigger=threshold({settings.chunk_threshold:g}) "
-                        f"→ ensemble 최대 {votes}표 근사"
-                    )
-                else:
-                    votes = max(1, horizon // max(1, settings.infer_every))
-                    self._log(f"[SMOOTH] infer_every={settings.infer_every} → ensemble 최대 {votes}표")
+                votes = max(1, horizon // max(1, settings.infer_every))
+                self._log(f"[SMOOTH] infer_every={settings.infer_every} → ensemble 최대 {votes}표")
                 if votes < 3:
                     self._log("[WARN] 표수가 3 미만이라 temporal ensemble 효과가 거의 없습니다")
 
@@ -878,24 +766,17 @@ class InferenceRunner(threading.Thread):
                 # 루프는 일정한 주기를 지킨다. 결과는 준비되는 대로 받아 섞는다.
                 infer_seconds = 0.0
                 with self._phase("infer"):
-                    for chunk in self._collect_chunks(step, settings.latency_align):
+                    for chunk in self._collect_chunks():
                         self.raw_trajectory.append(chunk[0].copy())
                         pipeline.add_chunk(chunk)
 
-                    # 트리거: fixed=고정 스텝 간격(기존 동작), threshold=lerobot
-                    # async_inference의 chunk_size_threshold와 같은 적응형 방식
-                    # (남은 큐 비율이 chunk_threshold 이하로 떨어지면 추론).
-                    if settings.trigger_mode == "threshold":
-                        should_infer = (pipeline.pending_steps / horizon) <= settings.chunk_threshold
-                    else:
-                        should_infer = step % infer_every == 0
-                    if should_infer:
-                        self._request_inference(raw_observation, step)
+                    if step % infer_every == 0:
+                        self._request_inference(raw_observation)
 
                     # 쓸 게 떨어졌으면 어쩔 수 없이 기다린다 — 목표 없이 보내느니
                     # 한 스텝 늦는 게 낫다.
                     if pipeline.pending_steps == 0:
-                        waited = self._await_chunk(5.0, step, settings.latency_align)
+                        waited = self._await_chunk(timeout=5.0)
                         if waited is None:
                             self._log("[ERROR] 추론 결과를 기다리다 시간 초과 — 중단합니다")
                             status = "error"
@@ -911,44 +792,7 @@ class InferenceRunner(threading.Thread):
 
                 votes = pipeline.votes_for_next
                 action = pipeline.next_action()
-
-                # ── HIL 개입 ───────────────────────────────────
-                # 사람이 잡은 동안에는 정책 대신 리더암 델타가 목표가 된다.
-                # 기록되는 action도 이 값이어야 영상↔움직임 인과가 맞는다
-                # (개입 궤적을 나중에 BC 재학습에 쓰는 게 목적이므로).
-                intervened = False
-                if mixer is not None:
-                    follower_pose = {
-                        name: float(value)
-                        for name, value in zip(state_names, measured_state)
-                    }
-                    policy_action = {
-                        f"{name}.pos": float(value)
-                        for name, value in zip(MOTOR_NAMES, action)
-                    }
-                    mixed, intervened, engage_dev = mixer.step(policy_action, follower_pose)
-                    if engage_dev is not None:
-                        self.engage_deviations.append(engage_dev)
-                        self._log(f"[HIL] 인계 — engage_deviation={engage_dev:.2f}")
-                    if intervened:
-                        self.intervention_steps += 1
-                        action = np.asarray(
-                            [mixed[f"{name}.pos"] for name in MOTOR_NAMES], dtype=np.float32
-                        )
-                        # 개입 중 스무딩 파이프라인은 계속 정책 궤적을 밀고 있으므로,
-                        # 반환 시점에 파이프라인 상태가 팔의 실제 위치와 어긋나 있다.
-                        # 그대로 두면 반환 첫 스텝에서 목표가 튀고, max_relative_target
-                        # 클램프에 걸려 팔이 기어간다. 매 스텝 현재 자세로 리셋해두면
-                        # 반환이 지금 위치에서 이어진다.
-                        pipeline.reset(action)
-                    if toggle is not None and toggle.abort:
-                        self._log("[HIL] q — 시도 중단 요청")
-                        self.hil_aborted = True
-                        status = "hil_abort"
-                        break
-
                 self.trajectory.append(action.copy())
-                self._rate_adjustments.append(pipeline.last_rate_adjustment)
 
                 # 스무딩된 궤적 자체의 속도(정규화 단위/초). 룩어헤드와 MIT가
                 # 둘 다 이걸 쓴다 — 정책 chunk는 시간 매개화된 궤적이라 의도된
@@ -1022,7 +866,6 @@ class InferenceRunner(threading.Thread):
                             "infer_ms": infer_seconds * 1000.0,
                             "rate_clamp": pipeline.last_rate_adjustment,
                             "recorded": recorder.frames_written if recorder else 0,
-                            "intervention": intervened,
                         },
                     )
                 )
@@ -1063,29 +906,6 @@ class InferenceRunner(threading.Thread):
                 self._infer_requests.put_nowait(None)
             if self._infer_thread is not None:
                 self._infer_thread.join(timeout=10)
-            # 키 리스너와 리더는 로봇보다 먼저 놓는다 — park 중에 space가 눌려
-            # 개입 상태로 바뀌어도 반영될 곳이 없어야 한다.
-            if toggle is not None:
-                with contextlib.suppress(Exception):
-                    toggle.stop()
-            if mixer is not None:
-                with contextlib.suppress(Exception):
-                    mixer.release()
-            if leader is not None:
-                try:
-                    leader.disconnect()
-                except Exception as error:
-                    self._log(f"[WARN] 리더 disconnect 실패: {error}")
-            if self.intervention_steps:
-                self._log(
-                    f"[HIL] 개입 스텝 {self.intervention_steps}회, "
-                    f"인계 {len(self.engage_deviations)}회"
-                    + (
-                        f", engage_deviation 최대 {max(self.engage_deviations):.2f}"
-                        if self.engage_deviations
-                        else ""
-                    )
-                )
             if recorder is not None:
                 with contextlib.suppress(Exception):
                     self._finalize_recording(recorder, status)
@@ -1139,12 +959,11 @@ class InferenceRunner(threading.Thread):
         def loop() -> None:
             while not self.stop_event.is_set():
                 try:
-                    request = self._infer_requests.get(timeout=0.1)
+                    observation = self._infer_requests.get(timeout=0.1)
                 except queue.Empty:
                     continue
-                if request is None:
+                if observation is None:
                     break
-                requested_step, observation = request
                 started = time.perf_counter()
                 try:
                     chunk = predict(observation)
@@ -1153,62 +972,33 @@ class InferenceRunner(threading.Thread):
                     self._infer_busy.clear()
                     break
                 self._last_infer_seconds = time.perf_counter() - started
-                self._infer_results.put((requested_step, chunk))
+                self._infer_results.put(chunk)
                 self._infer_busy.clear()
 
         self._infer_thread = threading.Thread(target=loop, name="piper-infer", daemon=True)
         self._infer_thread.start()
 
-    def _request_inference(self, raw_observation: dict, step: int) -> None:
+    def _request_inference(self, raw_observation: dict) -> None:
         """워커가 놀고 있을 때만 새 관찰을 넘긴다. 밀리면 그냥 건너뛴다 —
         오래된 관찰로 추론해봐야 쓸모가 없다."""
         if self._infer_busy.is_set():
             return
         self._infer_busy.set()
-        self._infer_requests.put((step, raw_observation))
+        self._infer_requests.put(raw_observation)
 
-    def _align_chunk(self, requested_step: int, chunk: np.ndarray, step: int) -> "np.ndarray | None":
-        """추론 지연만큼 chunk 앞을 잘라 '지금'에 맞춘다.
-
-        chunk[0]은 요청 시점의 관찰에 대한 예측이다. 그런데 추론이 도는 동안(30Hz에서
-        보통 3~4스텝) 제어 루프는 큐를 계속 소비하므로, 도착 시점에 그냥 index 0에
-        붙이면 그만큼 과거의 목표를 현재 목표로 쓰게 된다. 흘러간 스텝 수만큼 앞을
-        버리면 제자리에 놓인다.
-
-        lerobot 원본은 TimedAction에 절대 timestep을 실어 같은 문제를 해결한다
-        (robot_client.py::_aggregate_action_queues). 단일 프로세스인 우리는 step
-        카운터만으로 충분하다.
-        """
-        lag = max(0, step - requested_step)
-        self._infer_lags.append(lag)
-        if lag == 0:
-            return chunk
-        if lag >= len(chunk):
-            # chunk 전체가 이미 지나간 시간이라 쓸 게 없다 — 버린다.
-            self._stale_chunks += 1
-            return None
-        return chunk[lag:]
-
-    def _collect_chunks(self, step: int, align: bool) -> list[np.ndarray]:
+    def _collect_chunks(self) -> list[np.ndarray]:
         chunks = []
         while True:
             try:
-                requested_step, chunk = self._infer_results.get_nowait()
+                chunks.append(self._infer_results.get_nowait())
             except queue.Empty:
                 return chunks
-            if align:
-                chunk = self._align_chunk(requested_step, chunk, step)
-            if chunk is not None and len(chunk):
-                chunks.append(chunk)
 
-    def _await_chunk(self, timeout: float, step: int, align: bool) -> "np.ndarray | None":
+    def _await_chunk(self, timeout: float) -> "np.ndarray | None":
         try:
-            requested_step, chunk = self._infer_results.get(timeout=timeout)
+            return self._infer_results.get(timeout=timeout)
         except queue.Empty:
             return None
-        if align:
-            chunk = self._align_chunk(requested_step, chunk, step)
-        return chunk if chunk is not None and len(chunk) else None
 
     # ── 타이밍 진단 ────────────────────────────────────────
     TIMING_REPORT_EVERY = 90
@@ -1237,28 +1027,6 @@ class InferenceRunner(threading.Thread):
             f"목표({period * 1000:.0f}ms) 초과 {late}회"
             + (" | " + ", ".join(parts) if parts else "")
         )
-        if self._infer_lags:
-            lags = self._infer_lags
-            self._log(
-                f"[LAG] 추론 지연 {float(np.mean(lags)):.1f}스텝 평균 "
-                f"(최대 {max(lags)}, chunk {len(lags)}개)"
-                + (f", 전부 지나가 버린 chunk {self._stale_chunks}개" if self._stale_chunks else "")
-            )
-            self._infer_lags = []
-
-        # rate_limit이 실제로 걸렸는지. 관절이 max_relative_target에 안 걸린 이유가
-        # "여유가 충분해서"인지 "rate_limit이 먼저 잘라서"인지 여기서 갈린다.
-        if self._rate_adjustments:
-            hits = [v for v in self._rate_adjustments if v > 1e-4]
-            total = len(self._rate_adjustments)
-            self._rate_adjustments = []
-            if hits:
-                self._log(
-                    f"[RATE] rate_limit에 {len(hits)}/{total}회 ({len(hits) / total:.0%}) 걸림, "
-                    f"평균 {float(np.mean(hits)):.2f} 최대 {max(hits):.2f} 깎임"
-                )
-            else:
-                self._log(f"[RATE] rate_limit 미작동 (0/{total}) — 명령 변화량이 상한 이내")
         if worst > period * 2 and mean < period * 1.5:
             self._log(
                 "[WARN] 주기가 고르지 않습니다 — 느린 스텝이 섞여 있으면 평균이 맞아도 "
@@ -1286,11 +1054,6 @@ class InferenceRunner(threading.Thread):
         max_relative_target에 걸린 것이고, 그게 계속되면 명령이 사실상
         "실측 위치 + 제한"으로 고정돼 스무딩 결과가 버려진다. 그 상태에서
         smoothing 하이퍼파라미터를 만지는 건 의미가 없으므로 미리 알린다.
-        그리퍼는 따로 센다. 물체를 물고 있으면 "더 조여"라는 명령이 물리적으로 막혀
-        실측이 명령을 못 따라가는 게 정상이기 때문이다 — 학습 데이터에서도 지우는
-        내내 실측이 명령보다 평균 +4.8 크다. 이걸 관절과 같이 묶어 max()로 보면
-        그리퍼 하나 때문에 항상 "포화"로 보고돼(2026-08-12 실물에서 실제로 발생)
-        max_relative_target을 올리라는 엉뚱한 처방이 나간다.
         """
         if not sent:
             return
@@ -1300,32 +1063,19 @@ class InferenceRunner(threading.Thread):
         if not np.isfinite(actual).all():
             return
 
-        difference = np.abs(actual - requested)
-        joint_deviation = float(difference[:6].max())      # 그리퍼(index 6) 제외
-        self._clamp_window.append(joint_deviation > 1e-4)
-        self._gripper_clamp_window.append(float(difference[6]) > 1e-4)
+        deviation = float(np.abs(actual - requested).max())
+        self._clamp_window.append(deviation > 1e-4)
         if len(self._clamp_window) < self.CLAMP_REPORT_EVERY:
             return
 
         clamped = sum(self._clamp_window)
         ratio = clamped / len(self._clamp_window)
-        gripper_ratio = sum(self._gripper_clamp_window) / len(self._gripper_clamp_window)
         self._clamp_window.clear()
-        self._gripper_clamp_window.clear()
-
         if ratio < 0.2:
-            # 관절은 멀쩡한데 그리퍼만 계속 걸리면 물체를 쥐고 있다는 뜻이라 정상이다.
-            # 처음 한 번만 알려주고 이후엔 조용히 넘어간다.
-            if gripper_ratio > 0.9 and not self._gripper_clamp_reported:
-                self._gripper_clamp_reported = True
-                self._log(
-                    "[CLAMP] 그리퍼만 계속 클램프됨 — 물체를 쥔 채 '더 조여'를 보내는 "
-                    "상태입니다. 학습 데이터에서도 같으므로 정상입니다(관절은 이상 없음)."
-                )
             return
 
         message = (
-            f"[CLAMP] 최근 {self.CLAMP_REPORT_EVERY}스텝 중 관절 {clamped}회 "
+            f"[CLAMP] 최근 {self.CLAMP_REPORT_EVERY}스텝 중 {clamped}회 "
             f"({ratio:.0%}) max_relative_target에 걸림"
         )
         if ratio > 0.9:
@@ -1454,33 +1204,6 @@ def training_dataset_of(policy_path: str | pathlib.Path) -> str | None:
     return None
 
 
-def pads_vectors(policy_path: str | pathlib.Path) -> bool:
-    """state/action을 고정 차원으로 패딩하는 정책인지(max_state_dim이 있는지)."""
-    path = pathlib.Path(policy_path) / "config.json"
-    if not path.is_file():
-        return False
-    with contextlib.suppress(json.JSONDecodeError, OSError):
-        config = json.loads(path.read_text(encoding="utf-8"))
-        return "max_state_dim" in config or "max_action_dim" in config
-    return False
-
-
-def saved_rename_map(policy_path: str | pathlib.Path) -> dict[str, str] | None:
-    """체크포인트에 저장된 rename_map을 꺼낸다.
-
-    학습 때 --rename_map으로 준 값이 policy_preprocessor.json의
-    rename_observations_processor 설정에 그대로 남는다.
-    """
-    path = pathlib.Path(policy_path) / "policy_preprocessor.json"
-    if not path.is_file():
-        return None
-    with contextlib.suppress(json.JSONDecodeError, OSError, KeyError):
-        for step in json.loads(path.read_text(encoding="utf-8"))["steps"]:
-            if step.get("registry_name") == "rename_observations_processor":
-                return step.get("config", {}).get("rename_map") or None
-    return None
-
-
 def check_policy_dataset_match(policy_path: str | pathlib.Path, dataset_root: pathlib.Path) -> None:
     """정책이 기대하는 입력과 참조 dataset의 feature가 맞는지 미리 본다.
 
@@ -1488,10 +1211,6 @@ def check_policy_dataset_match(policy_path: str | pathlib.Path, dataset_root: pa
     학습된 것과 다른 dataset을 고르면 정책 로딩(수십 초)과 로봇 연결까지 다
     끝난 뒤에야 텐서 크기 불일치로 죽는다. Dataset Browser에 200개가 다 보이므로
     실수하기 쉽다 — config.json만 읽어서(torch 로딩 없이) 미리 막는다.
-
-    pi0처럼 카메라 이름이 고정된(base_0_rgb 등) 정책은 학습 때 --rename_map으로
-    우리 top/wrist를 매핑했고, 그 값이 체크포인트의 preprocessor에 남아 있다.
-    여기서도 같은 매핑을 적용해야 멀쩡한 조합을 불일치로 오판하지 않는다.
     """
     config_path = pathlib.Path(policy_path) / "config.json"
     info_path = pathlib.Path(dataset_root) / "meta" / "info.json"
@@ -1504,21 +1223,8 @@ def check_policy_dataset_match(policy_path: str | pathlib.Path, dataset_root: pa
     except (json.JSONDecodeError, OSError, KeyError):
         return
 
-    features = dict(features)
-    for source, target in (saved_rename_map(policy_path) or {}).items():
-        if source in features:
-            features[target] = features.pop(source)
-
     wanted = dict(expected.get("input_features") or {})
     wanted.update(expected.get("output_features") or {})
-    # 정책이 선언했지만 우리 로봇엔 없는 카메라(pi0의 right_wrist_0_rgb 등)는
-    # 모델이 -1 패딩 + 마스크 0으로 알아서 무시하므로 없다고 문제 삼지 않는다.
-    renamed_targets = set((saved_rename_map(policy_path) or {}).values())
-    if renamed_targets:
-        wanted = {
-            k: v for k, v in wanted.items()
-            if not (k.startswith("observation.images.") and k not in features)
-        }
 
     problems: list[str] = []
     for key, spec in wanted.items():
@@ -1531,15 +1237,8 @@ def check_policy_dataset_match(policy_path: str | pathlib.Path, dataset_root: pa
             continue
         want = tuple(spec.get("shape") or ())
         have = tuple(features[key].get("shape") or ())
-        if want == have:
-            continue
-        # pi0 계열은 여러 로봇을 한 모델로 다루려고 state/action을 max_*_dim(32)로
-        # 선언해두고, 실제로는 pad_vector로 0을 채워 넣었다가 출력에서 원래 차원만
-        # 잘라 쓴다(modeling_pi0.py의 prepare_state / sample_actions). 즉 정책 쪽이
-        # 더 크면 패딩이므로 정상이다 — 반대 방향만 진짜 문제다.
-        if len(want) == 1 and len(have) == 1 and want[0] > have[0] and pads_vectors(policy_path):
-            continue
-        problems.append(f"  {key}: 정책은 {want}, dataset은 {have}")
+        if want != have:
+            problems.append(f"  {key}: 정책은 {want}, dataset은 {have}")
 
     if not problems:
         return
@@ -1558,14 +1257,7 @@ def check_policy_dataset_match(policy_path: str | pathlib.Path, dataset_root: pa
 
 
 def load_env_file(path: pathlib.Path) -> dict[str, str]:
-    """configs/recording.env 형식(KEY=VALUE)을 읽는다. 없으면 빈 dict.
-
-    반환 dict는 crop 등 이 파일 안에서 쓰고, 동시에 os.environ에도 반영한다
-    (setdefault라 이미 shell에서 export된 값은 안 덮어씀) — build_robot_from_env()
-    (piper_human_approved_inference.py)가 TOP_CAM/WRIST_CAM 등을 os.environ에서
-    직접 읽기 때문에, 여기서 안 하면 그쪽에서 항상 빈 값으로 보여서 카메라가
-    하나도 등록되지 않는다(2026-08-11 실물 테스트에서 발견: robot.cameras=[]).
-    """
+    """configs/recording.env 형식(KEY=VALUE)을 읽는다. 없으면 빈 dict."""
     values: dict[str, str] = {}
     if not path.is_file():
         return values
@@ -1574,10 +1266,7 @@ def load_env_file(path: pathlib.Path) -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        values[key] = value
-        os.environ.setdefault(key, value)
+        values[key.strip()] = value.strip().strip('"').strip("'")
     return values
 
 
@@ -1684,12 +1373,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--dataset-root", required=True, type=pathlib.Path)
     parser.add_argument("--policy-path", required=True)
-    parser.add_argument(
-        "--policy-discover-packages-path",
-        default=None,
-        help="HAMLET 등 서드파티 policy 타입을 쓸 때 지정(예: smolvla_hamlet). "
-        "PYTHONPATH에 해당 패키지가 있어야 함",
-    )
     parser.add_argument("--episode", type=int, default=0)
     parser.add_argument("--task", default="")
     parser.add_argument("--device", default="cuda")
@@ -1699,28 +1382,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--infer-every", type=int, default=5, help="N 스텝마다 추론. ensemble 표수 = chunk_size/N"
-    )
-    parser.add_argument(
-        "--trigger-mode",
-        default="threshold",
-        choices=["fixed", "threshold"],
-        help="threshold(기본)=lerobot async_inference의 chunk_size_threshold 방식 "
-        "(SmolVLA 논문 Algorithm 1의 g=0.7 sweet spot에 대응, 남은 큐 비율 기반 "
-        "적응형 트리거). fixed=이전 기본값이었던 infer_every 고정 간격 방식",
-    )
-    parser.add_argument(
-        "--chunk-threshold",
-        type=float,
-        default=0.3,
-        help="trigger-mode=threshold일 때만 사용. 남은 큐/horizon 비율이 이 값 이하로 "
-        "떨어지면 추론 요청 (0~1). 기본 0.3 = SmolVLA 논문 Algorithm 1의 g=0.7",
-    )
-    parser.add_argument(
-        "--no-latency-align",
-        dest="latency_align",
-        action="store_false",
-        help="추론 지연 보정을 끈다. 켜면(기본) chunk 도착까지 흐른 스텝만큼 앞을 잘라 "
-        "'지금'에 맞춘다. 끄면 2026-08-12 이전 동작과 같다",
     )
     parser.add_argument("--horizon", type=int, default=50)
     parser.add_argument("--max-steps", type=int, default=0)
@@ -1733,13 +1394,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     smoothing.add_argument("--ensemble-m", type=float)
     smoothing.add_argument("--ema-alpha", type=float)
     smoothing.add_argument("--rate-limit", type=float)
-    smoothing.add_argument(
-        "--aggregate-fn",
-        choices=["temporal_ensemble", *sorted(AGGREGATE_FUNCTIONS)],
-        help="weighted_average(기본)=SmolVLA 논문 Algorithm 1의 aggregate 함수 f "
-        "(lerobot async_inference를 그대로 이식). temporal_ensemble=이전 기본값이었던 "
-        "ACT 방식 exp(-m*i) 전체 평균 — 비교 실험용으로 남겨둠",
-    )
     parser.set_defaults(temporal_ensemble=None)
 
     record = parser.add_argument_group("기록 (모드 기본값을 덮어씀)")
@@ -1753,20 +1407,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     robot.add_argument("--apply-to-robot", action="store_true")
     robot.add_argument("--real-robot-confirm", default="")
     robot.add_argument("--no-park-on-exit", dest="park_on_exit", action="store_false")
-
-    hil = parser.add_argument_group("HIL 개입 (리더암 클러치)")
-    hil.add_argument(
-        "--hil",
-        action="store_true",
-        help="리더암 개입 활성화. space=개입 on/off, q=중단. 실물 전송이 열려 있어야 동작",
-    )
-    hil.add_argument("--leader-port", default="can_leader", help="리더암 CAN 인터페이스")
-    hil.add_argument(
-        "--clutch-gain",
-        type=float,
-        default=1.0,
-        help="리더 변화량 -> 팔로워 반영 비율 (1.0=등배, <1이면 정밀 보정이 쉬워진다)",
-    )
     robot.add_argument(
         "--move-mode",
         type=int,
@@ -1840,8 +1480,6 @@ def settings_from_args(args: argparse.Namespace) -> RunSettings:
         smoothing = dataclasses.replace(smoothing, ema_alpha=args.ema_alpha)
     if args.rate_limit is not None:
         smoothing = dataclasses.replace(smoothing, rate_limit=args.rate_limit)
-    if args.aggregate_fn is not None:
-        smoothing = dataclasses.replace(smoothing, aggregate_fn=args.aggregate_fn)
 
     # live 카메라 전처리는 recording.env를 기본으로 쓴다 — GUI와 CLI가 서로 다른
     # 크롭으로 돌면 정책이 학습 때와 다른 화면을 보게 된다.
@@ -1860,16 +1498,12 @@ def settings_from_args(args: argparse.Namespace) -> RunSettings:
     overrides: dict[str, Any] = {
         "dataset_root": args.dataset_root,
         "policy_path": args.policy_path,
-        "policy_discover_packages_path": args.policy_discover_packages_path,
         "episode": args.episode,
         "task": args.task,
         "device": args.device,
         "source": args.source,
         "fps": args.fps,
         "infer_every": args.infer_every,
-        "trigger_mode": args.trigger_mode,
-        "chunk_threshold": args.chunk_threshold,
-        "latency_align": args.latency_align,
         "horizon": args.horizon,
         "max_steps": args.max_steps,
         "loop_dataset": args.loop_dataset,
@@ -1878,9 +1512,6 @@ def settings_from_args(args: argparse.Namespace) -> RunSettings:
         "apply_to_robot": args.apply_to_robot,
         "real_robot_confirm": args.real_robot_confirm,
         "park_on_exit": args.park_on_exit,
-        "hil": args.hil,
-        "leader_port": args.leader_port,
-        "clutch_gain": args.clutch_gain,
         "camera_output_size": camera_output_size,
         "move_mode": args.move_mode,
         "move_speed_rate": args.move_speed_rate,

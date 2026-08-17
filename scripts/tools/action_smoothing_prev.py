@@ -23,7 +23,6 @@ piper_infer_gui.py가 실행 경로에서 이걸 그대로 쓰고, 같은 함수
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 
@@ -100,80 +99,6 @@ class TemporalEnsemble:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 1b. lerobot 공식 async_inference 스타일 aggregate (선택 가능한 대안)
-# ═══════════════════════════════════════════════════════════════════
-# lerobot/src/lerobot/async_inference/configs.py::AGGREGATE_FUNCTIONS를 그대로
-# 포팅한 것. TemporalEnsemble은 겹치는 예측 전부를 exp(-m*i)로 한 번에 평균하는
-# 반면, 이쪽은 "기존 값 vs 새 chunk 값" 둘만 보는 pairwise 함수를 새 chunk가 올
-# 때마다 반복 적용한다 — lerobot RobotClient._aggregate_action_queues와 동일한
-# 갱신 방식이라, 우리 실물 파이프라인 안에서 lerobot 기본 전략과 직접 비교할 수
-# 있게 하려고 추가했다. 기본 동작(temporal_ensemble)은 그대로 안 건드린다.
-AGGREGATE_FUNCTIONS: dict[str, Callable[[np.ndarray, np.ndarray], np.ndarray]] = {
-    "weighted_average": lambda old, new: 0.3 * old + 0.7 * new,
-    "latest_only": lambda old, new: new,
-    "average": lambda old, new: 0.5 * old + 0.5 * new,
-    "conservative": lambda old, new: 0.7 * old + 0.3 * new,
-}
-
-
-class QueueAggregateEnsemble:
-    """lerobot async_inference의 _aggregate_action_queues를 단일 프로세스용으로 옮긴 것.
-
-    TemporalEnsemble과 같은 인터페이스(add_chunk/pop_action/pending_steps/
-    votes_for_next)를 맞춰서 SmoothingPipeline이 둘을 구분 없이 쓸 수 있다.
-    """
-
-    def __init__(self, aggregate_fn_name: str = "weighted_average", max_horizon: int = 200) -> None:
-        if aggregate_fn_name not in AGGREGATE_FUNCTIONS:
-            raise ValueError(
-                f"Unknown aggregate_fn '{aggregate_fn_name}'. Available: {list(AGGREGATE_FUNCTIONS)}"
-            )
-        if max_horizon <= 0:
-            raise ValueError("max_horizon must be positive")
-        self.aggregate_fn_name = aggregate_fn_name
-        self._aggregate_fn = AGGREGATE_FUNCTIONS[aggregate_fn_name]
-        self.max_horizon = int(max_horizon)
-        self._buffer: list[np.ndarray | None] = []
-        self._votes: list[int] = []
-
-    def reset(self) -> None:
-        self._buffer.clear()
-        self._votes.clear()
-
-    @property
-    def pending_steps(self) -> int:
-        return len(self._buffer)
-
-    def votes_for_next(self) -> int:
-        return self._votes[0] if self._votes else 0
-
-    def add_chunk(self, chunk: np.ndarray) -> None:
-        chunk = np.asarray(chunk, dtype=np.float32)
-        if chunk.ndim != 2 or chunk.shape[1] != ACTION_DIM:
-            raise ValueError(f"chunk must be (H, {ACTION_DIM}), got {chunk.shape}")
-        horizon = min(len(chunk), self.max_horizon)
-        while len(self._buffer) < horizon:
-            self._buffer.append(None)
-            self._votes.append(0)
-        for step in range(horizon):
-            if self._buffer[step] is None:
-                self._buffer[step] = chunk[step]
-                self._votes[step] = 1
-            else:
-                self._buffer[step] = self._aggregate_fn(self._buffer[step], chunk[step])
-                self._votes[step] += 1
-
-    def pop_action(self) -> np.ndarray:
-        if not self._buffer:
-            raise RuntimeError("pop_action() called before any add_chunk()")
-        action = self._buffer.pop(0)
-        self._votes.pop(0)
-        if action is None:
-            raise RuntimeError("pop_action() called on a step with no prediction yet")
-        return action
-
-
-# ═══════════════════════════════════════════════════════════════════
 # 2. EMA
 # ═══════════════════════════════════════════════════════════════════
 class ExponentialMovingAverage:
@@ -237,26 +162,13 @@ class RateLimiter:
 class SmoothingConfig:
     temporal_ensemble: bool = True
     ensemble_m: float = 0.01
-    # "weighted_average"(기본) = SmolVLA 논문(arXiv:2506.01844) Algorithm 1의
-    # g-파라미터형 async inference가 쓰는 aggregate 함수 f(A_t, Ã_{t+1}) —
-    # lerobot async_inference의 AGGREGATE_FUNCTIONS를 그대로 포팅
-    # (QueueAggregateEnsemble). 2026-08-11부로
-    # 기본값을 이걸로 바꿨다. "temporal_ensemble"을 주면 이전 기본값이었던 ACT
-    # 방식 exp(-m*i) 전체 평균(TemporalEnsemble)으로 돌아간다 — 비교 실험용으로
-    # 남겨뒀고, 원본은 action_smoothing_prev.py에 그대로 있다.
-    aggregate_fn: str = "weighted_average"
     ema_alpha: float = 1.0
     rate_limit: float | None = 5.0
     # 정규화 범위 clamp (joint -100~100, gripper 0~100)
     clip_to_range: bool = True
 
     def summary(self) -> str:
-        if not self.temporal_ensemble:
-            ensemble = "ensemble(off)"
-        elif self.aggregate_fn == "temporal_ensemble":
-            ensemble = f"ensemble(m={self.ensemble_m:g})"
-        else:
-            ensemble = f"ensemble({self.aggregate_fn})"
+        ensemble = f"ensemble(m={self.ensemble_m:g})" if self.temporal_ensemble else "ensemble(off)"
         ema = f"ema(a={self.ema_alpha:g})" if self.ema_alpha < 1.0 else "ema(off)"
         rate = f"rate(<={self.rate_limit:g})" if self.rate_limit else "rate(off)"
         return f"{ensemble} -> {ema} -> {rate}"
@@ -264,12 +176,6 @@ class SmoothingConfig:
 
 GLOBAL_LOW = np.asarray([-100.0] * 6 + [0.0], dtype=np.float32)
 GLOBAL_HIGH = np.asarray([100.0] * 7, dtype=np.float32)
-
-
-def _make_ensemble(config: SmoothingConfig) -> "TemporalEnsemble | QueueAggregateEnsemble":
-    if config.aggregate_fn == "temporal_ensemble":
-        return TemporalEnsemble(config.ensemble_m)
-    return QueueAggregateEnsemble(config.aggregate_fn)
 
 
 class SmoothingPipeline:
@@ -281,7 +187,7 @@ class SmoothingPipeline:
 
     def __init__(self, config: SmoothingConfig) -> None:
         self.config = config
-        self._ensemble = _make_ensemble(config)
+        self._ensemble = TemporalEnsemble(config.ensemble_m)
         self._ema = ExponentialMovingAverage(config.ema_alpha)
         self._rate = RateLimiter(config.rate_limit)
         self._passthrough: list[np.ndarray] = []
@@ -297,7 +203,7 @@ class SmoothingPipeline:
     def update_config(self, config: SmoothingConfig, state: np.ndarray | None = None) -> None:
         """GUI에서 실행 중에 파라미터를 바꿀 때 사용. 버퍼는 비운다."""
         self.config = config
-        self._ensemble = _make_ensemble(config)
+        self._ensemble = TemporalEnsemble(config.ensemble_m)
         self._ema = ExponentialMovingAverage(config.ema_alpha)
         self._rate = RateLimiter(config.rate_limit)
         self._passthrough.clear()

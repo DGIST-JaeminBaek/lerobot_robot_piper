@@ -206,6 +206,62 @@ def test_reset_safety_allows_commands_again():
     assert f.bus.sent == [{"joint1": 10.0, "joint2": -5.0}]  # 다시 리더 목표를 따른다
 
 
+def test_disconnect_waits_for_safety_parking():
+    """★ 트립 직후 종료해도 parking이 끝난 뒤에 토크를 풀어야 한다.
+
+    _trip_safety()는 parking을 별도 스레드로 돌린다(제어 루프를 10초 세우지 않으려고).
+    예전에는 아무도 그 스레드를 안 기다려서, 트립 직후 disconnect가 겹쳐 돌며
+    parking 이동 중에 DisablePiper()가 나갔다 — 팔이 중간 자세에서 힘을 잃었다.
+    실물 로그(2026-08-16, pi0 연속 추론):
+        safety trip -> parking 자세로 복귀 중 (천천히 4.0s)
+        [DISCONNECT] park=False           <- 토크 해제가 여기서 시작됐고
+        safety trip -> parking 완료        <- parking은 그 뒤에 끝났다
+    """
+    import time
+
+    f = make_follower(
+        safety_enabled=True, effort={"joint1": 1.0, "joint2": 9.0}, on_overload="park"
+    )
+    f._camera_executor = None
+    f.config.disable_torque_on_disconnect = True
+    f.config.park_release_mode = "park_lower"
+    f.config.park_release_wrist_rest_deg = 24.4
+    f.config.park_release_ramp_s = 0.0
+    f.config.park_release_settle_s = 0.0
+    f.config.park_release_gripper_cycle = False
+    f.config.park_release_gripper_open = 100.0
+    f.config.park_release_gripper_wait_s = 0.0
+
+    # 실물처럼 parking을 느리게 만들어 경쟁 상태를 재현 가능하게 한다.
+    def slow_parking():
+        time.sleep(0.3)
+        f.bus.parking_calls += 1
+
+    f.bus.parking = slow_parking
+
+    # bus.disconnect가 불릴 때 parking이 아직 돌고 있었는지를 기록한다.
+    seen = {}
+
+    def fake_disconnect(disable_torque=True, **kwargs):
+        seen["park_active"] = f._safety_park_active
+        seen["parking_calls"] = f.bus.parking_calls
+        seen["called"] = True
+
+    f.bus.disconnect = fake_disconnect
+
+    f.send_action({"joint1.pos": 10.0, "joint2.pos": -5.0})
+    assert f._safety_park_thread is not None
+    assert f._safety_park_thread.is_alive(), "parking 스레드가 떠 있어야 재현이 된다"
+
+    f.disconnect(park=False)
+
+    assert seen.get("called") is True
+    assert seen["park_active"] is False, (
+        "parking이 끝나기 전에 토크 해제가 시작됐다 — 팔이 중간 자세에서 늘어진다"
+    )
+    assert seen["parking_calls"] == 1, "parking이 완료된 뒤여야 한다"
+
+
 if __name__ == "__main__":
     test_is_overloaded()
     test_normal_effort_sends_action()
@@ -217,4 +273,5 @@ if __name__ == "__main__":
     test_overload_park_ramps_when_ramp_s_set()
     test_overload_hold_does_not_park()
     test_reset_safety_allows_commands_again()
+    test_disconnect_waits_for_safety_parking()
     print("OK: safety cutoff mock 테스트 통과")

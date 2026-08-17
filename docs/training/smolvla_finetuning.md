@@ -8,7 +8,7 @@
 현재 기준:
 
 - 프로젝트: `/home/ugrp43/UGRP/lerobot_robot_piper`
-- LeRobot clone: `/home/ugrp43/UGRP/lerobot`
+- LeRobot clone: `/home/ugrp43/UGRP/piper_sdk/lerobot`
 - LeRobot: v0.4.4 editable install
 - Python: 3.10
 - Conda 환경: `ugrp`
@@ -193,7 +193,7 @@ LeRobot clone에서 SmolVLA 선택 의존성을 설치한다.
 
 ```bash
 conda activate ugrp
-cd /home/ugrp43/UGRP/lerobot
+cd /home/ugrp43/UGRP/piper_sdk/lerobot
 python -m pip install -e ".[smolvla]"
 ```
 
@@ -272,7 +272,7 @@ effort safety cutoff는 policy 입력과 별개로 Piper SDK에서 읽은 curren
 
 ```text
 LeRobot 기본 preset:
-/home/ugrp43/UGRP/lerobot/src/lerobot/policies/smolvla/configuration_smolvla.py
+/home/ugrp43/UGRP/piper_sdk/lerobot/src/lerobot/policies/smolvla/configuration_smolvla.py
 
 최종 실행에 실제 저장된 설정:
 outputs/train/smolvla_erase_shape_512/checkpoints/030000/pretrained_model/train_config.json
@@ -423,9 +423,57 @@ mixed_precision bf16
 BF16은 주로 GPU activation 메모리를 줄인다. 모델의 일부 연산과 optimizer
 상태는 계속 FP32를 사용할 수 있다.
 
+### 정확한 메커니즘 — 가중치는 fp32, forward만 autocast로 bf16
+
+`lerobot_train.py`를 직접 읽어 다음을 확인했다.
+
+- 정책 가중치를 어디서도 `.to(dtype=bfloat16)`으로 캐스팅하지 않는다 — 파라미터는
+  fp32로 그대로 저장된다.
+- forward pass만 `with accelerator.autocast():`로 감싼다
+  (`lerobot_train.py:102`, `forward.forward()` 호출부. eval 경로도 동일하게
+  `torch.no_grad(), accelerator.autocast()`를 쓴다, `lerobot_train.py:477`).
+- `accelerator.backward(loss)`(`lerobot_train.py:122`)와 `optimizer.step()`
+  (`lerobot_train.py:134`)은 autocast 블록 **바깥**이다 — gradient와 optimizer
+  state는 fp32로 계산·저장된다.
+- `Accelerator(...)` 생성 코드(`lerobot_train.py:183-187`)는 `mixed_precision`을
+  인자로 명시하지 않는다. `ACCELERATE_MIXED_PRECISION=bf16` 환경변수(또는 Accelerate
+  config 파일)에서 읽어온 값을 그대로 쓴다.
+
+즉 "가중치는 fp32로 유지하고 forward 연산만 bf16으로 autocast"하는 PyTorch AMP의
+표준 mixed precision 패턴 그대로다. `docs/training/pi0_finetuning.md`의 "BF16 정밀도"
+절에 정리한 pi0(PyTorch 구현)의 `precision` 인자 — 모델 전체를 `.to(bfloat16)`으로
+캐스팅해 "전부 bf16 아니면 전부 fp32" 중 하나만 고르는 방식 — 과 정반대다. OpenPI 공식
+문서가 "Mixed precision is not yet supported"라고 명시하는 것과 대비해서 SmolVLA/lerobot
+쪽은 실제로 진짜 mixed precision을 쓰고 있다는 뜻이다.
+
 최종 `train_config.json`의 `policy.use_amp=false`와 이 설정은 충돌하지 않는다.
 이번 BF16은 policy 내부 AMP flag가 아니라 바깥 학습 loop의 Hugging Face
 Accelerate autocast를 `ACCELERATE_MIXED_PRECISION=bf16`으로 활성화한 것이다.
+
+### 공식 근거
+
+SmolVLA 논문(Shukor et al., 2025, [arXiv:2506.01844](https://huggingface.co/papers/2506.01844))
+4.3절 Implementation details 원문:
+
+> Beyond maintaining a compact model and a reduced number of tokens, we employ several
+> optimizations to enhance training efficiency. Specifically, we leverage bfloat16
+> precision and torch.compile() (Paszke, 2019) that JIT-compiles PyTorch code into
+> optimized kernels. [...] For multi-GPU and multi-node training, we utilize Hugging
+> Face's accelerate (Gugger et al., 2022) library with mixed precision, providing a
+> scalable and memory-efficient training setup.
+
+즉 원저자들이 실제로 학습에 쓴 방식이 정확히 "Hugging Face Accelerate + mixed precision
+(bfloat16)"이며, 우리가 쓰는 `ACCELERATE_MIXED_PRECISION=bf16`은 lerobot 0.4.4에
+`--policy.dtype` 플래그가 없어서 궁여지책으로 쓰는 우회책이 아니라 원본 recipe와 동일한
+메커니즘이다.
+
+커뮤니티 재현 사례([huggingface/lerobot#3287](https://github.com/huggingface/lerobot/issues/3287))의
+최종 학습 명령에도 `accelerate launch --mixed_precision=bf16 ...`이 명시돼 있어 실제
+운용에서도 동일하게 확인된다. 같은 이슈에서 `scheduler_decay_steps`가 `--steps`를 따라가지
+않아 LR이 학습 후반부에 조기 바닥(0 근처)까지 떨어진 채 유지되는 문제도 함께 보고됐다.
+`--policy.scheduler_decay_steps`는 `--steps`를 바꿀 때마다 반드시 같이 맞춰야 하며, 이 문서의
+학습에도 동일하게 재발할 수 있다 — pi0 학습 3회(75k/315/132 스텝)에서 전부 실측으로 확인된
+문제다.
 
 ## 7. 검증 완료된 smoke test
 

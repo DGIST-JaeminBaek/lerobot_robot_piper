@@ -1,92 +1,210 @@
 # CLAUDE.md
 
-DGIST UGRP Group 43 — VLA 기반 PiPER 로봇팔 조작 프로젝트 (SmolVLA + LeRobot).
-이 리포는 `DGIST-JaeminBaek/lerobot_robot_piper` (WeGo-Robotics fork 계열)의 개인 작업 fork로,
-GUI 리팩터링 작업이 진행 중이다.
+이 저장소에서 작업하는 에이전트를 위한 안내. 프로젝트 소개와 설치는 `README.md`,
+원본 fork 대비 변경점은 `docs/change.md`를 볼 것. 여기에는 **작업 전에 알아야 문제가
+생기지 않는 것들**만 적는다.
 
-## 프로젝트 개요
+## 무엇을 하는 프로젝트인가
 
-- **목표**: PiPER 로봇팔로 손글씨(5글자 단어) 시연 데이터를 수집하고 SmolVLA를 fine-tuning하여 자율 조작 수행
-- **파이프라인**: teleoperation → LeRobotDataset 녹화 → SmolVLA 학습 → 추론(서버/클라이언트)
-- **현재 작업**: 기존 keyboard 기반 record 흐름을 Tkinter GUI(`teleop_ui.py` 확장)로 대체하는 리팩터링
+Agilex Piper 7-DOF 로봇팔로 **"화이트보드에 그려진 도형을 지우개로 지우고 지우개를
+제자리에 갖다 놓는"** 태스크를 VLA(Vision-Language-Action) 모델에 학습시키고 실물에서
+평가한다. 논문 작성이 목표이며, 핵심 비교는 **메모리 모듈(HAMLET) 유무**와
+**카메라 구성(top+wrist vs top-only)** 의 ablation이다.
 
-## Git / 브랜치 규칙 (중요)
+## 환경 — conda 두 개를 쓴다
 
-- `origin` = `BLINCE1/lerobot_robot_piper-gui-refactor` (개인 fork, private) — push는 여기만
-- `upstream` = `DGIST-JaeminBaek/lerobot_robot_piper` (원본, 공용) — **절대 push 금지.**
-  개인 PC 검증 → 랩 PC 검증이 모두 끝난 뒤, 사용자가 명시적으로 지시할 때만 반영
-- 작업 브랜치: `seongil/gui-refactor` (브랜치 명명 규칙: `이름/작업내용`)
-- 공용 PC를 여러 명이 쓰므로 다른 사람 브랜치(`*/dev` 등)는 건드리지 않는다
-
-## 모터값 컨벤션 (매우 중요)
-
-2026-07-03에 구 리포(`DGIST-JaeminBaek/UGRP`)에서 마이그레이션하면서 컨벤션이 바뀌었다:
-
-| | 구 (UGRP) | 현재 (이 리포) |
+| 환경 | transformers | 용도 |
 |---|---|---|
-| 좌표계 | EEF Cartesian | Joint-space |
-| 값 범위 | raw SDK 정수 | 정규화 −100 ~ +100 (그리퍼 0~100) |
-| 클래스 | Piper / PiperSlaveOnly | **PiperFollower / PiperLeader** |
+| **`ugrp`** | 4.57.6 | SmolVLA, HAMLET, 데이터 분석, **실물 로봇 제어** (기본) |
+| **`pi0`** | 4.53.3 (git 브랜치) | pi0 전용 |
 
-구 리포(UGRP)의 코드나 스크립트를 참고할 때는 이 차이를 반드시 반영해서 포팅할 것.
-raw SDK 정수 값을 그대로 send_action에 넣는 코드는 버그다.
+**섞으면 안 된다.** pi0가 요구하는 transformers 브랜치를 `ugrp`에 설치하면 SmolVLA와
+HAMLET이 깨진다. 자세한 이유는 `docs/training/pi0_finetuning.md`.
 
-## 리포 구조 (scripts/)
+`lerobot`은 `/home/ugrp43/UGRP/piper_sdk/lerobot`에 **editable로 설치돼 두 환경이 소스를
+공유한다.** 그 디렉터리를 수정하면 양쪽 모두에 영향이 간다. v0.4.4에 로컬 패치가 몇 개
+있으므로(예: `configs/default.py`의 `lora_alpha` 필드) 버전을 올리지 말 것.
 
-- `1__init_can.sh` — CAN 인터페이스 활성화 (`can_leader1`, `can_follower1` 등)
-- `2__find_camera.sh`, `3__set_camera.sh` — RealSense 카메라 탐색 및 `configs/recording.env` 반영
-- `4__teleoperate.sh` — 텔레옵 드라이런/점검
-- `5__record.sh` — 실제 녹화 (PiperFollower + PiperLeader, LeRobotDataset 저장)
-- `6__replay.sh`, `7__train.sh`, `8__run_server.sh` / `9__run_client.sh` — 재생 / 학습 / 추론
-- `scripts/gui_tools/` — UGRP 시절 GUI/QC 도구 보관 (`piper_record_gui.py`, `piper_correct_episodes.py`, `wego_dataset_check.py` 등)
-- `docs/lab_handoff.md` — 랩 PC 이관 핸드오프 문서. 환경 세팅 순서의 기준 문서
-- `configs/recording.env` — 카메라 시리얼, CAN 인터페이스명, 데이터셋 경로 등 환경별 값
-  (**커밋 금지 대상인지 .gitignore 확인**; 시리얼/경로가 이미 히스토리에 있다면 새로 노출시키지 말 것)
-
-<!-- TODO: 실제 리포 열어서 폴더 구조와 파일명이 위와 일치하는지 검증 후 수정 -->
-
-## 리팩터링 방향
-
-- `piper_record_gui.py`가 `5__record.sh`를 subprocess로 부르는 구조 대신,
-  **PiperFollower / PiperLeader / LeRobotDataset API를 직접 호출하는 얇은 GUI 래퍼**로 재작성
-- `teleop_ui.py`에 **Record preset** (task 이름 / episode 수 입력)을 추가하는 방식으로 확장
-- 리팩터링 대상 레거시 4종: `piper_session.py`, `piper_tui.py`, `piper_validate.py`, `piper_replay_viz.py`
-  — 하드웨어 접근 단계를 dual CAN + PiperFollower/PiperLeader 기준으로 재작성
-- lerobot 버전에 주의: 코드 검증은 설치된 lerobot 소스를 직접 읽고 확인할 것 (버전 간 API 변경 잦음)
-
-## 환경 2종
-
-### 개인 PC (하드웨어 없음)
-- conda env: `piper-gui-refactor` (python 3.10)
-- CAN/카메라 하드웨어 없음 → **실제 소켓 연결 테스트 금지**, mock 기반 로직 테스트만
-- GUI 로직 검증: 정상 녹화 / 조기 종료 / 재녹화 / 전체 중단 4개 시나리오
-
-### 랩 PC (추론·제어 PC, ugrp43 / ugrp308)
-- conda env: `piper` (신규 검증용은 `piper_test`)
-- 카메라 시리얼: top `327122074262`, wrist `243322071626` — 랩 PC 연결 실물과 일치하는지 매번 확인
-- CAN: `ip link show | grep can`으로 인터페이스 존재 확인 후 `1__init_can.sh` 실행
-- 데이터셋 root: `/home/ugrp308/Group43/datasets/`
-
-## 안전 규칙
-
-1. **실물 로봇을 움직이는 명령은 사용자 확인 없이 실행하지 않는다.** 특히 첫 joint_check, 텔레옵, replay
-2. CAN 버스는 공유 자원 — 다른 사람이 사용 중일 수 있으니 하드웨어 단계 전 상태 확인
-3. `upstream`에는 어떤 경우에도 push하지 않는다
-4. `configs/recording.env`의 실측값(시리얼, 경로)은 커밋 전 노출 여부 확인
-5. 파일을 옮길 때는 이동이 아니라 복사(copy)로, 원본 보존
-
-## 자주 쓰는 검증 명령
+RViz나 로봇 제어를 쓰는 스크립트는 실행 전에 ROS2를 source해야 한다:
 
 ```bash
-git branch --show-current          # seongil/gui-refactor 인지 확인
-git remote -v                      # origin=BLINCE1, upstream=DGIST-JaeminBaek
-python -c "import lerobot; print(lerobot.__file__)"   # env·설치 경로 확인
-ip link show | grep can            # (랩 PC) CAN 인터페이스 확인
+source /opt/ros/humble/setup.bash
+source ~/UGRP/ros2_ws/install/setup.bash
+conda activate ugrp
 ```
 
-## 알려진 이슈 / 주의점 (구 리포에서 발견)
+`PYTHONPATH`를 덮어쓰면 `rclpy`를 잃는다. 추가할 때는 반드시 이어붙일 것:
+`PYTHONPATH=/home/ugrp43/jmbaek:$PYTHONPATH`
 
-- `piper_replay.py`의 `obs_action_mismatch` 검사는 구조적으로 항상 통과(tautology) — 신뢰하지 말 것
-- `smolvla_inference.py`의 `ACTION_MIN/MAX`는 하드코딩 — 새 task마다 데이터셋 기준 재계산 필요
-- 카메라 warmup 비대칭(top=0s, wrist=5s) → 녹화 초반 프레임 드랍 가능성
-- 녹화 fps 30 기준, 카메라 타임아웃 발생 시 GUI가 죽지 않고 복구하도록 처리할 것
+## 실물 로봇을 건드리는 작업
+
+**팔이 실제로 움직이는 명령은 사용자가 직접 실행한다.** 에이전트는 명령어를 준비하고
+검증까지만 한다. 사용자가 명시적으로 요청하지 않는 한 `--apply-to-robot`이 붙은 명령을
+직접 실행하지 말 것.
+
+주의할 점:
+- `--source robot`은 `--apply-to-robot` 없이도 **팔의 토크를 켠다**
+  (`piper_follower.py:159`). 카메라만 필요하면 별도 스크립트를 쓸 것.
+- 실물 전송은 세 조건이 모두 있어야 열린다: `--source robot`, `--apply-to-robot`,
+  `--real-robot-confirm I_UNDERSTAND_REAL_ROBOT`
+- 안전장치는 `PiperFollower.send_action()` 안에 있다 — EMA → `max_relative_target`
+  클램프 → effort 컷오프(트립 시 parking 후 종료). 이건 어느 경로로 호출하든 걸린다.
+
+## 데이터
+
+| 경로 | 내용 |
+|---|---|
+| `records/{0727,0802,0804,0805}/` | **원본 녹화** (1280×720, 30fps, 녹화당 에피소드 1개) |
+| `records/outputs/erase_the_shape_150/` | 학습용 (150 에피소드, 75,787 프레임, 512×512, top+wrist) |
+| `records/outputs/erase_the_shape_150_top_only/` | 같은 데이터의 top 카메라만 |
+| `configs/erase_shape_150_manifest.json` | 어떤 원본의 몇 번째 프레임까지 쓸지 정의 |
+
+데이터셋은 매니페스트를 고쳐 `scripts/tools/prepare_erase_shape_dataset.py`로 다시
+빌드한다. 원본은 건드리지 않는다.
+
+**비디오 인코딩 함정**: `--vcodec hevc_nvenc`를 쓰면 `--gop-size`가 **조용히 무시된다**
+(lerobot `video_utils.py::_get_codec_options()`가 HW 인코더에서 `g` 옵션을 제외).
+GOP=1이 필요하면 반드시 소프트웨어 `--vcodec hevc`를 쓸 것. GOP가 크면 학습 중 프레임
+디코딩이 5배 가까이 느려진다.
+
+## 학습
+
+150 에피소드 / batch 8 기준 **1 에폭 = 9,473 step**, `--steps=75000`이 7.92 에폭이다.
+비교 실험은 전부 이 값으로 맞춰져 있다.
+
+| 전략 | 구성 | 상태 |
+|---|---|---|
+| 1 | SmolVLA, top+wrist | 완료 (75k) |
+| 2 | SmolVLA, top-only | 완료 (75k) |
+| 3 | SmolVLA + HAMLET, top+wrist | 완료 (75k) |
+| 4 | SmolVLA + HAMLET, top-only | 완료 (75k) |
+| — | pi0 LoRA, top+wrist | 완료 (75k) |
+
+**전략 1~4의 체크포인트는 외장 하드로 옮겨졌다.** 로컬 `outputs/train/`에는
+`pi0_lora_topwrist_75k`만 있다.
+
+절차 문서:
+- `docs/training/method.md` — 데이터 만들기부터 기본 모델 학습까지 (팀원용, 메모리 모듈 제외)
+- `docs/training/new_smolvla_finetuning.md` — 150 에피소드 재학습 진행 기록
+- `docs/training/pi0_finetuning.md` — pi0 도입 전 과정 (환경 분리, gated repo, 리비전 등)
+
+### W&B 규칙
+
+**`--wandb.run_id`는 매번 새 이름을 써야 한다.** 기존 id를 재사용하면 그 run의 이름·태그·
+loss 이력이 병합되어 오염된다. 삭제한 id는 **영구 폐기되어 재사용할 수 없다**(HTTP 410).
+사용 전 API로 확인할 것:
+
+```python
+import wandb
+api = wandb.Api()
+api.run(f'{api.default_entity}/smolvla-erase-shape/{run_id}')  # 없어야 안전
+```
+
+`--wandb.disable_artifact=true`를 붙이지 않으면 `~/.cache/wandb/artifacts`에 체크포인트
+사본이 쌓인다(과거 29GB까지 찬 적 있음).
+
+## 추론
+
+주 도구는 `scripts/tools/piper_infer_runner.py`다. GUI 없이 돌고, RViz는 별도로
+띄워야 한다(`ros2 launch agx_arm_description display_piper.launch.py`).
+
+```bash
+python scripts/tools/piper_infer_runner.py \
+  --dataset-root records/outputs/erase_the_shape_150 \
+  --policy-path <checkpoint>/pretrained_model \
+  --source dataset --episode 0 --mode demo        # 안전: 실물 전송 없음
+```
+
+`--dataset-root`는 `--source robot`일 때도 필요하다 — 정규화 통계와 관찰 형태를 그
+데이터셋 메타에서 가져오므로 **정책을 학습시킨 데이터셋을 지정해야 한다.**
+
+관련 도구:
+- `piper_human_approved_inference.py` — chunk를 구간별로 RViz 확인 후 승인하며 실행
+- `piper_offline_chunk_rollout.py` — 비실물 궤적 검사. `load_policy()`가 여기 있다
+- `piper_infer_gui.py` — tkinter GUI (E-STOP 버튼 포함). **HAMLET·pi0는 미지원**
+- `block_alignment_tool.py` — 지우개를 학습 데이터와 같은 위치에 놓도록 실시간 안내
+
+### 추론 파이프라인 기본값
+
+SmolVLA 논문 Algorithm 1(비동기 추론)을 이식해뒀다. 근거와 실측은
+`docs/policy/smoothing.md`.
+
+```
+정책 chunk → aggregate(weighted_average) → EMA(α=0.2) → rate_limit(5.0) → clip
+           → 지연 보정(latency_align) → send_action()의 안전 클램프
+```
+
+- `--trigger-mode threshold --chunk-threshold 0.3` — 큐 소진 비율 기반 재추론
+  (논문의 g=0.7). 스윕 결과 0.3~0.9 어디서도 큐가 마르지 않으므로 기본값 유지가 좋다
+- `--aggregate-fn` — `weighted_average`(기본) / `latest_only` / `temporal_ensemble`(ACT 방식)
+- `--latency-align` — 추론 지연(SmolVLA 3~5스텝, pi0 5~6스텝)만큼 chunk 앞을 잘라
+  '지금'에 맞춘다. `--no-latency-align`으로 이전 동작 재현 가능
+
+진단 로그: `[LAG]`(추론 지연 스텝), `[RATE]`(rate_limit 작동), `[TIMING]`(단계별 시간),
+`[CLAMP]`(관절/그리퍼 분리 보고).
+
+**그리퍼가 계속 클램프되는 건 정상이다** — 물체를 쥔 채 "더 조여"를 보내는 상태이고
+학습 데이터에서도 동일하다(실측 명령 22.2 / 실측 27.0). 관절 클램프만 진짜 문제다.
+
+## HAMLET (메모리 모듈)
+
+`/home/ugrp43/jmbaek/smolvla_hamlet`에 별도 패키지로 있다. 실행 시:
+
+```bash
+PYTHONPATH=/home/ugrp43/jmbaek:$PYTHONPATH ... --policy.discover-packages-path=smolvla_hamlet
+```
+
+학습에서는 `--policy.pretrained_path=lerobot/smolvla_base` + `--policy.type=smolvla_hamlet`을
+쓴다(`--policy.path`를 쓰면 `type`이 `smolvla`로 고정되어 HAMLET 설정이 무시된다).
+`--policy.input_features`도 명시해야 한다.
+
+## 코드 수정 시 관례
+
+- 수정 전 `tmp/inference_backup_YYYYMMDD/` 같은 날짜 폴더에 백업하거나 `*_prev.py`로 사본을 남긴다
+- 주석은 한국어로, **"왜 이렇게 했는지"** 를 적는다. 특히 실측으로 알아낸 것(온도, 속도,
+  실패 사례)은 수치와 함께 남긴다
+- 새 옵션을 추가할 때 기존 동작을 기본값으로 유지하고, 새 동작은 플래그로 연다
+  (실물에서 검증된 거동을 조용히 바꾸지 않는다)
+
+## 분석 산출물
+
+`outputs/analysis/` 아래에 있다.
+
+- `shape_positions/` — 도형이 보드 어디에 그려졌는지 (180개 원본 첫 프레임 기준).
+  대략 6개 영역에 분포하지만 격자처럼 정밀하지는 않다
+- `session_consistency/` — 세션별 종료 상태 차이, 좌표축 오버레이
+
+`scripts/tools/shape_position_analysis.py`로 재생성할 수 있다.
+
+## 현재 미해결
+
+- **실물 성공률이 낮다** — 지우개를 집은 뒤 기준 약 30%. 파지·이동 실패가 은근히 있다.
+  지우개 위치 정렬은 원인이 아닌 것으로 확인됨(테스트 내내 2mm 이내 유지)
+- **마무리 판단 실패** — 다 지운 뒤에도 그 자리에 머물며 끝내지 못한다. 원인 후보로
+  "학습 데이터에서 시연자들이 몇 % 지웠을 때 복귀를 시작했는지가 일관적인가"를
+  측정하는 잉크 잔량 분석이 계획돼 있으나 아직 실행 안 함
+- **4전략 + pi0 정량 비교** 미실시
+
+## Git / 브랜치 규칙
+
+- `origin` = 개인 fork (private) — push는 여기만
+- `upstream` = `DGIST-JaeminBaek/lerobot_robot_piper` (공용 원본) — **push 금지.**
+  개인 PC 검증 → 랩 PC 검증이 모두 끝나고 사용자가 명시적으로 지시할 때만 반영
+- 브랜치 명명: `이름/작업내용`. 공용 PC를 여러 명이 쓰므로 다른 사람 브랜치는 건드리지 않는다
+- 파일을 옮길 때는 이동이 아니라 복사로, 원본을 남긴다
+
+## 안전 규칙 (실물)
+
+1. **팔이 움직이는 명령은 사용자 확인 없이 실행하지 않는다.** 특히 첫 joint_check, 텔레옵, replay
+2. CAN 버스는 공유 자원 — 하드웨어 단계 전에 다른 사람이 쓰는 중인지 확인한다
+3. `configs/recording.env`의 실측값(카메라 시리얼, 경로)은 커밋 전 노출 여부를 확인한다
+
+## 지우기 게이트 / HIL
+
+시도 경계에서 잉크 잔량으로 성공을 판정하고 재시도·사람 개입을 붙이는 층이
+`scripts/tools/erase_run.py`에 있다. 설계 근거와 검증 절차는 `docs/erase_run_design.md`,
+metric 로드맵은 `docs/erase_metric_roadmap.md`.
+
+핵심 제약 하나만: **팔이 도형을 가려서(에피소드의 51%) 매 프레임 판정은 불가능하다.**
+판정은 반드시 park 상태의 시도 경계에서만 하고, `dense_progress()`는 곡선 표시 전용이다
+(판정에 쓰면 distractor 노이즈가 0.009 → 0.195로 폭증).
