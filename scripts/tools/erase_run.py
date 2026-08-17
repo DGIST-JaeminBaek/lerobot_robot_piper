@@ -303,8 +303,11 @@ def main():
     #   된다. --target(판정 대상)은 우리가 쥔 라벨이라 task와 별개다.
     p.add_argument("--task", default="pick up the eraser and erase the shape")
     p.add_argument("--target", default="triangle", choices=["circle", "triangle", "rectangle"])
-    p.add_argument("--follower-port", default="can_follower1")
-    p.add_argument("--leader-port", default="can_leader1")
+    # 기본값은 configs/recording.env와 같아야 한다. 예전 기본값이 can_*1이었는데
+    # 이 PC의 인터페이스는 can_follower / can_leader라 --probe-leader가 바로 죽었다.
+    # 실제 추론 경로는 러너가 env에서 읽으므로 영향이 없었고, 그래서 안 드러났다.
+    p.add_argument("--follower-port", default=os.environ.get("FOLLOWER_PORT", "can_follower"))
+    p.add_argument("--leader-port", default=os.environ.get("LEADER_PORT", "can_leader"))
     p.add_argument("--top-cam", default="327122074262", help="판정용 top 카메라 시리얼")
     p.add_argument("--wrist-cam", default="")
     p.add_argument("--cam-type", default="realsense")
