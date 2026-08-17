@@ -349,6 +349,13 @@ def main():
     p.add_argument("--clutch-gain", type=float, default=1.0, help="리더 변화량 -> 팔로워 반영 비율 (1.0=등배)")
     p.add_argument("--probe-leader", action="store_true", help="리더암 노이즈 플로어만 측정하고 종료")
     p.add_argument("--out", default="erase_run_log.json")
+    # 녹화 데이터셋은 records/local/ 아래 쌓인다. HIL 산출물은 그 옆에 따로 모은다 —
+    # 판정 프레임까지 같이 남겨야 나중에 임계값을 바꿔 재판정하거나, 판정이 틀렸을 때
+    # 원인을 볼 수 있다. 지금까지는 판정 프레임을 그냥 버려서 매번 다시 찍어야 했다.
+    p.add_argument("--hil-dir", default="records/hil",
+                   help="HIL/게이트 산출물(로그·궤적·판정 프레임)을 모을 폴더")
+    p.add_argument("--no-save-frames", action="store_true",
+                   help="판정 프레임을 저장하지 않는다")
     p.add_argument("--panel", dest="panel", action="store_true", default=None,
                    help="화면에 상태 창을 띄운다 (--hil이면 기본 켜짐). "
                         "터미널을 못 보는 상태로 HIL을 하면 인계 순간을 놓친다")
@@ -441,6 +448,33 @@ def main():
 
     checker = EC.EraseChecker()
     attempts = []
+
+    # 이번 실행의 산출물 폴더. 시각으로 이름 지어 실행마다 하나씩 쌓인다.
+    run_dir = Path(args.hil_dir) / time.strftime("%Y%m%d-%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "meta.json").write_text(json.dumps({
+        "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "policy_path": args.policy_path,
+        "dataset_root": str(args.dataset_root),
+        "task": args.task,
+        "target": args.target,
+        "mode": args.mode,
+        "hil": bool(args.hil),
+        "max_attempts": args.max_attempts,
+        "max_steps": args.max_steps,
+        "aggregate_fn": args.aggregate_fn,
+        "top_crop": args.top_crop,
+        "wrist_crop": args.wrist_crop,
+        "max_relative_target": args.max_relative_target,
+    }, ensure_ascii=False, indent=2))
+    print(f"[INFO] 산출물 폴더: {run_dir}")
+
+    def save_frame(name, frame):
+        if args.no_save_frames:
+            return
+        import cv2
+
+        cv2.imwrite(str(run_dir / f"{name}.png"), frame)
     # 진행 상황 표시. 여기서 보여주는 퍼센트가 두 종류라는 게 중요하다 —
     # [진행]은 시간축, [측정]은 park에서 실제로 잰 잉크 값이다. 자세한 근거는
     # erase_status 모듈 docstring (시도 도중에는 잉크를 잴 방법이 없다).
@@ -472,7 +506,9 @@ def main():
     try:
         # ★ 기준은 시도 1 이전에 딱 한 번만 잡는다. 지운 마카는 되돌릴 수 없어서
         #   재시도는 항상 이전 시도 위에 쌓이고, erased_frac은 누적값이어야 맞다.
-        ref = checker.set_reference(grab())
+        ref_frame = grab()
+        save_frame("00_reference", ref_frame)
+        ref = checker.set_reference(ref_frame)
         print(f"[INFO] 기준 프레임 — 검출된 도형: {[k for k, _ in ref['shapes']]}")
         if not any(k.startswith(args.target) for k, _ in ref["shapes"]):
             print(f"[WARN] target '{args.target}'을 기준 프레임에서 못 찾았다 — "
@@ -501,7 +537,9 @@ def main():
                 panel.set_phase("판정 중")
                 panel.set_fps(summary["measured_fps"],
                               intervention_steps=summary["interventions"])
-            r = checker.check(grab(), args.target)
+            after_frame = grab()
+            save_frame(f"{i:02d}_after", after_frame)
+            r = checker.check(after_frame, args.target)
             r["attempt"] = i
             r.update(summary)
             attempts.append(r)
@@ -529,9 +567,14 @@ def main():
     finally:
         if panel:
             panel.close()
-        traces = save_step_traces(attempts, Path(args.out))
-        Path(args.out).write_text(json.dumps(attempts, ensure_ascii=False, indent=2))
-        print(f"[INFO] 로그 저장: {args.out}" + (f" / {traces}" if traces else ""))
+        # 산출물은 run_dir에 모으고, --out 경로에도 그대로 남긴다(기존 호출자 호환).
+        traces = save_step_traces(attempts, run_dir / "log.json")
+        payload = json.dumps(attempts, ensure_ascii=False, indent=2)
+        (run_dir / "log.json").write_text(payload)
+        Path(args.out).write_text(payload)
+        print(f"[INFO] 로그 저장: {run_dir / 'log.json'}"
+              + (f" / {traces.name}" if traces else "")
+              + f"  (사본: {args.out})")
 
     ok = bool(attempts) and attempts[-1]["success"]
     total = sum(a["steps"] for a in attempts)

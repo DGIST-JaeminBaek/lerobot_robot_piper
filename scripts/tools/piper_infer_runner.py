@@ -818,6 +818,17 @@ class InferenceRunner(threading.Thread):
                 # 실물 3차 HIL에서 26.0초 지점에 개입했더니 5.3초 만에 상한에 걸려
                 # 끊겼다 — 손을 뗀 게 아니라 예산이 없어서 끝난 것이다.
                 policy_steps = step - self.intervention_steps
+                # 사람이 한 번이라도 개입했으면 시간 제한을 아예 푼다.
+                # 개입은 정책이 못 하는 상황을 사람이 수습하는 것이라 얼마나
+                # 걸릴지 미리 알 수 없다. 스텝 예산으로 끊으면 수습 도중에
+                # 끝나버린다(3차 HIL에서 실제로 5.3초 만에 잘렸다).
+                # 종료는 사람이 q로 한다 — 판단 주체가 사람으로 넘어간 상태다.
+                if self.intervention_steps and max_steps:
+                    self._log(
+                        "[HIL] 개입이 있었으므로 max_steps 제한을 해제한다 "
+                        "— 끝내려면 q를 누르세요"
+                    )
+                    max_steps = 0
                 if max_steps and policy_steps >= max_steps:
                     self._log(
                         f"[STOP] max_steps({max_steps}) 도달 "
