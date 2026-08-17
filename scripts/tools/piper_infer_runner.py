@@ -534,6 +534,7 @@ class InferenceRunner(threading.Thread):
 
         # HIL 개입 집계 — 개입률은 §8 보고 지표라 러너가 직접 센다.
         self.intervention_steps = 0
+        self.engage_deviation_details: list[dict] = []
         self.engage_deviations: list[float] = []
         self.hil_aborted = False
         # HIL 개입 토글. --hil일 때 루프가 채운다 (그 전에는 None).
@@ -714,7 +715,12 @@ class InferenceRunner(threading.Thread):
                 if not settings.real_robot_enabled():
                     self._log("[HIL] 실물 전송이 꺼져 있어 개입을 활성화하지 않습니다")
                 else:
-                    from hil_clutch import Clutch, ClutchMixer, KeyToggle
+                    from hil_clutch import (
+                        Clutch,
+                        ClutchMixer,
+                        KeyToggle,
+                        deviation_per_joint,
+                    )
 
                     from lerobot_robot_piper import PiperLeader, PiperLeaderConfig
 
@@ -930,7 +936,16 @@ class InferenceRunner(threading.Thread):
                     break
 
                 votes = pipeline.votes_for_next
-                action = pipeline.next_action()
+                if pipeline.pending_steps == 0 and intervening_now:
+                    # 개입 중이라 위에서 추론을 안 기다렸으므로 큐가 비어 있을 수
+                    # 있다. 이때 next_action()을 부르면 빈 큐 예외로 러너가
+                    # status=error로 죽는다(실물 2차 HIL에서 개입 첫 스텝에 발생).
+                    # 어차피 아래 HIL 분기가 이 값을 통째로 버리므로, 현재 자세를
+                    # 자리표시자로 쓴다 — 개입이 풀리는 순간에도 목표가 '지금
+                    # 있는 자리'라 튀지 않는다.
+                    action = measured_state.astype(np.float32).copy()
+                else:
+                    action = pipeline.next_action()
 
                 # ── HIL 개입 ───────────────────────────────────
                 # 사람이 잡은 동안에는 정책 대신 리더암 델타가 목표가 된다.
@@ -949,7 +964,13 @@ class InferenceRunner(threading.Thread):
                     mixed, intervened, engage_dev = mixer.step(policy_action, follower_pose)
                     if engage_dev is not None:
                         self.engage_deviations.append(engage_dev)
-                        self._log(f"[HIL] 인계 — engage_deviation={engage_dev:.2f}")
+                        per = deviation_per_joint(leader.get_action(), follower_pose)
+                        self.engage_deviation_details.append(per)
+                        worst = max(per, key=lambda k: abs(per[k])) if per else "?"
+                        self._log(
+                            f"[HIL] 인계 — engage_deviation={engage_dev:.2f} "
+                            f"(최대 {worst}) 관절별={per}"
+                        )
                     if intervened:
                         self.intervention_steps += 1
                         action = np.asarray(

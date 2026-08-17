@@ -161,3 +161,49 @@ def test_runner_starts_with_zero_intervention_counters():
     assert run.intervention_steps == 0
     assert run.engage_deviations == []
     assert run.hil_aborted is False
+
+
+# ── 개입 중 빈 큐 회귀 테스트 ──────────────────────────────
+# 실물 2차 HIL에서 개입 첫 스텝에 러너가 status=error로 죽었다. 원인은
+# "개입 중에는 추론을 기다리지 않는다"는 최적화를 넣으면서, 그 앞의
+# pipeline.next_action()이 빈 큐로 호출되는 걸 안 막은 것.
+
+
+def test_empty_pipeline_during_intervention_must_not_raise():
+    """개입 중 큐가 비면 next_action()을 부르면 안 된다.
+
+    러너 루프 전체를 띄우지 않고 그 분기 조건만 재현한다 — 실제 코드가
+    'pending==0 그리고 개입 중'이면 next_action을 건너뛰는지가 핵심이다.
+    """
+    import numpy as np
+    from action_smoothing import SmoothingConfig, SmoothingPipeline
+
+    pipeline = SmoothingPipeline(SmoothingConfig())
+    pipeline.reset(np.zeros(7, np.float32))
+    assert pipeline.pending_steps == 0
+
+    # 고치기 전 동작: 빈 큐에서 next_action()은 예외를 던진다 (이게 원인이었다)
+    try:
+        pipeline.next_action()
+        raised = False
+    except RuntimeError:
+        raised = True
+    assert raised, "빈 큐에서 next_action()이 조용히 통과하면 이 테스트의 전제가 깨진다"
+
+    # 고친 동작: 개입 중이면 현재 자세를 자리표시자로 쓴다
+    measured = np.array([1, 2, 3, 4, 5, 6, 7], np.float32)
+    intervening_now = True
+    if pipeline.pending_steps == 0 and intervening_now:
+        action = measured.astype(np.float32).copy()
+    else:
+        action = pipeline.next_action()
+    assert np.array_equal(action, measured)
+
+
+def test_runner_source_guards_next_action_when_intervening():
+    """러너 소스에 실제로 그 가드가 들어있는지 — 리팩터링으로 사라지면 잡는다."""
+    import pathlib as _p
+
+    src = (_p.Path(__file__).parent / "piper_infer_runner.py").read_text()
+    assert "if pipeline.pending_steps == 0 and intervening_now:" in src
+    assert "if pipeline.pending_steps == 0 and not intervening_now:" in src

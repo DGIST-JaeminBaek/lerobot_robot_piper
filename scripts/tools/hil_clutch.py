@@ -67,6 +67,21 @@ class Clutch:
         }
 
 
+def deviation_per_joint(leader_action: dict, follower_obs: dict) -> dict:
+    """관절별 리더-팔로워 편차. 최댓값만 남기면 '자세를 잘못 맞춘 것'과
+    '두 팔의 읽기값 대응이 어긋난 것'을 구분할 수 없다.
+
+    전자는 매번 다른 관절에서 크게 나오고, 후자는 **항상 같은 관절에서 비슷한
+    값**으로 나온다. 실물 첫 HIL에서 joint5가 리더 0.00 vs 팔로워 100.00으로
+    나온 게 후자로 의심되는 상황이라, 재현되는지 보려면 관절별로 남겨야 한다.
+    """
+    return {
+        j: round(float(leader_action[f"{j}.pos"] - follower_obs[f"{j}.pos"]), 2)
+        for j in JOINTS
+        if f"{j}.pos" in leader_action and f"{j}.pos" in follower_obs
+    }
+
+
 def deviation(leader_action: dict, follower_obs: dict) -> float:
     """리더-팔로워 최대 관절 편차. 판정에는 안 쓰고 로깅/경고용으로만 남긴다.
 
