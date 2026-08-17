@@ -153,8 +153,14 @@ def track(video, board, dark_ratio, occl_jump=OCCL_JUMP):
     frame = first
     while ok:
         for lbl, (x, y, w, h) in shapes:
-            g = cv2.cvtColor(frame[y : y + h, x : x + w], cv2.COLOR_BGR2GRAY)
-            ink[lbl].append(float((g < ink_thr).mean()))
+            sub = frame[y : y + h, x : x + w]
+            g = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
+            # 잉크 계산에서 유채색(나무 지우개 블록)을 뺀다 — detect_shapes와
+            # erase_check._ink가 쓰는 것과 같은 필터다. 안 걸면 지우개가 도형 위에
+            # 놓인 프레임에서 잉크가 늘어난 것으로 잡혀 '다 지웠는데 실패'가 된다.
+            # occ(가림) 판정에는 일부러 안 건다 — 가림 검출은 블록이 보여야 한다.
+            sat = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)[:, :, 1]
+            ink[lbl].append(float(((g < ink_thr) & (sat <= MAX_SAT)).mean()))
             nw = float((g < white_thr).mean())
             base_nonwhite.setdefault(lbl, nw)
             occ[lbl].append(nw > base_nonwhite[lbl] + occl_jump)

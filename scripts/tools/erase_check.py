@@ -54,9 +54,21 @@ class EraseChecker:
 
     @staticmethod
     def _ink(frame, box, ink_thr):
+        """bbox 안 잉크 픽셀 비율. **유채색(나무 지우개 블록·팔)은 뺀다.**
+
+        채도 필터가 없으면 지우개가 도형 위에 놓인 프레임에서 잉크가 늘어난 것으로
+        잡히고, erased_frac이 (before-after)/before < 0 → 0으로 클립돼 **다 지운
+        시도를 실패로 판정한다.** 실물 3차 HIL에서 실제로 이게 났다 — 삼각형을
+        거의 다 지웠는데 지우개가 bbox 안에 놓여 erased=0.0으로 나왔다.
+
+        M.detect_shapes는 원래부터 이 필터를 걸고 있었다(나무 블록 채도 ≈45,
+        검은 마커 ≈10). 판정 경로만 빠져 있었다.
+        """
         x, y, w, h = box
-        g = cv2.cvtColor(frame[y : y + h, x : x + w], cv2.COLOR_BGR2GRAY)
-        return float((g < ink_thr).mean())
+        sub = frame[y : y + h, x : x + w]
+        g = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
+        sat = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)[:, :, 1]
+        return float(((g < ink_thr) & (sat <= M.MAX_SAT)).mean())
 
     def check(self, frame, target):
         """시도 후 프레임으로 판정. target은 'circle'/'triangle'/'rectangle'."""
