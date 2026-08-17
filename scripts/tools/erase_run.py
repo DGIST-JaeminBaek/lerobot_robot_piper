@@ -181,7 +181,8 @@ def grab_judge_frame(serial: str, width=1280, height=720, warmup_s=3.0, fps=30):
     return image
 
 
-def run_attempt_with_runner(settings, on_log=None, on_step=None) -> dict:
+def run_attempt_with_runner(settings, on_log=None, on_step=None,
+                            on_runner=None) -> dict:
     """InferenceRunner로 시도 1회. 반환: 요약 dict.
 
     러너는 스레드라 events 큐로 진행상황이 나온다. 여기서는 로그만 흘려보내고
@@ -194,6 +195,8 @@ def run_attempt_with_runner(settings, on_log=None, on_step=None) -> dict:
     run = InferenceRunner(settings)
     steps: list[dict] = []
     run.start()
+    if on_runner:
+        on_runner(run)
     while True:
         try:
             kind, payload = run.events.get(timeout=1.0)
@@ -345,6 +348,11 @@ def main():
     p.add_argument("--clutch-gain", type=float, default=1.0, help="리더 변화량 -> 팔로워 반영 비율 (1.0=등배)")
     p.add_argument("--probe-leader", action="store_true", help="리더암 노이즈 플로어만 측정하고 종료")
     p.add_argument("--out", default="erase_run_log.json")
+    p.add_argument("--panel", dest="panel", action="store_true", default=None,
+                   help="화면에 상태 창을 띄운다 (--hil이면 기본 켜짐). "
+                        "터미널을 못 보는 상태로 HIL을 하면 인계 순간을 놓친다")
+    p.add_argument("--no-panel", dest="panel", action="store_false",
+                   help="상태 창을 끈다")
     p.add_argument("--no-status", action="store_true",
                    help="실시간 상태 블록을 끄고 러너 로그를 그대로 흘린다 (디버깅용)")
     p.add_argument("--aggregate-fn", default=None,
@@ -438,11 +446,27 @@ def main():
     status = None if args.no_status else ES.LiveStatus(
         max_attempts=args.max_attempts, max_steps=args.max_steps, hil=args.hil
     )
+    # 화면 패널. HIL에서는 기본으로 켠다 — 인계 순간 팔이 튀는지 눈으로 봐야 하는데
+    # 터미널을 안 보고 리더암 앞에 서 있으면 터미널 표시가 사람에게 도달하지 않는다.
+    use_panel = args.hil if args.panel is None else args.panel
+    panel = None
+    if use_panel:
+        from erase_hil_panel import HilPanel
+
+        panel = HilPanel(args.max_attempts, args.max_steps).start()
 
     def grab():
         if status:
             status.set_phase("판정용 프레임 촬영 (park)")
+        if panel:
+            panel.set_phase("판정용 프레임 촬영 (park)")
         return grab_judge_frame(args.top_cam)
+
+    def on_step(payload):
+        if status:
+            status.on_step(payload)
+        if panel:
+            panel.on_step(payload)
 
     try:
         # ★ 기준은 시도 1 이전에 딱 한 번만 잡는다. 지운 마카는 되돌릴 수 없어서
@@ -458,15 +482,24 @@ def main():
             print(f"[INFO] ── 시도 {i}/{args.max_attempts} ──")
             if status:
                 status.start_attempt(i)
+            if panel:
+                panel.start_attempt(i)
             summary = run_attempt_with_runner(
                 RunSettings.from_mode(args.mode, **base),
                 # 러너 로그를 그대로 찍으면 상태 블록이 흐트러진다 — 상태창을 쓰는
                 # 동안에는 로그를 삼키고, 끝나고 한 번에 낸다.
                 on_log=(lambda m: None) if status else None,
-                on_step=status.on_step if status else None,
+                on_step=on_step,
+                # 패널 버튼이 누를 개입 토글은 러너가 만든다. 러너가 뜬 직후에
+                # 건네받아야 첫 개입부터 버튼이 먹는다.
+                on_runner=(lambda run: panel.attach_runner(run)) if panel else None,
             )
             if status:
                 status.set_phase("판정 중")
+            if panel:
+                panel.set_phase("판정 중")
+                panel.set_fps(summary["measured_fps"],
+                              intervention_steps=summary["interventions"])
             r = checker.check(grab(), args.target)
             r["attempt"] = i
             r.update(summary)
@@ -474,6 +507,8 @@ def main():
             if status:
                 status.set_measurement(r)
                 status.finish()
+            if panel:
+                panel.set_measurement(r)
             print(f"  → success={r['success']} target_erased={r.get('target_erased')} "
                   f"남음={r.get('remaining_frac')} "
                   f"max_distractor={r.get('max_distractor_erased')} "
@@ -491,6 +526,8 @@ def main():
             if r["success"]:
                 break
     finally:
+        if panel:
+            panel.close()
         traces = save_step_traces(attempts, Path(args.out))
         Path(args.out).write_text(json.dumps(attempts, ensure_ascii=False, indent=2))
         print(f"[INFO] 로그 저장: {args.out}" + (f" / {traces}" if traces else ""))

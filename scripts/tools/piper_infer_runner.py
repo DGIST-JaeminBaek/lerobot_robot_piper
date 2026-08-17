@@ -536,6 +536,8 @@ class InferenceRunner(threading.Thread):
         self.intervention_steps = 0
         self.engage_deviations: list[float] = []
         self.hil_aborted = False
+        # HIL 개입 토글. --hil일 때 루프가 채운다 (그 전에는 None).
+        self.hil_toggle = None
 
         self._pending_smoothing: SmoothingConfig | None = None
         self._smoothing_lock = threading.Lock()
@@ -719,6 +721,9 @@ class InferenceRunner(threading.Thread):
                     )
                     leader.connect()
                     toggle = KeyToggle().start()
+                    # 바깥(상태 패널 등)에서 개입 토글을 눌러줄 수 있도록 노출한다.
+                    # 지역 변수로만 두면 pynput 전역 키 말고는 접근 경로가 없다.
+                    self.hil_toggle = toggle
                     mixer = ClutchMixer(toggle, leader, Clutch(settings.clutch_gain))
                     self._log(
                         f"[HIL] 활성 — space = 개입 on/off, q = 중단 "
