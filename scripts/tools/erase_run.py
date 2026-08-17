@@ -256,6 +256,13 @@ def save_step_traces(attempts: list[dict], out_path: Path) -> Path | None:
         arrays[f"attempt{i}_intervention"] = np.array(
             [bool(s["intervention"]) for s in steps], dtype=bool
         )
+        # votes = 그 스텝의 목표를 만드는 데 몇 개의 예측이 겹쳤나.
+        # aggregate_fn 3종을 실물에서 비교하려면 이 값이 있어야 한다 —
+        # 특히 HIL 반환 직후 votes가 1로 주저앉는 구간(개입 중 pipeline.reset으로
+        # 앙상블 버퍼를 비우므로)이 방식마다 얼마나 오래 가는지가 관심사다.
+        arrays[f"attempt{i}_votes"] = np.array(
+            [int(s["votes"]) for s in steps], dtype=np.int16
+        )
     if not arrays:
         return None
     path = out_path.with_suffix(".steps.npz")
