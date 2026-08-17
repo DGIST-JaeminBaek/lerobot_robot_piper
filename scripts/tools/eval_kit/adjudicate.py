@@ -229,7 +229,7 @@ def main(argv=None) -> int:
 
     cfg = load_config(a.config)
     csv_path = Path(a.csv)
-    all_rows, done, skipped, failed = [], 0, 0, 0
+    all_rows, done, skipped, failed, incomplete = [], 0, 0, 0, 0
 
     for raw in a.run_dirs:
         d = Path(raw)
@@ -242,8 +242,14 @@ def main(argv=None) -> int:
             continue
         try:
             v = adjudicate_run(d, cfg)
+        except FileNotFoundError as e:
+            # 중단된 실행(프레임이 안 남은 폴더)은 오류가 아니다 — 판정할 게 없을 뿐.
+            # 이걸 실패로 세면 종료코드가 1이 되어 파이프라인에 못 넣는다.
+            print(f"[미완] {d.name}: {e}")
+            incomplete += 1
+            continue
         except Exception as e:  # 한 폴더가 깨져도 나머지는 처리한다
-            print(f"[SKIP] {d.name}: {e}")
+            print(f"[실패] {d.name}: {e}")
             failed += 1
             continue
         all_rows.extend(v.pop("_rows"))
@@ -257,7 +263,7 @@ def main(argv=None) -> int:
     if all_rows and not a.no_csv:
         added, replaced = upsert(csv_path, all_rows)
         print(f"\n[CSV] {csv_path} — {added}행 기록 (갱신 {replaced}행)")
-    print(f"[요약] 판정 {done} / 건너뜀 {skipped} / 실패 {failed}")
+    print(f"[요약] 판정 {done} / 이미판정 {skipped} / 미완 {incomplete} / 실패 {failed}")
     return 0 if not failed else 1
 
 

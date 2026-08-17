@@ -293,6 +293,64 @@ def save_step_traces(attempts: list[dict], out_path: Path) -> Path | None:
     return path
 
 
+def check_dataset_matches_checkpoint(policy_path, dataset_root) -> None:
+    """--dataset-root가 그 체크포인트를 학습시킨 데이터셋인지 확인한다.
+
+    왜 필요한가 — 체크포인트는 학습 때의 정규화 통계를 함께 저장한다
+    (policy_preprocessor_step_*_normalizer_processor.safetensors). 그런데
+    train_config.json의 dataset.root는 **학습한 PC의 절대 경로**라 여기서는
+    존재하지 않는 경우가 많고(예: /home/ugrp308/...), 그러면 사람이 손으로
+    아무 데이터셋이나 물리게 된다.
+
+    통계가 다른 데이터셋을 물리면 조용히 틀린 값이 나온다. 실측 예:
+      smolvla_pickup_prompt_132_v2 의 state mean
+        올바른 짝(...0727_0812_0813am_132): [-1.9 -10.1  54.5  5.4 10.3 -23.0 22.8]
+        엉뚱한 짝(...0802_0804_0805_135) : [-1.5   0.2  29.9  0.4 42.0 -17.5 26.9]
+      joint3가 54.5 vs 29.9, joint5가 10.3 vs 42.0이다. 이 상태로 돌면 정책이
+      전혀 다른 좌표계에서 동작한다 — 그런데 실행은 멀쩡히 되므로 '모델이
+      나쁘다'로 오인하기 딱 좋다.
+
+    그래서 여기서 막는다. 경고가 아니라 중단이다.
+    """
+    from pathlib import Path as _P
+
+    import numpy as _np
+
+    ckpt = _P(policy_path)
+    hits = sorted(ckpt.glob("policy_preprocessor_step_*_normalizer_processor.safetensors"))
+    if not hits:
+        print("[WARN] 체크포인트에 정규화 통계가 없어 데이터셋 정합을 확인하지 못했다.")
+        return
+    try:
+        from safetensors.torch import load_file
+
+        from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+
+        baked = load_file(str(hits[0]))
+        key = next(k for k in baked if "observation.state" in k and k.endswith("mean"))
+        ck_mean = baked[key].numpy().ravel()
+        ds_mean = _np.asarray(
+            LeRobotDatasetMetadata("local/_check", root=str(dataset_root))
+            .stats["observation.state"]["mean"],
+            dtype=_np.float32,
+        )
+    except Exception as exc:  # 확인 실패가 실행을 막을 이유는 아니다
+        print(f"[WARN] 데이터셋 정합 확인 실패({type(exc).__name__}: {exc}) — 그대로 진행한다.")
+        return
+
+    if _np.allclose(ck_mean, ds_mean, atol=1e-3):
+        print("[OK] 데이터셋이 체크포인트의 학습 데이터와 일치한다 (정규화 통계 기준).")
+        return
+
+    raise SystemExit(
+        "[STOP] --dataset-root가 이 체크포인트를 학습시킨 데이터셋이 아니다.\n"
+        f"  체크포인트 state mean: {_np.round(ck_mean, 2)}\n"
+        f"  준 데이터셋 state mean: {_np.round(ds_mean, 2)}\n"
+        "  정규화가 어긋난 채로도 실행은 되지만 정책이 전혀 다른 좌표계에서\n"
+        "  동작하게 된다. 올바른 데이터셋을 지정할 것."
+    )
+
+
 def make_park_fn(robot, park_pose: dict | None):
     if park_pose:
         return lambda: robot.send_action(dict(park_pose))
@@ -470,6 +528,8 @@ def main():
         print(f"[INFO] aggregate_fn = {args.aggregate_fn} "
               f"(나머지 스무딩은 '{args.mode}' 프리셋 그대로: "
               f"{preset.smoothing.summary()})")
+
+    check_dataset_matches_checkpoint(args.policy_path, base["dataset_root"])
 
     checker = EC.EraseChecker()
     attempts = []

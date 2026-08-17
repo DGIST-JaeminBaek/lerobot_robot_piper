@@ -45,8 +45,25 @@ cd "${REPO_DIR}"
 # state 7차원 / top+wrist 512x512 / task 문자열이 erase_run 기본값과 일치하는
 # 조합이다. 다른 체크포인트로 바꾸면 --task와 --wrist-crop도 같이 확인할 것
 # (top_only 체크포인트면 WRIST_CROP을 비운다).
-POLICY="${POLICY:-outputs/train/pick_up_the_eraser_and_erase_the_shape/smolvla_topwrist_0802_0804_0805_0813pm_135/checkpoints/last/pretrained_model}"
-DATASET="${DATASET:-records/outputs/pick_up_the_eraser_and_erase_the_shape/pick_up_the_eraser_0802_0804_0805_0813pm_135}"
+# MODEL 하나로 정책+데이터셋을 같이 고른다. 둘은 반드시 짝이어야 한다 —
+# 정규화 통계가 다른 데이터셋을 물리면 실행은 되는데 정책이 전혀 다른 좌표계에서
+# 동작한다(erase_run이 실행 전에 통계를 대조해 막는다).
+_T=outputs/train/pick_up_the_eraser_and_erase_the_shape
+_D=records/outputs/pick_up_the_eraser_and_erase_the_shape
+case "${MODEL:-topwrist135}" in
+  topwrist135)   # SmolVLA top+wrist, 135ep (0802/0804/0805/0813pm), 71909 step
+    _POLICY="${_T}/smolvla_topwrist_0802_0804_0805_0813pm_135/checkpoints/last/pretrained_model"
+    _DATASET="${_D}/pick_up_the_eraser_0802_0804_0805_0813pm_135" ;;
+  prompt132v2)   # SmolVLA top+wrist, 132ep (0727/0812/0813am), 65265 step
+                 # train_config의 dataset.root는 ugrp308 경로라 여기 없다.
+                 # 아래 데이터셋이 그것과 같은 것임을 정규화 통계로 확인했다.
+    _POLICY="${_T}/smolvla_pickup_prompt_132_v2/checkpoints/065265/pretrained_model"
+    _DATASET="${_D}/pick_up_the_eraser_0727_0812_0813am_132" ;;
+  custom) _POLICY="" ; _DATASET="" ;;   # POLICY/DATASET을 직접 줄 때
+  *) echo "[ERROR] 모르는 MODEL: ${MODEL} (topwrist135 | prompt132v2 | custom)" >&2; exit 2 ;;
+esac
+POLICY="${POLICY:-${_POLICY}}"
+DATASET="${DATASET:-${_DATASET}}"
 # ★ ERASE_TASK — 이름을 TASK로 두면 안 된다. recording.env가 녹화용 TASK를
 #   export하고 있어서(현재 "erase the circle") 기본값이 조용히 덮인다. 그 문장은
 #   이 체크포인트의 학습 데이터에 없어서 분포 밖 입력이 되고, 정책이 본 적 없는
@@ -136,6 +153,7 @@ case "${STAGE}" in
     ;;
 esac
 
+echo "  모델   : ${MODEL:-topwrist135}"
 echo "  정책   : ${POLICY}"
 echo "  데이터 : ${DATASET}"
 echo "  task   : ${ERASE_TASK}"
