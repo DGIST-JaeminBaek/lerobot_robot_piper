@@ -555,10 +555,10 @@ def test_worker_returns_chunk_without_blocking_the_caller():
     run._start_inference_worker(lambda obs: np.full((5, 7), obs["v"], np.float32))
 
     started = _time.perf_counter()
-    run._request_inference({"v": 3.0})
+    run._request_inference({"v": 3.0}, step=0)
     assert _time.perf_counter() - started < 0.05  # 요청은 즉시 반환
 
-    chunk = run._await_chunk(timeout=5.0)
+    chunk = run._await_chunk(timeout=5.0, step=0, align=False)
     assert chunk is not None and chunk[0][0] == pytest.approx(3.0)
     run.stop_event.set()
 
@@ -580,14 +580,14 @@ def test_stale_request_is_skipped_while_worker_is_busy():
 
     run._start_inference_worker(predict)
 
-    run._request_inference({"v": 1.0})
+    run._request_inference({"v": 1.0}, step=0)
     while not seen:  # 워커가 첫 요청을 집을 때까지 기다린다
         _time.sleep(0.005)
-    run._request_inference({"v": 2.0})  # 아직 바쁘므로 버려져야 함
-    run._request_inference({"v": 3.0})
+    run._request_inference({"v": 2.0}, step=1)  # 아직 바쁘므로 버려져야 함
+    run._request_inference({"v": 3.0}, step=2)
 
     release.set()
-    assert run._await_chunk(timeout=5.0) is not None
+    assert run._await_chunk(timeout=5.0, step=0, align=False) is not None
     _time.sleep(0.1)
     assert seen == [1.0]  # 버려진 관찰이 뒤늦게 처리되지 않는다
     run.stop_event.set()
@@ -595,16 +595,60 @@ def test_stale_request_is_skipped_while_worker_is_busy():
 
 def test_collect_chunks_drains_without_blocking():
     run = _new_runner()
-    assert run._collect_chunks() == []
-    run._infer_results.put(np.zeros((5, 7), np.float32))
-    run._infer_results.put(np.ones((5, 7), np.float32))
-    assert len(run._collect_chunks()) == 2
-    assert run._collect_chunks() == []
+    assert run._collect_chunks(step=0, align=False) == []
+    # 큐에는 (요청 시점 step, chunk) 쌍이 들어간다 — 지연 보정이 쓰는 정보다.
+    run._infer_results.put((0, np.zeros((5, 7), np.float32)))
+    run._infer_results.put((0, np.ones((5, 7), np.float32)))
+    assert len(run._collect_chunks(step=0, align=False)) == 2
+    assert run._collect_chunks(step=0, align=False) == []
 
 
 def test_await_chunk_times_out_instead_of_hanging():
     run = _new_runner()
-    assert run._await_chunk(timeout=0.05) is None
+    assert run._await_chunk(timeout=0.05, step=0, align=False) is None
+
+
+# ── 지연 보정(latency_align) ──────────────────────────────────
+# 3eb61e3이 넣은 경로인데 테스트가 없었다. chunk[0]은 '요청 시점'의 예측이라,
+# 추론이 도는 동안 흘러간 스텝만큼 앞을 버려야 '지금'에 맞는다.
+
+
+def test_align_drops_the_steps_that_elapsed_during_inference():
+    run = _new_runner()
+    chunk = np.arange(5, dtype=np.float32).reshape(5, 1)
+    # step 0에서 요청한 chunk가 step 3에 도착 → 앞 3개는 이미 지나간 목표다.
+    aligned = run._align_chunk(requested_step=0, chunk=chunk, step=3)
+    assert aligned is not None
+    assert [float(v) for v in aligned[:, 0]] == [3.0, 4.0]
+    assert run._infer_lags[-1] == 3
+
+
+def test_align_is_a_noop_when_the_chunk_arrives_immediately():
+    run = _new_runner()
+    chunk = np.arange(5, dtype=np.float32).reshape(5, 1)
+    aligned = run._align_chunk(requested_step=7, chunk=chunk, step=7)
+    assert aligned is chunk  # 사본을 뜨지 않는다
+    assert run._infer_lags[-1] == 0
+
+
+def test_align_discards_a_chunk_that_is_entirely_in_the_past():
+    """지연이 chunk 길이를 넘으면 쓸 수 있는 스텝이 하나도 없다.
+
+    여기서 잘라 쓰지 않고 버리는 게 중요하다 — 남은 꼬리를 억지로 쓰면
+    한참 과거의 목표를 현재 명령으로 보내게 된다.
+    """
+    run = _new_runner()
+    chunk = np.arange(5, dtype=np.float32).reshape(5, 1)
+    assert run._align_chunk(requested_step=0, chunk=chunk, step=5) is None
+    assert run._stale_chunks == 1
+
+
+def test_await_chunk_returns_none_for_a_fully_stale_chunk():
+    """_align_chunk가 None을 내면 호출자도 None을 봐야 한다 —
+    빈 배열이 새어나가면 aggregate 쪽에서 엉뚱하게 터진다."""
+    run = _new_runner()
+    run._infer_results.put((0, np.arange(5, dtype=np.float32).reshape(5, 1)))
+    assert run._await_chunk(timeout=1.0, step=99, align=True) is None
 
 
 def test_worker_error_is_surfaced_to_the_loop():
@@ -614,7 +658,7 @@ def test_worker_error_is_surfaced_to_the_loop():
         raise ValueError("정책이 NaN/Inf를 출력했습니다")
 
     run._start_inference_worker(boom)
-    run._request_inference({"v": 0.0})
+    run._request_inference({"v": 0.0}, step=0)
     for _ in range(100):
         if run._infer_error:
             break
