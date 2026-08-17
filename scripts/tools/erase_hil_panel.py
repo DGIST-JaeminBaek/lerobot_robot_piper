@@ -75,6 +75,7 @@ def _panel_process(state_q, cmd_q, max_attempts, max_steps, title):
     l_meas = label("", GREEN, big)
     l_where = label("", DIM)
     tk.Frame(root, bg="#33363d", height=1).pack(fill="x", padx=14, pady=6)
+    l_align = label("", DIM)
     l_hil = label("[HIL] 정책 주행", DIM, mid)
     l_hil_sub = label("space = 개입 전환   q = 시도 중단  (창 포커스 불필요)", DIM)
 
@@ -94,7 +95,7 @@ def _panel_process(state_q, cmd_q, max_attempts, max_steps, title):
 
     state = {"attempt": 0, "step": 0, "fps": 0.0, "phase": "준비",
              "intervening": False, "intervention_steps": 0,
-             "erased": None, "where": None, "starved": 0}
+             "erased": None, "where": None, "starved": 0, "leader_dev": None}
 
     def pump():
         closing = False
@@ -124,6 +125,17 @@ def _panel_process(state_q, cmd_q, max_attempts, max_steps, title):
             l_meas_cap.config(text="[측정] park 프레임에서 실제로 잰 값")
             l_meas.config(text=f"지워짐 {e:.1%}   남음 {1-e:.1%}", fg=col)
             l_where.config(text=f"잔여 위치: {s['where']}" if s["where"] else "")
+
+        # 개입 전 정렬 안내. 개입 중에는 의미가 없어 숨긴다(클러치라 델타만 쓴다).
+        dev = s.get("leader_dev")
+        if dev and not s["intervening"]:
+            worst = max(dev, key=lambda k: abs(dev[k]))
+            parts = " ".join(f"{k[-1]}:{v:+.0f}" for k, v in dev.items())
+            col = GREEN if abs(dev[worst]) <= 10 else (AMBER if abs(dev[worst]) <= 30 else RED)
+            l_align.config(text=f"리더-팔로워 편차  {parts}   (최대 {worst} {dev[worst]:+.1f})",
+                           fg=col)
+        else:
+            l_align.config(text="")
 
         if s["intervening"]:
             l_hil.config(text="[HIL] ●  사람 개입 중 — 리더암이 몬다", fg=AMBER)
@@ -191,8 +203,11 @@ class HilPanel:
         self._push(attempt=i, step=0, phase="추론 중")
 
     def on_step(self, payload: dict):
-        self._push(step=payload.get("step", 0) + 1,
-                   intervening=bool(payload.get("intervention")))
+        kw = {"step": payload.get("step", 0) + 1,
+              "intervening": bool(payload.get("intervention"))}
+        if payload.get("leader_dev"):
+            kw["leader_dev"] = payload["leader_dev"]
+        self._push(**kw)
         self.poll()
 
     def set_phase(self, phase: str):

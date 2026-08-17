@@ -535,6 +535,8 @@ class InferenceRunner(threading.Thread):
         # HIL 개입 집계 — 개입률은 §8 보고 지표라 러너가 직접 센다.
         self.intervention_steps = 0
         self.engage_deviation_details: list[dict] = []
+        # 가장 최근에 잰 리더-팔로워 관절별 편차 (개입 전 정렬 안내용)
+        self.last_leader_dev: dict | None = None
         self.engage_deviations: list[float] = []
         self.hil_aborted = False
         # HIL 개입 토글. --hil일 때 루프가 채운다 (그 전에는 None).
@@ -952,6 +954,7 @@ class InferenceRunner(threading.Thread):
                 # 기록되는 action도 이 값이어야 영상↔움직임 인과가 맞는다
                 # (개입 궤적을 나중에 BC 재학습에 쓰는 게 목적이므로).
                 intervened = False
+                hil_dev = None
                 if mixer is not None:
                     follower_pose = {
                         name: float(value)
@@ -961,6 +964,11 @@ class InferenceRunner(threading.Thread):
                         f"{name}.pos": float(value)
                         for name, value in zip(MOTOR_NAMES, action)
                     }
+                    # 매 스텝 재기엔 CAN 읽기가 아까우므로 6스텝(0.2초)마다.
+                    # 사람이 팔을 맞추는 속도에는 이 정도면 충분하다.
+                    if step % 6 == 0:
+                        hil_dev = deviation_per_joint(leader.get_action(), follower_pose)
+                        self.last_leader_dev = hil_dev
                     mixed, intervened, engage_dev = mixer.step(policy_action, follower_pose)
                     if engage_dev is not None:
                         self.engage_deviations.append(engage_dev)
@@ -1085,6 +1093,11 @@ class InferenceRunner(threading.Thread):
                             "rate_clamp": pipeline.last_rate_adjustment,
                             "recorded": recorder.frames_written if recorder else 0,
                             "intervention": intervened,
+                            # 개입 전에 리더를 팔로워에 맞출 수 있도록 관절별
+                            # 편차를 실어보낸다. 손목(joint5)은 눈대중으로 못 맞춘다 —
+                            # 실물에서 다른 관절을 ±7까지 맞춰놓고도 joint5만 -52.92가
+                            # 남았고, 그 델타가 클러치에 얹혀 목표를 범위 밖으로 밀었다.
+                            "leader_dev": hil_dev,
                         },
                     )
                 )
