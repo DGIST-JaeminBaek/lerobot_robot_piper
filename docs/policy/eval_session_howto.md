@@ -93,7 +93,7 @@ cat outputs/train/<task>/<run_name>/checkpoints/last/pretrained_model/config.jso
 ## 4. GUI로 세션 실행
 
 ```bash
-EVAL_CUTOFF=90 \
+EVAL_CUTOFF=120 \
 EVAL_MODEL=<모델이름> \
 EVAL_CONDITION=<조건이름> \
 EVAL_TARGET=<circle|triangle|rectangle> \
@@ -118,12 +118,13 @@ bash scripts/13__eval_session.sh
 | `EVAL_TARGET` | 지금 보드에 그려진 도형과 일치시킬 것 |
 | `EVAL_TRIALS` | 화면 표시용 목표 횟수일 뿐, 실제 반복 제어는 안 한다 — 원하는 만큼 space로 반복하면 된다 |
 | `EVAL_WATCH_DIR` | **필수.** `erase_run.py --mode augment`가 새 에피소드를 만드는 상위 폴더. 항상 `records/rollout` |
-| `EVAL_CUTOFF` | 초 단위 시간 제한. 기본 60인데 모델 로딩+940스텝 추론+파킹까지 합치면 60초를 넘기기 쉬우므로 **90 이상 권장**. 파킹이 끝난 뒤(`[DISCONNECT]` 로그 이후)엔 자동으로 무시되므로 너무 타이트하게 잡을 필요는 없다 |
+| `EVAL_CUTOFF` | 초 단위 시간 제한. 기본 60인데 모델 로딩+1410스텝 추론+파킹까지 합치면 크게 넘기므로 **120 이상 권장**. 파킹이 끝난 뒤(`[DISCONNECT]` 로그 이후)엔 후처리 예산으로 자동 전환되므로 너무 타이트하게 잡을 필요는 없다 |
 | `--policy_path` | §3에서 고른 체크포인트의 `pretrained_model` 폴더 |
 | `--dataset_root` | 그 체크포인트를 학습시킨 데이터셋(§3 표) |
 | `--top-crop` / `--wrist-crop` | 전 데이터셋이 `280,0,720`으로 통일돼 있다. **top-only 체크포인트면 `--wrist-crop ""`으로 비울 것** |
 | `--mode augment` | 롤아웃을 LeRobotDataset으로 기록(크롭 전 원본 프레임 저장). 기록이 필요 없으면 `--mode demo` |
-| `--stop-on-release` | 지우개를 확실히 놓거나(그리퍼가 파지 수준에서 뚜렷이 벌어짐) 관절이 3초 이상 거의 안 움직이면 즉시 파킹으로 간다. **항상 켜둘 것** — 없으면 정책이 다 끝내고도 남은 스텝(최대 940)을 다 채운다 |
+| `--stop-on-release` | 지우개를 확실히 놓거나(그리퍼가 파지 수준에서 뚜렷이 벌어짐) 관절이 3초 이상 거의 안 움직이면 즉시 파킹으로 간다. **항상 켜둘 것** — 없으면 정책이 다 끝내고도 남은 스텝(기본 1410)을 다 채운다 |
+| `--max-steps` | 시도당 추론 스텝 상한. 기본 **1410**(시연 중앙값 720의 약 2배). 940에서 올렸다 — 940을 다 쓰고도 마무리를 못 해 cutoff로 끝나는 시도가 반복됐다. `--stop-on-release`가 켜져 있으면 다 놓는 즉시 끊기므로 상한을 올려도 성공하는 시도가 길어지지는 않는다 |
 | `--confirm` | 실제로 팔을 움직인다. 빼면 인자 검증만 하고 종료(로봇 무동작) |
 
 ### 창 조작
@@ -207,7 +208,7 @@ python scripts/tools/erase_eval.py --summarize evaluation/<폴더>/episodes.csv
 |---|---|---|
 | `conda activate ugrp` 안 함 | 종료 사유가 전부 `unknown(no_log)` | 환경 확인 후 재실행 |
 | top-only 체크포인트에 `--wrist-crop` 그대로 둠 | 관측 형태 불일치로 정책이 이상하게 동작하거나 에러 | `--wrist-crop ""` |
-| `EVAL_CUTOFF` 너무 타이트 | 파킹 전에 컷오프가 걸려 팔이 멈춘 채 방치될 뻔함 | 90 이상 권장(§4). 파킹 이후는 자동으로 컷오프 무시됨(2026-08-18 수정) |
+| `EVAL_CUTOFF` 너무 타이트 | 파킹 전에 컷오프가 걸려 팔이 멈춘 채 방치될 뻔함 | 120 이상 권장(§4, max-steps 1410 기준). 파킹 이후엔 후처리 예산으로 자동 전환됨(2026-08-18 수정) |
 | 카메라를 옮김 | 도형 검출 bbox가 어긋나거나 테이프 자국 배제 구역이 안 맞음 | §2로 재확인, 필요시 `--board`/`--exclude` 값 재측정 |
 | 이물질(테이프 자국)을 실제로 뗐음 | `DEFAULT_EXCLUDE` 자리에 진짜 도형을 그려도 안 잡힘 | `ink_metric.py`/`erase_eval.py`/`erase_eval_ui.py` 호출에 `--exclude 0,0,0,0` 추가해서 기본 배제를 끈다 |
 | `--mode demo`로 돌림 | 롤아웃이 기록 안 돼 나중에 재채점 불가 | 평가에는 항상 `--mode augment` |

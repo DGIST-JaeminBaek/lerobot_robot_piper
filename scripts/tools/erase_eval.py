@@ -64,6 +64,10 @@ STALL_EPS = 0.02  # 이 미만의 진행은 노이즈로 본다 (정규화 진�
 
 # 단계 배점 (합 10). "여기서 실패하면 뒤가 전부 불가능한가"로 가중.
 STAGE_POINTS = {"approach": 1, "contact": 2, "start": 2, "complete": 3, "selective": 2}
+# 완료선 미만에서 줄 수 있는 최대 부분점수 비율 (complete_credit 참고).
+# 1.0으로 두면 성공이 아닌데 10/10이 나온다.
+PARTIAL_MAX = 0.9
+
 
 # 그리퍼(action[:,6], 0~100). 실측: 대기 ~0, 벌림 60~100, 지우개 파지 ~20.
 GRIP_OPEN = 45.0  # 이 이상이면 벌린 상태
@@ -71,6 +75,33 @@ GRIP_HOLD_MAX = 35.0  # 이 이하로 닫혀 있으면 뭔가 쥔 상태로 본�
 GRIP_HOLD_MIN = 8.0  # 완전히 닫힌(빈손) 것과 구분
 HOLD_FRAMES = 15  # 0.5초 이상 유지돼야 파지로 인정
 RELEASE_JUMP = 15.0  # 파지 수준에서 이만큼 벌어지면 놓은 것
+
+
+def complete_credit(erased: float) -> float:
+    """'실질 완료'(3점) 단계의 부분 점수 비율 0~1.
+
+    전부-아니면-전무로 두면 84%와 30%가 똑같이 0점이라, 아깝게 못 끝낸 시도와
+    아예 못 지운 시도가 구분되지 않는다(실물 2026-08-18: 88.0%와 30%가 둘 다
+    7/10). 지움 비율은 **물리 측정값**이라 여기에 차등을 주는 것은 프로토콜
+    §2.2의 "차등은 물리 측정값에만 둔다"와 일치한다 — 사람이 주관적으로 매기는
+    부분 점수가 아니다.
+
+    START_ERASED(개시 인정선)에서 0, 완료선 바로 아래에서 PARTIAL_MAX(0.9)까지
+    선형으로 오르고, SUCCESS_ERASED를 넘어야 1.0이 된다.
+
+    완료선 아래에 상한을 두는 이유: 그냥 선형으로 1까지 이으면 erased=0.899가
+    반올림으로 10.00/10이 되면서 success=False인 만점이 나온다. **10/10은 실제
+    성공일 때만** 나와야 표가 읽힌다. 이 불연속은 임의가 아니라 완료선이 성공
+    판정 기준이라는 사실을 그대로 반영한 것이다.
+
+    success 판정은 바뀌지 않는다 — 여전히 erased >= SUCCESS_ERASED여야 한다.
+    """
+    if erased >= SUCCESS_ERASED:
+        return 1.0
+    if erased <= START_ERASED:
+        return 0.0
+    span = (erased - START_ERASED) / (SUCCESS_ERASED - START_ERASED)
+    return PARTIAL_MAX * span
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -332,7 +363,10 @@ def score_episode(ep_dir: Path, target: str | None, board, dark_ratio: float, fp
         "complete": tgt["erased_frac"] >= SUCCESS_ERASED,
         "selective": distractor <= MAX_DISTRACTOR,
     }
-    score = sum(STAGE_POINTS[k] for k, v in stages.items() if v)
+    score = round(sum(
+        STAGE_POINTS[k] * (complete_credit(tgt["erased_frac"]) if k == "complete" else float(v))
+        for k, v in stages.items()
+    ), 2)
 
     row.update(
         valid=True,
@@ -631,7 +665,7 @@ def main(argv=None) -> int:
             f"[{flag}] {ep.name}: "
             + (
                 f"erased={row['erased_target']:.3f} distr={row['erased_distractor']:.3f} "
-                f"score={row['score']}/10 {row['termination']} {row['failure_mode']}"
+                f"score={row['score']:g}/10 {row['termination']} {row['failure_mode']}"
                 if row.get("valid")
                 else row.get("note", "")
             )

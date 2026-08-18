@@ -423,7 +423,13 @@ def main():
     p.add_argument("--cam-type", default="realsense")
     p.add_argument("--device", default="cuda")
     p.add_argument("--fps", type=int, default=30)
-    p.add_argument("--max-steps", type=int, default=940, help="시도당 상한 (중앙값 720의 약 1.3배)")
+    # 940(시연 중앙값 720의 약 1.3배)에서 1.5배로 올렸다. 실물 2026-08-18에
+    # 940스텝을 다 쓰고도 마무리를 못 해 cutoff로 끝나는 시도가 반복됐다
+    # (예: 84.4% 지운 채 종료 — 꼭짓점 잔여). 시간을 더 주고 스스로 끝내는지 본다.
+    # --stop-on-release가 켜져 있으면 다 놓는 즉시 끊기므로 상한을 올려도
+    # 성공하는 시도가 길어지지는 않는다.
+    p.add_argument("--max-steps", type=int, default=1410,
+                   help="시도당 상한 (시연 중앙값 720의 약 2배). 예전 기본값은 940")
     p.add_argument("--max-attempts", type=int, default=3)
     p.add_argument("--stop-on-release", action="store_true",
                    help="지우개를 놓으면 그 시도를 즉시 끊고 파킹한다 (러너로 전달). "

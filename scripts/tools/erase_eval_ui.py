@@ -484,7 +484,7 @@ class EvalSession(tk.Tk):
         else:
             ok = row["success"]
             self.headline.configure(
-                text=f"{'성공' if ok else '실패'}   {row['score']}/10   진행률 {row['task_progress']:.0f}%"
+                text=f"{'성공' if ok else '실패'}   {row['score']:g}/10   진행률 {row['task_progress']:.0f}%"
             )
             self._set_detail({
                 "erased_target": f"{row['erased_target']:.3f}",
