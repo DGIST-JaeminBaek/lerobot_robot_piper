@@ -182,7 +182,13 @@ def grab_judge_frame(serial: str, width=1280, height=720, warmup_s=3.0, fps=30):
 
 
 # 상태 블록을 쓰는 동안에도 반드시 보여야 하는 로그. 나머지는 삼킨다.
-IMPORTANT_LOG_TAGS = ("[RECORD]", "[HIL]", "[ERROR]", "[STOP]", "[WARN]", "[SAFETY]")
+# [DISCONNECT]는 GUI(erase_eval_ui)가 "로봇 단계가 끝났다"를 아는 유일한 신호다 —
+# 이걸 빼면 GUI가 파킹·영상 인코딩 중에도 컷오프를 걸어 프로세스 그룹째 SIGINT를
+# 보내고, 인코딩이 임시 폴더에서 죽어 videos/가 안 만들어진다(2026-08-18 실물:
+# 채점이 'top 영상 없음'으로 3번 연속 실패한 원인). 필터를 통과시켜야 한다.
+IMPORTANT_LOG_TAGS = (
+    "[RECORD]", "[HIL]", "[ERROR]", "[STOP]", "[WARN]", "[SAFETY]", "[DISCONNECT]",
+)
 
 
 def _filtered_log(message: str) -> None:

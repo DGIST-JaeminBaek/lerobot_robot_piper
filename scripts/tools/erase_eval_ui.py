@@ -190,6 +190,9 @@ class Rollout:
 # ═══════════════════════════════════════════════════════════════════
 class EvalSession(tk.Tk):
     POLL_MS = 200
+    # 파킹 이후 후처리(파킹 이동 + 영상 인코딩)에 허용하는 시간. 실측으로
+    # 663프레임 인코딩이 수십 초 걸리므로 넉넉히 잡되, 무한 대기는 막는다.
+    POST_PARK_TIMEOUT_S = 300.0
 
     def __init__(self, args):
         super().__init__()
@@ -204,7 +207,8 @@ class EvalSession(tk.Tk):
         self.phase = "idle"
         self.score_q: queue.Queue[dict] = queue.Queue()
         self.started_at: float | None = None
-        self.robot_parked = False  # 이번 시도에서 [DISCONNECT] 로그를 봤는지 (_tick 참고)
+        # [DISCONNECT] 로그를 본 시각. None이면 아직 로봇이 도는 중 (_tick 참고)
+        self.parked_at: float | None = None
         self.aborted = False
 
         self.failure = tk.StringVar(value="")
@@ -336,7 +340,7 @@ class EvalSession(tk.Tk):
             self._log("시작할 수 없습니다")
             return
         self.aborted = False
-        self.robot_parked = False
+        self.parked_at = None
         self.started_at = time.monotonic()
         self._set_phase("running")
         self.headline.configure(text="롤아웃 진행 중…")
@@ -405,23 +409,34 @@ class EvalSession(tk.Tk):
             except queue.Empty:
                 break
             self._log(line)
-            if "[DISCONNECT]" in line:
-                # 로봇이 이미 파킹까지 끝났다는 뜻이다(piper_infer_runner가 disconnect
-                # 직전에 찍는 로그). 이 시점부터 남은 건 영상 인코딩 같은 후처리뿐이라
-                # 컷오프로 더 끊을 이유가 없다 — 오히려 위험하다. 컷오프는 os.killpg로
+            if "[DISCONNECT]" in line and self.parked_at is None:
+                # 러너가 robot.disconnect(park=...) 직전에 찍는 로그다. 여기부터
+                # 로봇 단계는 끝났고 남은 건 파킹 이동과 영상 인코딩 같은 후처리뿐이다.
+                #
+                # 이 시점 이후로 컷오프를 그대로 걸면 안 된다. 컷오프는 os.killpg로
                 # 프로세스 그룹 전체에 SIGINT를 보내는데, 인코딩 워커도 같은 그룹이라
-                # 인코딩 도중 죽이면 녹화 자체가 날아간다(2026-08-18 실물: 파킹은
-                # 제때 갔는데 그 뒤 인코딩이 컷오프에 죽어 'top 영상 없음'으로
-                # 채점 실패). 로봇 안전 목적은 파킹으로 이미 달성됐으니 여기서부턴
-                # 컷오프를 꺼도 된다.
-                self.robot_parked = True
+                # 인코딩 도중 죽으면 영상이 임시 폴더에 갇힌 채 videos/로 옮겨지지
+                # 않아 채점이 'top 영상 없음'으로 실패한다. 파킹 이동 자체를 끊는 것도
+                # 위험하다(팔이 중간 자세에서 힘을 잃는다).
+                #
+                # 그렇다고 아예 무제한으로 두면 인코딩이 걸렸을 때 세션이 영영 멈춘다.
+                # 그래서 후처리 전용 예산으로 갈아탄다(POST_PARK_TIMEOUT_S).
+                self.parked_at = time.monotonic()
+                self._log(f"[CUTOFF] 로봇 단계 종료 — 후처리에는 "
+                          f"{self.POST_PARK_TIMEOUT_S:g}초까지 기다립니다")
 
         if self.phase == "running":
             elapsed = time.monotonic() - (self.started_at or time.monotonic())
             self.clock.configure(text=f"{elapsed:5.1f}s")
-            if self.args.cutoff and elapsed >= self.args.cutoff and not self.robot_parked:
-                self._log(f"[CUTOFF] {self.args.cutoff:g}초 초과 — 중단합니다")
-                self.rollout.stop("컷오프")
+            if self.parked_at is None:
+                # 로봇이 아직 도는 중 — 원래 컷오프로 끊는다
+                if self.args.cutoff and elapsed >= self.args.cutoff:
+                    self._log(f"[CUTOFF] {self.args.cutoff:g}초 초과 — 중단합니다")
+                    self.rollout.stop("컷오프")
+            elif time.monotonic() - self.parked_at >= self.POST_PARK_TIMEOUT_S:
+                self._log(f"[CUTOFF] 후처리가 {self.POST_PARK_TIMEOUT_S:g}초를 넘었습니다 "
+                          f"— 중단합니다 (녹화가 손상될 수 있음)")
+                self.rollout.stop("후처리 컷오프")
             if not self.rollout.running():
                 self._begin_scoring()
         elif self.phase == "scoring":
