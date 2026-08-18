@@ -225,8 +225,8 @@ def load_manifest(manifest_path: Path) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("format_version") != 1:
         raise ValueError(f"Unsupported format_version: {manifest.get('format_version')}")
-    if manifest.get("target_task") != TARGET_TASK:
-        raise ValueError(f"target_task must be exactly {TARGET_TASK!r}")
+    if not manifest.get("target_task"):
+        raise ValueError("Manifest must set a non-empty target_task.")
     if not isinstance(manifest.get("episodes"), list):
         raise ValueError("Manifest must contain an episodes list.")
     return manifest
@@ -598,7 +598,7 @@ def build_dataset(
 
 
 def main() -> int:
-    global RGB_VIDEO_KEYS
+    global RGB_VIDEO_KEYS, TARGET_TASK
     args = parse_args()
     manifest_path = args.manifest.expanduser().resolve()
     output_path = args.output.expanduser().resolve()
@@ -636,6 +636,7 @@ def main() -> int:
         return 0
 
     manifest = load_manifest(manifest_path)
+    TARGET_TASK = manifest["target_task"]
     entries = validate_manifest(manifest)
     features, fps, robot_type = validate_source_schemas(
         entries,

@@ -243,6 +243,11 @@ lerobot-train \
   --wandb.disable_artifact=true
 ```
 
+**주의: 이 명령어는 실제로 돌렸던 원본 그대로 남겨둔 기록이고, `--policy.scheduler_decay_steps`가
+빠져 있다.** 이 상태로 돌리면 기본값 30000에 걸려 75,000 step 중 60%가 LR floor 상태로
+학습된다(아래 "LR 스케줄러" 절 참고). **새로 pi0를 학습할 때는 반드시
+`--policy.scheduler_decay_steps=<--steps와 같은 값>`을 추가할 것.**
+
 SmolVLA와 다른 점만 짚으면:
 
 - **`--policy.dtype=bfloat16`** — pi0 기본값이 `float32`라 그냥 두면 VRAM이 2배 든다
@@ -406,6 +411,57 @@ python scripts/tools/piper_infer_runner.py \
 
 **결론: `chunk_threshold`는 기본값 0.3을 유지한다.** SmolVLA와 조건이 같아 비교에도
 유리하다.
+
+## LR 스케줄러 — `scheduler_decay_steps`가 `--steps`를 안 따라간다
+
+### 증상
+
+`PI0Config.scheduler_decay_steps`의 기본값은 `30_000`이다(`configuration_pi0.py:94`).
+`--steps`를 그보다 길게 잡아도 이 값은 저절로 늘어나지 않는다 — cosine decay
+스케줄러가 30,000 step 지점에서 이미 floor LR(`2.5e-6`)에 도달해버리고, 남은 학습
+구간 전체가 사실상 거의 업데이트 없이 흘러간다.
+
+`CosineDecayWithWarmupSchedulerConfig.build()`(`schedulers.py:94-109`)는 **줄이는 것만**
+자동으로 한다: `num_training_steps < num_decay_steps`일 때만 비율에 맞춰 축소한다.
+반대 방향(`--steps`가 `scheduler_decay_steps`보다 길 때 늘려주는 것)은 없다.
+`configuration_pi0.py:91`의 주석 "auto-scale if --steps < scheduler_decay_steps"도
+이 방향성만 다룬다는 걸 명시한다.
+
+### 틀리기 쉬운 지점 — `--scheduler.*`는 조용히 버려진다
+
+`lerobot-train`의 `TrainPipelineConfig`엔 top-level `--scheduler.*` 필드도 있어서
+draccus가 파싱은 해준다. 하지만 `use_policy_training_preset=True`(기본값)일 때
+`__post_init__`이 무조건 정책 preset으로 덮어쓴다(`configs/train.py:134-136`,
+`self.scheduler = self.policy.get_scheduler_preset()`). 즉 `--scheduler.num_decay_steps`를
+줘도 실행 직후 버려지고 정책 config의 `scheduler_decay_steps`(기본 30000)가 그대로
+쓰인다. **반드시 `--policy.scheduler_decay_steps`(정책 config 네임스페이스)로 줘야 한다.**
+
+### 실측 — pi0 체크포인트 5개 중 4개가 이 문제에 걸려 있다
+
+저장된 `checkpoints/last/pretrained_model/train_config.json`을 직접 확인한 결과:
+
+| 체크포인트 | steps | `policy.scheduler_decay_steps` | 상태 |
+|---|---:|---:|---|
+| `pi0_lora_topwrist_75k` | 75,000 | 미지정(기본값 30000 추정) | 고장 |
+| `pi0_lora_topwrist_315` | 168,000 | 30000 (`--scheduler.num_decay_steps`로 줬지만 무시됨) | 고장 |
+| `pi0_lora_pickup_prompt_132` | 65,265 | 30000 (기본값 그대로) | 고장 |
+| `pi0_lora_pickup_prompt_132_decayfix` | 65,265 | 30000 (여전히 `--scheduler.*`로 줌 — 첫 수정 시도 실패) | 고장 |
+| **`pi0_lora_pickup_prompt_132_decayfix3`** | 65,265 | **65265** (`--policy.scheduler_decay_steps=65265`로 정확히 줌) | **정상** |
+
+즉 `pi0_lora_pickup_prompt_132_decayfix3`가 유일하게 전체 학습 구간에서 LR이 정상적으로
+decay한 pi0 체크포인트다. **실물 테스트·비교 실험에는 이 체크포인트를 쓸 것.** 나머지
+4개는 학습 후반 17.9%~54%가 LR floor 근처에서 거의 헛돈 상태다.
+
+### 앞으로 pi0(및 SmolVLA) 학습 명령을 짤 때 체크리스트
+
+1. `--steps` 값을 정한다
+2. `--policy.scheduler_decay_steps`를 **정확히 같은 값**으로 명시한다 (`--scheduler.*` 아님)
+3. 저장된 `train_config.json`의 `policy.scheduler_decay_steps` 값이 실제로 그 값인지
+   재확인한다 — CLI에 값을 줬다고 믿지 말 것
+
+이 함정은 pi0 전용이 아니라 lerobot 스케줄러 설계 자체의 공통 문제라 SmolVLA에도
+동일하게 적용된다. SmolVLA 쪽 근거와 외부 사례(GitHub issue #3287)는
+`docs/training/smolvla_finetuning.md`의 "BF16 mixed precision" 절 말미에 정리돼 있다.
 
 ## 비교 실험에서 주의할 점
 

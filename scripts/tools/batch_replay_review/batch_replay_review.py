@@ -68,8 +68,8 @@ VERDICT_COLORS = {name: color for name, color in VERDICTS.values()}
 VERDICT_COLORS["-"] = (150, 150, 150)
 
 # 이 판정을 찍으면 비고 창이 자동으로 뜬다 — "왜 버렸는지"를 그 자리에서
-# 안 적으면 나중에 CSV만 보고는 재현이 안 된다. SUSPECT도 물으려면 여기 추가.
-NOTE_ON_VERDICT = {"BAD"}
+# 안 적으면 나중에 CSV만 보고는 재현이 안 된다.
+NOTE_ON_VERDICT = {"BAD", "SUSPECT"}
 
 
 # --------------------------------------------------------------------------
@@ -256,7 +256,7 @@ def draw_controls(panel: np.ndarray, robot_enabled: bool, note: str = "") -> Non
                  ("x: real robot (disabled)", (120, 120, 120))
     for line, col in [
         ("ENTER / n / ]: next rec    p / [: prev rec", (255, 255, 255)),
-        ("1:OK  2:SUSPECT  3:BAD(+note)  -> auto next", (200, 230, 205)),
+        ("1:OK  2:SUSPECT(+note)  3:BAD(+note)  -> auto next", (200, 230, 205)),
         robot_line,
         ("space pause   r restart   , . a d seek   +/- speed", (185, 185, 185)),
         ("m: note (opens input window)  f: path  q/esc: quit", (185, 185, 185)),
