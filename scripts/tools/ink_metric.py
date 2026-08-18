@@ -53,6 +53,8 @@ PAD = 12  # 도형 bbox 여유
 # 그 프레임도 같이 안 잡힌다는 뜻이니, 카메라를 옮기거나 이 이물질을 실제로
 # 떼어내면 여기를 비우거나 좌표를 다시 잴 것.
 DEFAULT_EXCLUDE = [(370, 260, 150, 110)]
+# 컨투어 bbox가 배제 사각형과 이만큼 겹치면 통째로 버린다 (detect_shapes 참고).
+EXCLUDE_OVERLAP = 0.5
 
 # 성공 판정 임계 (make_done_labels.py, erase_check.py가 공유)
 SUCCESS_ERASED = 0.9  # target이 이만큼 지워지면 성공
@@ -64,10 +66,10 @@ MAX_DISTRACTOR = 0.10  # distractor를 이만큼 넘게 건드리면 실패.
 def detect_shapes(frame, board, dark_ratio, exclude=None):
     """첫 프레임에서 도형 bbox와 종류를 찾는다. -> [(label, (x,y,w,h)), ...]
 
-    exclude: [(x,y,w,h), ...] 전역(원본 프레임) 좌표. 이 안의 픽셀은 잉크 마스크에서
-    아예 지워버려서 컨투어 단계에 안 들어간다 — 손으로 그린 도형(위치가 에피소드마다
-    바뀜)과 달리, 보드에 눌어붙은 테이프 자국·스티커처럼 **위치가 고정된 이물질**을
-    배제할 때 쓴다. 기본은 빈 리스트라 기존 동작을 안 바꾼다.
+    exclude: [(x,y,w,h), ...] 전역(원본 프레임) 좌표. 이 사각형과 EXCLUDE_OVERLAP
+    이상 겹치는 **컨투어를 통째로 버린다**(마스크를 지우지 않는다 — 아래 참고).
+    손으로 그린 도형(위치가 에피소드마다 바뀜)과 달리, 보드에 눌어붙은 테이프
+    자국·스티커처럼 **위치가 고정된 이물질**을 배제할 때 쓴다.
     실제로 이런 이물질이 도형 자리와 겹쳐서 다 지운 도형을 '남음'으로 오판한 사례가
     있었다(2026-08-18, 보드에 붙은 변색 테이프+카드가 지워진 삼각형 자리를 rectangle로
     오검출). 위치가 안 바뀌는 게 확인되면 --exclude로 좌표를 넘긴다.
@@ -78,16 +80,30 @@ def detect_shapes(frame, board, dark_ratio, exclude=None):
     sat = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)[:, :, 1]
     white = float(np.percentile(roi, 90))
     ink = (roi < white * dark_ratio).astype(np.uint8)
-    for ex, ey, ew, eh in exclude or []:
-        # 전역 좌표 -> 보드 로컬로 옮기고 프레임 밖으로 안 나가게 자른다
-        lx0, ly0 = max(ex - bx, 0), max(ey - by, 0)
-        lx1, ly1 = min(ex - bx + ew, bw), min(ey - by + eh, bh)
-        if lx1 > lx0 and ly1 > ly0:
-            ink[ly0:ly1, lx0:lx1] = 0
     # 선이 끊겨 있어도 한 도형으로 묶이도록 닫기
     ink = cv2.morphologyEx(ink, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
 
     contours, _ = cv2.findContours(ink, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # 배제 구역은 마스크를 0으로 지우는 게 아니라 **컨투어를 통째로 버리는** 방식이다.
+    # 마스크를 지우면 배제 구역에 걸친 물체가 반으로 쪼개지고, 남은 조각이 원래
+    # 물체와 다른 성질을 갖게 되어 필터를 통과해버린다. 실제로 그랬다
+    # (2026-08-18 저녁): 지우개 나무 거치대는 유채색이라 채도 필터가 정상적으로
+    # 걸러내는데, 배제 사각형이 거치대를 반으로 잘라서 남은 흰 조각이 무채색으로
+    # 보였고 그게 가짜 'triangle'로 잡혔다 — 배제를 아예 끄면 안 나오던 도형이
+    # 배제 때문에 생긴 셈이다.
+    def not_excluded(c):
+        x, y, w, h = cv2.boundingRect(c)
+        area = float(w * h) or 1.0
+        for ex, ey, ew, eh in exclude or []:
+            # 전역 좌표 -> 보드 로컬
+            ix0, iy0 = max(x, ex - bx), max(y, ey - by)
+            ix1, iy1 = min(x + w, ex - bx + ew), min(y + h, ey - by + eh)
+            if ix1 > ix0 and iy1 > iy0 and (ix1 - ix0) * (iy1 - iy0) / area >= EXCLUDE_OVERLAP:
+                return False
+        return True
+
+    contours = [c for c in contours if not_excluded(c)]
     # 유채색 물체(나무 지우개 블록)는 병합 "전에" 버린다.
     # 나중에 버리면 블록이 옆 도형과 한 덩어리로 묶여 bbox와 잉크 측정이 오염된다.
     def achromatic(c):
