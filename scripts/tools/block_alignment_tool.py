@@ -14,6 +14,10 @@ top 카메라를 열어 매 프레임 블럭을 찾고, 학습 데이터 120개(
 실행:
     python scripts/tools/block_alignment_tool.py
     q 종료 / s 스냅샷 저장 / r 카메라 정렬 재측정
+
+    # 도형을 그릴 6개 대표 위치(상좌/상중/상우/하좌/하중/하우)도 같이 보려면
+    # camera_overlay_view_315.py의 좌표를 재사용해 --shape-zones로 켠다:
+    python scripts/tools/block_alignment_tool.py --shape-zones 135
 """
 
 from __future__ import annotations
@@ -54,6 +58,35 @@ TOLERANCE_WARN = 15.0
 GREEN, AMBER, RED = (80, 190, 60), (30, 170, 235), (60, 60, 225)
 WHITE, CYAN = (255, 255, 255), (255, 220, 60)
 
+# 도형을 그릴 6개 대표 위치(상좌/상중/상우/하좌/하중/하우, raw 1280x720 좌표).
+# camera_overlay_view_315.py와 같은 산출 방법(y=300 기준 위/아래 2단, 각 행에서
+# cx k-means 3분할, 클러스터 median)이고 값도 그대로 가져왔다 — 135는
+# pick_up_the_eraser_0802_0804_0805_0813pm_135 학습 데이터셋(135개) 기준,
+# 315는 candidate_assets/records_105(315개 후보 풀) 기준. 우측 열(우상/우하)
+# cx가 315쪽이 135쪽보다 30px가량 바깥이다 — 그 135개로 학습한 체크포인트를
+# 테스트할 땐 135 쪽이 더 정확하다.
+SHAPE_ZONES: dict[str, tuple[tuple[str, float, float, float, float], ...]] = {
+    "135": (
+        ("top-left", 319.4, 144.1, 118.0, 128.0),
+        ("top-mid", 431.6, 129.3, 123.5, 129.5),
+        ("top-right", 525.2, 129.9, 113.0, 129.0),
+        ("bottom-left", 325.9, 475.5, 110.5, 119.0),
+        ("bottom-mid", 448.8, 473.6, 124.0, 122.0),
+        ("bottom-right", 548.1, 473.2, 118.0, 124.5),
+    ),
+    "315": (
+        ("top-left", 321.0, 132.8, 114.0, 119.0),
+        ("top-mid", 422.2, 117.5, 128.0, 128.0),
+        ("top-right", 558.2, 132.2, 118.5, 124.5),
+        ("bottom-left", 335.8, 483.8, 107.5, 117.5),
+        ("bottom-mid", 437.0, 477.0, 123.5, 120.5),
+        ("bottom-right", 577.5, 464.0, 119.0, 125.0),
+    ),
+}
+ZONE_COLORS = (  # BGR, camera_overlay_view.py COLOR_NAMES와 맞춘 팔레트
+    (0, 0, 255), (0, 140, 255), (0, 255, 255), (255, 255, 0), (255, 0, 255), (255, 0, 0),
+)
+
 
 def measure_edge_x(rgb: np.ndarray) -> int:
     """나무 테이블 경계의 x. 카메라가 미세하게 움직였는지 보는 기준선."""
@@ -91,10 +124,24 @@ def detect_block(rgb: np.ndarray) -> dict | None:
     }
 
 
+def draw_shape_zones(canvas: np.ndarray, zones: tuple) -> None:
+    """도형을 그릴 6개 대표 위치를 얇은 라벨 박스로 그린다. 블럭 정렬 표시보다
+    먼저(아래층에) 그려서 시선이 블럭 쪽(초록/노랑/빨강)에 남게 한다."""
+    for (label, cx, cy, w, h), color in zip(zones, ZONE_COLORS):
+        x0, y0 = int(cx - w / 2), int(cy - h / 2)
+        x1, y1 = int(cx + w / 2), int(cy + h / 2)
+        cv2.rectangle(canvas, (x0, y0), (x1, y1), color, 1, cv2.LINE_AA)
+        cv2.putText(canvas, label, (x0, max(0, y0 - 5)), cv2.FONT_HERSHEY_SIMPLEX,
+                   0.42, color, 1, cv2.LINE_AA)
+
+
 def draw_overlay(frame: np.ndarray, found: dict | None, ref: tuple[float, float],
-                 edge_x: int, shift: float) -> np.ndarray:
+                 edge_x: int, shift: float, zones: tuple = ()) -> np.ndarray:
     canvas = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
     ref_x, ref_y = ref
+
+    if zones:
+        draw_shape_zones(canvas, zones)
 
     # 목표 위치
     cv2.circle(canvas, (int(ref_x), int(ref_y)), int(TOLERANCE_OK), GREEN, 2, cv2.LINE_AA)
@@ -160,7 +207,12 @@ def main(argv: list[str] | None = None) -> int:
                         default=REPO_ROOT / "configs" / "recording.env")
     parser.add_argument("--snapshot-dir", type=pathlib.Path,
                         default=REPO_ROOT / "outputs" / "analysis" / "block_alignment")
+    parser.add_argument("--shape-zones", choices=("none", *SHAPE_ZONES), default="none",
+                        help="도형을 그릴 6개 대표 위치(상좌/상중/상우/하좌/하중/하우)를 "
+                             "같이 표시한다. 기본은 꺼짐(none) — 안 켜면 기존 동작과 동일. "
+                             "135=학습 데이터셋 135개 기준, 315=candidate asset 315개 기준")
     args = parser.parse_args(argv)
+    zones = SHAPE_ZONES.get(args.shape_zones, ())
 
     from piper_human_approved_inference import load_env_file
     load_env_file(args.env_file.expanduser().resolve())
@@ -204,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
                                        borderMode=cv2.BORDER_REPLICATE)
 
             found = detect_block(frame)
-            cv2.imshow(window, draw_overlay(frame, found, (args.ref_cx, args.ref_cy), edge_x, shift))
+            cv2.imshow(window, draw_overlay(frame, found, (args.ref_cx, args.ref_cy), edge_x, shift, zones))
 
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
