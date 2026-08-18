@@ -443,6 +443,12 @@ class EvalSession(tk.Tk):
         self._log("[ALIGN] 정렬 확인 도구를 띄웠습니다 — 닫으면 다음 시도를 시작할 수 있습니다")
         self._set_status("정렬 확인 중 — 도구 창을 닫으면 [시작]이 열립니다")
 
+    def _finish_alignment_wait(self) -> None:
+        self._aligning = False
+        self._set_phase(self.phase)
+        self._log("[ALIGN] 카메라 해제 완료 — [시작]으로 다음 시도")
+        self._set_status("정렬 확인 완료 — [시작]으로 다음 시도")
+
     def on_close(self) -> None:
         if self.align_proc is not None and self.align_proc.poll() is None:
             with contextlib.suppress(Exception):
@@ -477,12 +483,21 @@ class EvalSession(tk.Tk):
                 self._log(f"[CUTOFF] 로봇 단계 종료 — 후처리에는 "
                           f"{self.POST_PARK_TIMEOUT_S:g}초까지 기다립니다")
 
-        # 정렬 확인 도구가 닫혔으면 [시작] 잠금을 푼다.
+        # 정렬 확인 도구가 닫혔으면 카메라가 풀릴 시간을 준 뒤 [시작] 잠금을 푼다.
+        # 즉시 풀면 안 된다 — 대칭적인 문제다: 롤아웃 종료 직후 정렬 도구가
+        # 카메라를 열어서 세그폴트가 났던 것과 똑같이, 정렬 도구 종료 직후
+        # 다음 롤아웃이 카메라를 열어도 같은 이유(RealSense가 USB 레벨에서
+        # 아직 안 풀림)로 죽는다. 실물에서 실제로 겪었다(2026-08-18): 첫 번째
+        # 지연 수정 이후에도 세그폴트가 재발했는데, 이번엔 정렬 도구를 닫고
+        # 바로 다음 롤아웃을 시작한 시점이었다.
         if self.align_proc is not None and self.align_proc.poll() is not None:
             self.align_proc = None
+            self._aligning = True  # 해제 대기 동안에도 [시작]을 잠근다
             self._set_phase(self.phase)
-            self._log("[ALIGN] 정렬 확인 완료 — [시작]으로 다음 시도")
-            self._set_status("정렬 확인 완료 — [시작]으로 다음 시도")
+            self._log(f"[ALIGN] 정렬 확인 도구 종료 — 카메라 해제 대기 중 "
+                      f"({self.ALIGN_LAUNCH_DELAY_MS/1000:.1f}초)")
+            self._set_status("카메라 정리 대기 중…")
+            self.after(self.ALIGN_LAUNCH_DELAY_MS, self._finish_alignment_wait)
 
         if self.phase == "running":
             elapsed = time.monotonic() - (self.started_at or time.monotonic())
