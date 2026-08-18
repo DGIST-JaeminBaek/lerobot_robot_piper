@@ -16,6 +16,8 @@
 #   EVAL_TARGET      circle / rectangle / triangle (생략 시 폴더명에서 추론)
 #   EVAL_TRIALS      목표 시행 수 (표시용)
 #   EVAL_CUTOFF      에피소드 컷오프 초 (기본 60)
+#   EVAL_ALIGN_CMD   시도 확인 직후 띄울 정렬 확인 명령 (도형·지우개 위치 점검).
+#                    창을 닫을 때까지 [시작]이 잠긴다.
 #   EVAL_OUT_DIR     결과 폴더 (기본 outputs/eval/<오늘>)
 #   EVAL_WATCH_DIR   롤아웃이 새 에피소드를 만드는 폴더
 #   EVAL_ROLLOUT_CMD 롤아웃 1회를 도는 명령
@@ -45,6 +47,7 @@ args=()
 [[ -n "${EVAL_TARGET:-}" ]] && args+=(--target "${EVAL_TARGET}")
 [[ -n "${EVAL_TRIALS:-}" ]] && args+=(--trials "${EVAL_TRIALS}")
 [[ -n "${EVAL_CUTOFF:-}" ]] && args+=(--cutoff "${EVAL_CUTOFF}")
+[[ -n "${EVAL_ALIGN_CMD:-}" ]] && args+=(--align-cmd "${EVAL_ALIGN_CMD}")
 # shellcheck disable=SC2206
 [[ -n "${EVAL_BOARD:-}" ]] && args+=(--board ${EVAL_BOARD})
 

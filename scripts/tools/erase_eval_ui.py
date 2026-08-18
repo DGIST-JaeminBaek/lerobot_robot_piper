@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import glob
 import os
@@ -209,6 +210,9 @@ class EvalSession(tk.Tk):
         self.started_at: float | None = None
         # [DISCONNECT] 로그를 본 시각. None이면 아직 로봇이 도는 중 (_tick 참고)
         self.parked_at: float | None = None
+        # 시도 사이에 띄우는 정렬 확인 도구(block_alignment_tool). 이게 살아 있는
+        # 동안은 top 카메라를 그 도구가 잡고 있으므로 다음 롤아웃을 시작하면 안 된다.
+        self.align_proc: subprocess.Popen | None = None
         self.aborted = False
 
         self.failure = tk.StringVar(value="")
@@ -329,7 +333,8 @@ class EvalSession(tk.Tk):
     # ------------------------------------------------------------- 동작
     def _set_phase(self, phase: str) -> None:
         self.phase = phase
-        self.btn_start.configure(state="normal" if phase == "idle" else "disabled")
+        can_start = phase == "idle" and self.align_proc is None
+        self.btn_start.configure(state="normal" if can_start else "disabled")
         self.btn_stop.configure(state="normal" if phase == "running" else "disabled")
         self.btn_confirm.configure(state="normal" if phase == "review" else "disabled")
 
@@ -393,8 +398,33 @@ class EvalSession(tk.Tk):
         self._set_phase("idle")
         self._reset_card("기록했습니다 — [시작]으로 다음 시도")
         self._refresh_header()
+        self._start_alignment_check()
+
+    def _start_alignment_check(self) -> None:
+        """다음 시도 전에 도형·지우개 위치를 눈으로 확인하는 도구를 띄운다.
+
+        top 카메라를 이 도구가 잡으므로 롤아웃과 동시에 뜨면 "Device or resource
+        busy"가 난다. 그래서 시도가 끝나고 기록까지 마친 뒤에만 띄우고, 도구가
+        살아 있는 동안 [시작]을 잠근다(_set_phase). 창을 닫으면 자동으로 풀린다.
+        """
+        if not self.args.align_cmd or self.align_proc is not None:
+            return
+        try:
+            self.align_proc = subprocess.Popen(
+                shlex.split(self.args.align_cmd), start_new_session=True
+            )
+        except Exception as error:
+            self._log(f"[WARN] 정렬 확인 도구 실행 실패: {error}")
+            self.align_proc = None
+            return
+        self._set_phase("idle")   # 잠금 반영
+        self._log("[ALIGN] 정렬 확인 도구를 띄웠습니다 — 닫으면 다음 시도를 시작할 수 있습니다")
+        self._set_status("정렬 확인 중 — 도구 창을 닫으면 [시작]이 열립니다")
 
     def on_close(self) -> None:
+        if self.align_proc is not None and self.align_proc.poll() is None:
+            with contextlib.suppress(Exception):
+                self.align_proc.terminate()
         if self.rollout.running():
             if not messagebox.askyesno("세션 종료", "롤아웃이 돌고 있습니다. 중단하고 종료할까요?"):
                 return
@@ -424,6 +454,13 @@ class EvalSession(tk.Tk):
                 self.parked_at = time.monotonic()
                 self._log(f"[CUTOFF] 로봇 단계 종료 — 후처리에는 "
                           f"{self.POST_PARK_TIMEOUT_S:g}초까지 기다립니다")
+
+        # 정렬 확인 도구가 닫혔으면 [시작] 잠금을 푼다.
+        if self.align_proc is not None and self.align_proc.poll() is not None:
+            self.align_proc = None
+            self._set_phase(self.phase)
+            self._log("[ALIGN] 정렬 확인 완료 — [시작]으로 다음 시도")
+            self._set_status("정렬 확인 완료 — [시작]으로 다음 시도")
 
         if self.phase == "running":
             elapsed = time.monotonic() - (self.started_at or time.monotonic())
@@ -592,6 +629,10 @@ def main(argv=None) -> int:
                    help="로봇 없이 UI 점검. 기존 에피소드를 롤아웃 결과처럼 순서대로 먹인다")
     p.add_argument("--out-dir", type=Path, default=None,
                    help="기본값 evaluation/<MMDD>_<model>_<condition> (리포 최상단)")
+    p.add_argument("--align-cmd", default=None,
+                   help="시도 확인 직후 띄울 정렬 확인 명령. 이 도구가 top 카메라를 "
+                        "잡으므로 창을 닫을 때까지 [시작]이 잠긴다. 예: "
+                        "'python scripts/tools/block_alignment_tool.py --shape-zones 135'")
     p.add_argument("--board", type=int, nargs=4, default=list(E.M.DEFAULT_BOARD))
     p.add_argument(
         "--exclude", action="append", default=None,

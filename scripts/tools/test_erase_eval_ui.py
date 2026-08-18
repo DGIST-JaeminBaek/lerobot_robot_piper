@@ -28,7 +28,7 @@ def run(episodes: list[Path], out_dir: Path) -> None:
     args = argparse.Namespace(
         model="testmodel", condition="testcond", target=None, trials=2, cutoff=60.0,
         rollout_cmd=None, watch_dir=None, dry_run=episodes, out_dir=out_dir,
-        board=list(E.M.DEFAULT_BOARD), exclude=E.M.DEFAULT_EXCLUDE, dark_ratio=0.72, fps=30.0,
+        board=list(E.M.DEFAULT_BOARD), align_cmd=None, exclude=E.M.DEFAULT_EXCLUDE, dark_ratio=0.72, fps=30.0,
     )
     app = U.EvalSession(args)
     app.withdraw()
