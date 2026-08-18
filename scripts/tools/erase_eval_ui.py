@@ -204,6 +204,7 @@ class EvalSession(tk.Tk):
         self.phase = "idle"
         self.score_q: queue.Queue[dict] = queue.Queue()
         self.started_at: float | None = None
+        self.robot_parked = False  # 이번 시도에서 [DISCONNECT] 로그를 봤는지 (_tick 참고)
         self.aborted = False
 
         self.failure = tk.StringVar(value="")
@@ -335,6 +336,7 @@ class EvalSession(tk.Tk):
             self._log("시작할 수 없습니다")
             return
         self.aborted = False
+        self.robot_parked = False
         self.started_at = time.monotonic()
         self._set_phase("running")
         self.headline.configure(text="롤아웃 진행 중…")
@@ -399,14 +401,25 @@ class EvalSession(tk.Tk):
     def _tick(self) -> None:
         while True:
             try:
-                self._log(self.rollout.log.get_nowait())
+                line = self.rollout.log.get_nowait()
             except queue.Empty:
                 break
+            self._log(line)
+            if "[DISCONNECT]" in line:
+                # 로봇이 이미 파킹까지 끝났다는 뜻이다(piper_infer_runner가 disconnect
+                # 직전에 찍는 로그). 이 시점부터 남은 건 영상 인코딩 같은 후처리뿐이라
+                # 컷오프로 더 끊을 이유가 없다 — 오히려 위험하다. 컷오프는 os.killpg로
+                # 프로세스 그룹 전체에 SIGINT를 보내는데, 인코딩 워커도 같은 그룹이라
+                # 인코딩 도중 죽이면 녹화 자체가 날아간다(2026-08-18 실물: 파킹은
+                # 제때 갔는데 그 뒤 인코딩이 컷오프에 죽어 'top 영상 없음'으로
+                # 채점 실패). 로봇 안전 목적은 파킹으로 이미 달성됐으니 여기서부턴
+                # 컷오프를 꺼도 된다.
+                self.robot_parked = True
 
         if self.phase == "running":
             elapsed = time.monotonic() - (self.started_at or time.monotonic())
             self.clock.configure(text=f"{elapsed:5.1f}s")
-            if self.args.cutoff and elapsed >= self.args.cutoff:
+            if self.args.cutoff and elapsed >= self.args.cutoff and not self.robot_parked:
                 self._log(f"[CUTOFF] {self.args.cutoff:g}초 초과 — 중단합니다")
                 self.rollout.stop("컷오프")
             if not self.rollout.running():
