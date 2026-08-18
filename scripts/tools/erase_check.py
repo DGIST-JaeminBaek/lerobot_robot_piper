@@ -68,7 +68,7 @@ class EraseChecker:
         sub = frame[y : y + h, x : x + w]
         g = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
         sat = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)[:, :, 1]
-        return float(((g < ink_thr) & (sat <= M.MAX_SAT)).mean())
+        return float(((g < ink_thr) & (sat <= M.INK_MAX_SAT)).mean())
 
     def check(self, frame, target):
         """시도 후 프레임으로 판정. target은 'circle'/'triangle'/'rectangle'."""

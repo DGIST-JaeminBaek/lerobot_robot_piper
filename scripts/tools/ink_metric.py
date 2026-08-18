@@ -33,7 +33,19 @@ DEFAULT_BOARD = (228, 0, 515, 720)
 MIN_SHAPE_AREA = 2000  # bbox 면적 하한 (먼지·자국 제거)
 MAX_ASPECT = 4.0  # 보드 테두리·케이블 같은 길쭉한 것 제외
 MAX_SPAN = 0.7  # 보드 한 변의 이 비율을 넘게 뻗으면 도형이 아님
-MAX_SAT = 25  # 평균 채도 상한 — 나무 지우개 블록(≈45)은 걸러지고 검은 마커(≈10)는 통과
+MAX_SAT = 25  # 도형 판정용 상한 — contour bbox의 **평균** 채도. 나무 블록(평균 84)은
+# 걸러지고 마커 도형(선+배경 평균이라 낮음)은 통과한다. 여기는 25로 충분하다.
+#
+# 픽셀 단위 잉크 계산에는 이 값을 쓰면 안 된다. 진한 마커 선은 픽셀 경계의 색수차로
+# 채도가 26~49까지 올라가는데(실측 중앙값 26 — 25 바로 위), 지우개로 문질러 흐려진
+# 잔여물은 채도가 낮아 전부 통과한다. 그래서 25로 자르면 **분모(지우기 전)만 절반으로
+# 깎이고 분자(지운 후)는 그대로** 남아 "덜 지웠다"로 심하게 편향된다.
+# 실측 2026-08-18: 실제 91.8% 지운 롤아웃이 77.8%로 채점됐다(BEFORE 550px 중 269px만
+# 통과, AFTER는 80px 전부 통과). 시연 데이터에서도 마커 선 통과율이 27~91%로 들쭉날쭉했다.
+#
+# 45면 마커는 99~100% 살리면서(시연 6개 89~100%) 나무 블록은 12%만 통과한다 —
+# 나무는 채도 p10=39/중앙값 84라 대부분 걸린다.
+INK_MAX_SAT = 45
 MERGE_GAP = 30  # 이 픽셀 이내로 붙어있는 조각은 한 도형으로 병합 (도형 간 간격은 100px 이상)
 BORDER_MARGIN = 3  # 보드 오른쪽 경계에 이만큼 이내로 닿은 덩어리는 로봇 팔로 본다 (아래 참고)
 OCCLUDER_KERNEL = 11  # 이 크기로 opening해서 남는 어두운 덩어리 = 팔·그리퍼 (얇은 잉크 획은 사라짐)
@@ -296,7 +308,7 @@ def track(video, board, dark_ratio, occl_jump=OCCL_JUMP, exclude=None):
                 dark.astype(np.uint8), cv2.MORPH_OPEN,
                 np.ones((ARM_KERNEL, ARM_KERNEL), np.uint8),
             ).astype(bool)
-            ink[lbl].append(float((dark & (sat <= MAX_SAT) & ~blob).mean()))
+            ink[lbl].append(float((dark & (sat <= INK_MAX_SAT) & ~blob).mean()))
             nw = float((g < white_thr).mean())
             base_nonwhite.setdefault(lbl, nw)
             occ[lbl].append(nw > base_nonwhite[lbl] + occl_jump)
@@ -332,7 +344,7 @@ def dense_progress(video, board, dark_ratio=0.72, min_visible=MIN_VISIBLE, exclu
             dark = g < ink_thr
             # 얇은 잉크 획은 opening으로 사라지고 팔·그리퍼 같은 굵은 덩어리만 남는다
             blob = cv2.morphologyEx(dark.astype(np.uint8), cv2.MORPH_OPEN, kernel).astype(bool)
-            visible = ~(blob | (sat > MAX_SAT))
+            visible = ~(blob | (sat > INK_MAX_SAT))
             n_vis = int(visible.sum())
             dens[lbl].append(float((dark & visible).sum() / n_vis) if n_vis else 0.0)
             valid[lbl].append(float(visible.mean()) >= min_visible)
@@ -420,7 +432,7 @@ def residual(frame, box, ink_thr, grid=3):
     #   지우개를 삼각형 위에 올려놓고 끝냈고, 그 프레임에서 잔여 잉크가 기준(3.4%)보다
     #   많은 15.2%로 나왔다 — 블록을 잉크로 센 것이다. 검은 마커는 채도 ≈10이라
     #   안 걸린다.
-    chromatic = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)[:, :, 1] > MAX_SAT
+    chromatic = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)[:, :, 1] > INK_MAX_SAT
     mask = (g < ink_thr) & ~chromatic
     n = int(mask.sum())
     if n == 0:
@@ -478,7 +490,7 @@ def ink_in_boxes(frame, boxes, board, dark_ratio, exclude=None):
             return None
         g = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
         sat = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)[:, :, 1]
-        total += float(((g < thr) & (sat <= MAX_SAT)).mean())
+        total += float(((g < thr) & (sat <= INK_MAX_SAT)).mean())
     return total
 
 
