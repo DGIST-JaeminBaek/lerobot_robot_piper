@@ -431,7 +431,10 @@ def main():
     p.add_argument("--max-steps", type=int, default=1410,
                    help="시도당 상한 (시연 중앙값 720의 약 2배). 예전 기본값은 940")
     p.add_argument("--max-attempts", type=int, default=3)
-    p.add_argument("--vcodec", default="auto",
+    p.add_argument("--no-judge-frame-in-video", dest="judge_frame_in_video",
+                   action="store_false", default=True,
+                   help="파킹 후 판정 프레임을 영상 마지막에 넣지 않는다(예전 동작)")
+    p.add_argument("--vcodec", default="h264",
                    help="녹화 영상 인코더. auto=nvenc(GPU) 자동 선택, libsvtav1=CPU")
     p.add_argument("--stop-on-release", action="store_true",
                    help="지우개를 놓으면 그 시도를 즉시 끊고 파킹한다 (러너로 전달). "
@@ -544,6 +547,7 @@ def main():
         max_steps=args.max_steps,
         stop_on_release=args.stop_on_release,
         vcodec=args.vcodec,
+        judge_frame_in_video=args.judge_frame_in_video,
         rviz=args.rviz,
         park_on_exit=True,          # 시도 끝 park는 러너가 강제한다
         crops=resolve_crops({}, args.top_crop, args.wrist_crop or None),

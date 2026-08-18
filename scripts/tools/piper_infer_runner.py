@@ -528,6 +528,11 @@ class RunSettings:
     # PyAV로 우회해야 했고, cv2에 AV1을 넘기면 간헐적으로 프로세스가 죽었다
     # (2026-08-18 평가 GUI Segmentation fault). h264는 cv2가 그냥 읽는다.
     vcodec: str = "h264"
+    # 파킹이 끝난 뒤(팔이 빠진 뒤) 판정용 프레임을 한 장 더 녹화해서 영상의
+    # **마지막 프레임**으로 남긴다. --stop-on-release는 "놓는 순간" 녹화를 끊으므로
+    # 그냥 두면 마지막 프레임에 팔이 보드 앞에 있어서 최종 상태를 볼 수 없다.
+    judge_frame_in_video: bool = True
+    judge_frame_settle_s: float = 1.0  # 파킹 후 팔이 멎고 노출이 안정될 시간
     loop_dataset: bool = False
     rviz: bool = True
     joint_state_topic: str = "/joint_states"
@@ -1400,6 +1405,48 @@ class InferenceRunner(threading.Thread):
                         self._log("[ROBOT] MIT 해제 — 위치 제어로 복귀")
                 except BaseException as error:
                     self._log(f"[WARN] MIT 해제 실패: {error}")
+
+                # 파킹까지 마친 뒤 판정 프레임을 한 장 더 녹화한다 — 이게 영상의
+                # 마지막 프레임이 된다. disconnect()가 카메라까지 닫으므로 반드시
+                # 그 "전에" 찍어야 하고, 팔이 빠진 뒤여야 하므로 parking()을 먼저
+                # 명시적으로 부른다(뒤의 disconnect(park=True)는 이미 park 자세라
+                # 사실상 무동작이다).
+                if (recorder is not None
+                        # 이미 쌓인 프레임이 있을 때만 붙인다 — 0이면 판정 프레임
+                        # 하나짜리 가짜 에피소드가 생긴다.
+                        and recorder.frames_written > 0
+                        and settings.judge_frame_in_video
+                        and settings.source == "robot"
+                        and getattr(robot, "is_connected", False)
+                        and not robot.safety_tripped):
+                    try:
+                        robot.parking()
+                        time.sleep(settings.judge_frame_settle_s)
+                        live = robot.get_observation()
+                        # 크롭본으로 녹화 중이면 판정 프레임도 같은 형태여야 한다 —
+                        # 모양이 다르면 데이터셋이 깨진다. state는 이 관측에서 다시
+                        # 읽는다(파킹으로 관절이 움직였으니 루프의 마지막 값이 아니다).
+                        pre = preprocess_live_camera_observation(
+                            live, camera_keys, settings.crops,
+                            settings.camera_output_size,
+                        )
+                        source_images = live if settings.record_raw_frames else pre
+                        judge_images = {
+                            k.removeprefix("observation.images."): np.asarray(
+                                source_images[k.removeprefix("observation.images.")]
+                            ).copy()
+                            for k in camera_keys
+                        }
+                        judge_state = state_from_raw_observation(pre, dataset.features)
+                        # action은 "이 프레임에서 새로 낸 명령"이 아니라 파킹 자세다.
+                        # 정책 출력으로 오해되지 않게 state와 같은 값을 넣는다.
+                        recorder.add_frame(state=judge_state, action=judge_state,
+                                           images=judge_images)
+                        recorder.drain()
+                        self._log("[RECORD] 판정 프레임(파킹 후)을 영상 마지막에 추가했다")
+                    except BaseException as error:
+                        self._log(f"[WARN] 판정 프레임 녹화 실패: {error}")
+
                 try:
                     if getattr(robot, "is_connected", False):
                         park = self.settings.park_on_exit and not robot.safety_tripped
@@ -2121,6 +2168,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--horizon", type=int, default=50)
     parser.add_argument("--max-steps", type=int, default=0)
+    parser.add_argument("--no-judge-frame-in-video", dest="judge_frame_in_video",
+                        action="store_false", default=True,
+                        help="파킹 후 판정 프레임을 영상 마지막에 넣지 않는다(예전 동작)")
     parser.add_argument("--vcodec", default="h264",
                         help="녹화 영상 인코더. 기본 h264(cv2가 읽을 수 있고 제일 빠름). "
                              "GPU를 쓰려면 h264_nvenc/auto, 예전 동작은 libsvtav1")
@@ -2277,6 +2327,7 @@ def settings_from_args(args: argparse.Namespace) -> RunSettings:
         "max_steps": args.max_steps,
         "stop_on_release": args.stop_on_release,
         "vcodec": args.vcodec,
+        "judge_frame_in_video": args.judge_frame_in_video,
         "loop_dataset": args.loop_dataset,
         "rviz": args.rviz,
         "joint_state_topic": args.joint_state_topic,
