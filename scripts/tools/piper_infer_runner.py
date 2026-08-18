@@ -1332,16 +1332,27 @@ class InferenceRunner(threading.Thread):
                 self._infer_thread.join(timeout=10)
             # 키 리스너와 리더는 로봇보다 먼저 놓는다 — park 중에 space가 눌려
             # 개입 상태로 바뀌어도 반영될 곳이 없어야 한다.
+            #
+            # ★ 아래 전부 Exception이 아니라 BaseException으로 잡는다. KeyboardInterrupt는
+            # Exception의 자식이 아니라서(BaseException 직계) suppress(Exception)이
+            # 그냥 통과시킨다 — finally 블록 "안"에서 예외가 새면 그 지점 이후 나머지
+            # 문장(특히 아래의 robot.disconnect()=파킹+카메라 해제)이 통째로 스킵된다.
+            # 실물에서 겪었다(2026-08-18): GUI 컷오프가 os.killpg로 프로세스 그룹
+            # 전체에 SIGINT를 보내면서 영상 인코딩 워커 프로세스도 같이 죽었고, 그
+            # KeyboardInterrupt가 future.result()를 통해 _finalize_recording()까지
+            # 올라와 suppress(Exception)을 뚫고 나갔다. recorder.close()와
+            # robot.disconnect()가 스킵되면서 (a) parquet이 안 닫히고 (b) 카메라가
+            # 안 풀려서, 다음 판정이 "Device or resource busy"로 죽었다.
             if toggle is not None:
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(BaseException):
                     toggle.stop()
             if mixer is not None:
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(BaseException):
                     mixer.release()
             if leader is not None:
                 try:
                     leader.disconnect()
-                except Exception as error:
+                except BaseException as error:
                     self._log(f"[WARN] 리더 disconnect 실패: {error}")
             if self.intervention_steps:
                 self._log(
@@ -1353,13 +1364,15 @@ class InferenceRunner(threading.Thread):
                         else ""
                     )
                 )
-            if recorder is not None:
-                with contextlib.suppress(Exception):
-                    self._finalize_recording(recorder, status)
-                # 저장/폐기 어느 쪽이든 writer는 닫아야 한다. _finalize_recording이
-                # discard로 일찍 빠져나가도 여기는 지나가도록 밖에 둔다.
-                with contextlib.suppress(Exception):
-                    recorder.close()
+            # ★ 파킹을 녹화 마감(영상 인코딩)보다 먼저 한다. 예전엔 반대 순서였는데,
+            # 인코딩이 수백 프레임이면 수십 초가 걸릴 수 있고 그동안 팔은 멈춘
+            # 자리에 그대로 있었다 — stop_on_release/컷오프로 "끝났다"고 판단해놓고도
+            # 파킹은 한참 뒤에야 실행되는 셈이라 위험하다(2026-08-18 실물 지적).
+            # RolloutRecorder는 root/repo_id/features만 들고 있고 robot·camera 객체를
+            # 참조하지 않는다 — add_frame()은 루프 안에서 이미 다 호출됐고,
+            # 여기서 하는 건 이미 버퍼링된 프레임을 디스크에 마감하는 순수 후처리라
+            # robot.disconnect()보다 먼저든 나중이든 결과가 같다. 그래서 순서만
+            # 바꿔도 안전하다.
             if robot is not None:
                 try:
                     if getattr(robot, "is_connected", False) and self.settings.use_mit:
@@ -1367,17 +1380,25 @@ class InferenceRunner(threading.Thread):
                         robot.config.use_mit_control = False
                         robot.bus.leave_mit_mode()
                         self._log("[ROBOT] MIT 해제 — 위치 제어로 복귀")
-                except Exception as error:
+                except BaseException as error:
                     self._log(f"[WARN] MIT 해제 실패: {error}")
                 try:
                     if getattr(robot, "is_connected", False):
                         park = self.settings.park_on_exit and not robot.safety_tripped
                         self._log(f"[DISCONNECT] park={park}")
                         robot.disconnect(park=park)
-                except Exception as error:
+                except BaseException as error:
                     self._log(f"[WARN] disconnect 실패: {error}")
+            if recorder is not None:
+                with contextlib.suppress(BaseException):
+                    self._finalize_recording(recorder, status)
+                # 저장/폐기 어느 쪽이든 writer는 닫아야 한다. _finalize_recording이
+                # discard로 일찍 빠져나가도 여기는 지나가도록 밖에 둔다.
+                with contextlib.suppress(BaseException):
+                    recorder.close()
             if rviz is not None:
-                rviz.close()
+                with contextlib.suppress(BaseException):
+                    rviz.close()
             self.status = status
             self.events.put((Event.FINISHED, status))
 
