@@ -1184,11 +1184,17 @@ class InferenceRunner(threading.Thread):
                 self.trajectory.append(action.copy())
                 self._rate_adjustments.append(pipeline.last_rate_adjustment)
 
-                # 놓았으면 남은 스텝 예산을 버리고 파킹으로 간다. 정책이 스스로
-                # 끝내지 못해도(CLAUDE.md '마무리 판단 실패') 러너가 끊어준다.
-                # 실측 2026-08-18: 놓기 19.8초인데 max_steps 940을 채우느라 계속 돌았다.
-                if release_detector is not None and release_detector.update(float(action[6])):
-                    self._log(f"[STOP] 지우개를 놓았다 — {step}스텝에서 끊고 파킹한다")
+                # 놓았거나(확실한 release) 굳었으면(놓을지 말지 오가며 관절이 멈춤)
+                # 남은 스텝 예산을 버리고 파킹으로 간다. 정책이 스스로 끝내지
+                # 못해도(CLAUDE.md '마무리 판단 실패') 러너가 끊어준다.
+                # 실측 2026-08-18: 2회차는 놓기 19.8초인데 940스텝을 채우느라
+                # 7.2초를 더 돌았다. 4회차는 아예 확실히 놓지 못하고(19~33 왕복)
+                # 32초를 다 썼다 — release 조건만으로는 이걸 못 잡아서 관절 정지를
+                # 추가했다(JOINT_STALL_EPS 근거는 ReleaseDetector 참고).
+                if release_detector is not None and release_detector.update(
+                    float(action[6]), measured_state[:6]
+                ):
+                    self._log(f"[STOP] 지우개를 놓았거나 정지했다 — {step}스텝에서 끊고 파킹한다")
                     status = "released"
                     break
 
@@ -1881,6 +1887,15 @@ HOLD_TOL = 3.0  # 그 15프레임 동안 값이 이보다 더 흔들리면 파�
 RELEASE_JUMP = 15.0  # 파지 수준에서 이만큼 벌어지면 놓은 것
 RELEASE_HOLD_STEPS = 5  # 그 열린 상태가 이만큼 이어져야 진짜 놓기로 본다
 
+# 파지 이후, 실측 관절(그리퍼 제외 6축)의 3초 롤링평균 변화량이 이 밑으로 떨어지면
+# 정지로 본다. 0804 시연 15개의 "파지~놓기" 작업 구간에서 3초 롤링평균의 최솟값이
+# 가장 낮은 경우도 0.575였다(나머지는 0.78~1.19) — 즉 진짜 작업 중에는 이 값 밑으로
+# 절대 안 떨어진다. 0.45는 그보다 22% 낮게 잡은 여유값이다.
+# 2026-08-18 실물 4회차(그리퍼가 19~33을 오가며 확실히 놓지 못하고 32초를 다 쓴 시도)의
+# 꼬리 구간(마지막 4.7초) 20스텝 블록 평균은 0.29~0.74로 이 문턱 근방/이하였다.
+JOINT_STALL_WINDOW = 90  # 3초 @ 30fps
+JOINT_STALL_EPS = 0.45
+
 
 class ReleaseDetector:
     """그리퍼 명령만 보고 '지우개를 놓았다'를 실시간으로 판정한다.
@@ -1897,15 +1912,26 @@ class ReleaseDetector:
       램프는 같은 창에서 30 넘게 움직인다. 실측 2026-08-18 롤아웃 2회차.
     - 열린 상태가 RELEASE_HOLD_STEPS만큼 이어져야 한다. 한 스텝짜리 튐으로
       실물 시도를 끊어버리면 되돌릴 방법이 없다.
+
+    파지 이후에는 관절 정지도 같이 본다 (update_stall 참고) — "확실히 놓았다"만
+    잡으면, 그리퍼가 열림·닫힘 사이를 오가며 확신 없이 굳어버리는 경우(2026-08-18
+    실물 4회차: 19~33 사이를 오가며 32초를 다 씀)는 못 잡는다. 둘 중 하나만
+    걸려도 끝난 것으로 본다 — update()가 True를 반환하면 즉시 멈춰야 한다.
     """
 
     def __init__(self) -> None:
         self.window: collections.deque[float] = collections.deque(maxlen=HOLD_FRAMES)
         self.hold_level: float | None = None
         self.open_run = 0
+        self.joint_window: collections.deque[float] = collections.deque(maxlen=JOINT_STALL_WINDOW)
+        self._prev_joints: np.ndarray | None = None
 
-    def update(self, grip: float) -> bool:
-        """이번 스텝의 그리퍼 명령을 먹인다. 놓기가 확정되면 True."""
+    def update(self, grip: float, joints: np.ndarray | None = None) -> bool:
+        """이번 스텝의 그리퍼 명령(과 선택적으로 실측 관절)을 먹인다.
+
+        joints는 그리퍼를 뺀 6축 실측 위치다. 넘기면 파지 확정 이후부터 정지
+        판정도 같이 돈다. 놓기 또는 정지, 둘 중 하나라도 확정되면 True.
+        """
         if self.hold_level is None:
             self.window.append(grip)
             if len(self.window) < HOLD_FRAMES:
@@ -1917,8 +1943,19 @@ class ReleaseDetector:
 
         if grip > self.hold_level + RELEASE_JUMP:
             self.open_run += 1
-            return self.open_run >= RELEASE_HOLD_STEPS
-        self.open_run = 0
+            if self.open_run >= RELEASE_HOLD_STEPS:
+                return True
+        else:
+            self.open_run = 0
+
+        if joints is not None:
+            if self._prev_joints is not None:
+                self.joint_window.append(float(np.abs(joints - self._prev_joints).sum()))
+            self._prev_joints = joints.copy()
+            if (len(self.joint_window) == JOINT_STALL_WINDOW
+                    and sum(self.joint_window) / len(self.joint_window) < JOINT_STALL_EPS):
+                return True
+
         return False
 
 
