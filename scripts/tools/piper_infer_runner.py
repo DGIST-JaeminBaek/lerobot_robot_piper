@@ -262,6 +262,7 @@ class RolloutRecorder:
         task: str,
         robot_type: str = "piper_follower",
         max_pending: int = 300,
+        vcodec: str = "h264",
     ) -> None:
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
@@ -291,6 +292,7 @@ class RolloutRecorder:
         self._idle = threading.Condition(self._inflight_lock)
         self._writer_error: str | None = None
         self._stop = threading.Event()
+        # 인코더 선택 근거는 RunSettings.vcodec 주석 참고 (실측으로 h264).
         self.dataset = LeRobotDataset.create(
             repo_id=repo_id,
             fps=fps,
@@ -298,6 +300,7 @@ class RolloutRecorder:
             root=self.root,
             robot_type=robot_type,
             use_videos=True,
+            vcodec=vcodec,
         )
         self._writer = threading.Thread(target=self._writer_loop, name="rollout-writer",
                                         daemon=True)
@@ -376,7 +379,14 @@ class RolloutRecorder:
         if self._dropped:
             print(f"[RECORD] 경고: 큐가 밀려 {self._dropped}프레임을 버렸습니다 "
                   f"— 학습에 쓰기 전에 확인하세요")
-        self.dataset.save_episode()
+        # nvenc를 쓸 때만 순차(같은 프로세스) 인코딩으로 내린다.
+        # lerobot 기본은 ProcessPoolExecutor로 fork해서 카메라별로 병렬 인코딩하는데,
+        # 부모가 이미 CUDA를 잡은 뒤라 fork된 자식에서 cuInit(0)이 실패한다
+        # (CUDA_ERROR_NOT_INITIALIZED) — nvenc가 죽고 폴백이 없어 영상이 아예 안
+        # 생겼다(2026-08-18 실측). 같은 프로세스에서는 nvenc가 정상 동작한다.
+        # CPU 인코더(h264 등)는 이 문제가 없으므로 병렬을 그대로 살린다 —
+        # 실측 660프레임 1280x720 2대: 병렬 1.54s vs 순차 약 3s.
+        self.dataset.save_episode(parallel_encoding="nvenc" not in self.dataset.vcodec)
         self.episodes_written += 1
         # 다음 에피소드를 위해 리셋한다. 수동 녹화는 한 실행에서 구간을 여러 번
         # 끊어 담으므로, 안 지우면 두 번째 에피소드부터 프레임 수가 누적돼
@@ -510,6 +520,14 @@ class RunSettings:
     # 지우개를 놓으면 그 자리에서 끊고 파킹으로 간다. 기본은 꺼둔다 — 실물에서
     # 검증된 기존 거동(스텝 예산을 다 쓰고 끝냄)을 조용히 바꾸지 않기 위해서다.
     stop_on_release: bool = False
+    # 녹화 영상 인코더. 기본 h264(libx264) — 실측으로 고른 값이다.
+    # 660프레임 1280x720 2대 병렬: h264 1.54s / h264_nvenc 1.91s / libsvtav1 1.90s.
+    # 화이트보드 영상은 압축이 잘 돼서 GPU 이득이 없고 오히려 프레임 전송
+    # 오버헤드가 붙는다. 결정적인 건 속도가 아니라 **읽을 수 있느냐**다 —
+    # lerobot 기본 libsvtav1은 AV1이라 이 환경 OpenCV가 못 읽어서 채점기가
+    # PyAV로 우회해야 했고, cv2에 AV1을 넘기면 간헐적으로 프로세스가 죽었다
+    # (2026-08-18 평가 GUI Segmentation fault). h264는 cv2가 그냥 읽는다.
+    vcodec: str = "h264"
     loop_dataset: bool = False
     rviz: bool = True
     joint_state_topic: str = "/joint_states"
@@ -1662,6 +1680,7 @@ class InferenceRunner(threading.Thread):
             fps=int(round(settings.fps)),
             features=features,
             task=task,
+            vcodec=settings.vcodec,
         )
         shapes = ", ".join(f"{k}{v}" for k, v in camera_shapes.items())
         self._log(f"[RECORD] {root} (fps={int(round(settings.fps))}, {shapes})")
@@ -2102,6 +2121,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--horizon", type=int, default=50)
     parser.add_argument("--max-steps", type=int, default=0)
+    parser.add_argument("--vcodec", default="h264",
+                        help="녹화 영상 인코더. 기본 h264(cv2가 읽을 수 있고 제일 빠름). "
+                             "GPU를 쓰려면 h264_nvenc/auto, 예전 동작은 libsvtav1")
     parser.add_argument("--stop-on-release", action="store_true",
                         help="지우개를 놓으면 남은 스텝을 버리고 바로 파킹한다. "
                              "정책이 스스로 끝내지 못해 상한까지 도는 것을 막는다")
@@ -2254,6 +2276,7 @@ def settings_from_args(args: argparse.Namespace) -> RunSettings:
         "horizon": args.horizon,
         "max_steps": args.max_steps,
         "stop_on_release": args.stop_on_release,
+        "vcodec": args.vcodec,
         "loop_dataset": args.loop_dataset,
         "rviz": args.rviz,
         "joint_state_topic": args.joint_state_topic,

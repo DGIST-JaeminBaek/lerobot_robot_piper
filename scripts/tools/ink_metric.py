@@ -195,38 +195,57 @@ def classify(contour):
     return "rectangle" if n <= 4 else "circle"
 
 
+def _video_codec(video):
+    """PyAV로 코덱 이름만 싸게 확인한다(디코딩 안 함). 못 열면 None."""
+    try:
+        import av
+    except ImportError:
+        return None
+    try:
+        with av.open(str(video)) as c:
+            return c.streams.video[0].codec_context.name
+    except Exception:
+        return None
+
+
+# OpenCV가 이 환경에서 실제로 디코딩하는 코덱만 화이트리스트로 둔다.
+# AV1을 cv2에 넘기면 안 된다 — 디코더가 없어서 실패할 뿐 아니라, 하드웨어 디코더를
+# 탐색하는 과정에서 간헐적으로 프로세스가 통째로 죽는다(2026-08-18 실물: 평가 GUI가
+# "Segmentation fault (core dumped)"로 종료). 로그도 프레임마다 av1 경고로 도배된다.
+CV2_CODECS = {"h264", "hevc", "mpeg4", "mjpeg", "vp8", "vp9"}
+
+
 def read_frames(video):
-    """영상을 BGR 프레임으로 훑는다. OpenCV로 못 읽으면 PyAV로 넘어간다.
+    """영상을 BGR 프레임으로 훑는다. 코덱을 먼저 보고 리더를 고른다.
 
-    OpenCV만 쓰면 **실물 롤아웃을 한 건도 채점할 수 없다.** 러너(piper_infer_runner)의
-    증강 녹화는 AV1(SVT-AV1)로 인코딩하는데, 이 환경 OpenCV는 AV1 디코더가 없어서
-    "Missing Sequence Header"만 뱉고 첫 프레임부터 실패한다. 기존 시연 데이터는
-    다른 코덱이라 여태 안 드러났다 (2026-08-18 첫 실물 롤아웃에서 발견).
-
-    PyAV는 libdav1d로 같은 파일을 문제없이 연다 — lerobot도 영상은 PyAV/torchcodec으로
-    읽는다. OpenCV를 먼저 시도하는 이유는 기존 경로의 거동을 그대로 두기 위해서다.
+    러너(piper_infer_runner)의 증강 녹화는 AV1(SVT-AV1)이고 이 환경 OpenCV는 AV1
+    디코더가 없다. 예전엔 일단 cv2로 열어보고 실패하면 PyAV로 넘어갔는데, 그
+    "일단 열어보는" 것 자체가 위험했다(위 CV2_CODECS 주석 참고). 그래서 지금은
+    PyAV로 코덱 이름만 확인한 뒤 cv2가 확실히 읽는 코덱일 때만 cv2를 쓴다.
+    기존 시연 데이터는 hevc라 그대로 cv2 경로를 탄다.
     """
+    codec = _video_codec(video)
+    if codec is None or codec not in CV2_CODECS:
+        try:
+            import av
+        except ImportError:
+            raise RuntimeError(
+                f"영상을 읽을 수 없다: {video} (코덱={codec}). OpenCV가 못 읽는 "
+                f"코덱인데 PyAV도 없다 — pip install av"
+            ) from None
+        with av.open(str(video)) as container:
+            for f in container.decode(video=0):
+                yield f.to_ndarray(format="bgr24")
+        return
+
     cap = cv2.VideoCapture(str(video))
-    ok, frame = cap.read()
-    if ok:
+    try:
+        ok, frame = cap.read()
         while ok:
             yield frame
             ok, frame = cap.read()
+    finally:
         cap.release()
-        return
-    cap.release()
-
-    try:
-        import av
-    except ImportError as e:  # noqa: F841
-        raise RuntimeError(
-            f"영상 첫 프레임 읽기 실패(OpenCV): {video}. AV1 등 OpenCV가 못 읽는 "
-            f"코덱일 수 있는데 PyAV도 없어서 대체 경로를 못 쓴다 — pip install av"
-        ) from None
-
-    with av.open(str(video)) as container:
-        for f in container.decode(video=0):
-            yield f.to_ndarray(format="bgr24")
 
 
 def _first_and_rest(video):
