@@ -359,15 +359,32 @@ def read_gripper(ep_dir: Path) -> np.ndarray | None:
     hits = sorted(ep_dir.glob("data/**/*.parquet"))
     if not hits:
         return None
+    # 조용히 None을 내면 안 된다. 그리퍼를 못 읽으면 종료 사유가 전부 unknown(no_log)이
+    # 되고 premature_release 판정이 통째로 죽는데, 예전엔 그 이유가 어디에도 안 남아서
+    # "환경을 잘못 잡았다"와 "로그가 원래 없다"를 구분할 수 없었다. 실제로 pyarrow 없는
+    # 인터프리터로 30개를 채점하고 나서야 알아챘다.
     try:
         import pyarrow.parquet as pq
     except ImportError:
+        _warn_once("pyarrow가 없어 그리퍼 로그를 못 읽는다 — 종료 사유·premature_release "
+                   "판정이 전부 비활성된다. 프로젝트 환경(conda activate ugrp)에서 돌릴 것.")
         return None
     try:
         table = pq.read_table(hits[0], columns=["action"])
         return np.asarray(table["action"].to_pylist(), dtype=np.float32)[:, 6]
-    except Exception:
+    except Exception as e:
+        _warn_once(f"그리퍼 로그 읽기 실패({type(e).__name__}: {e}) — 종료 사유 판정 비활성")
         return None
+
+
+_WARNED: set[str] = set()
+
+
+def _warn_once(msg: str) -> None:
+    """에피소드마다 같은 경고를 수십 번 쏟지 않게 한 번만 낸다."""
+    if msg not in _WARNED:
+        _WARNED.add(msg)
+        print(f"[경고] {msg}", file=sys.stderr)
 
 
 # ═══════════════════════════════════════════════════════════════════

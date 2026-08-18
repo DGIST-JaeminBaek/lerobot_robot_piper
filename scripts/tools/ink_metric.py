@@ -34,6 +34,7 @@ MAX_ASPECT = 4.0  # 보드 테두리·케이블 같은 길쭉한 것 제외
 MAX_SPAN = 0.7  # 보드 한 변의 이 비율을 넘게 뻗으면 도형이 아님
 MAX_SAT = 25  # 평균 채도 상한 — 나무 지우개 블록(≈45)은 걸러지고 검은 마커(≈10)는 통과
 MERGE_GAP = 30  # 이 픽셀 이내로 붙어있는 조각은 한 도형으로 병합 (도형 간 간격은 100px 이상)
+BORDER_MARGIN = 3  # 보드 오른쪽 경계에 이만큼 이내로 닿은 덩어리는 로봇 팔로 본다 (아래 참고)
 OCCLUDER_KERNEL = 11  # 이 크기로 opening해서 남는 어두운 덩어리 = 팔·그리퍼 (얇은 잉크 획은 사라짐)
 OCCL_JUMP = 0.15  # 비-흰색 비율이 이만큼 급증하면 가림 (판정용 track에서 사용)
 MIN_VISIBLE = 0.70  # dense_progress: 도형 영역이 이만큼 안 보이면 그 프레임은 측정 불가
@@ -64,7 +65,23 @@ def detect_shapes(frame, board, dark_ratio):
         x, y, w, h = cv2.boundingRect(c)
         return float(sat[y : y + h, x : x + w].mean()) <= MAX_SAT
 
-    contours = merge_nearby([c for c in contours if achromatic(c)])
+    # 로봇 팔·그리퍼는 검은 무채색이라 채도 필터에 안 걸린다. 대신 위치로 가른다 —
+    # 팔은 화면 오른쪽 로봇 몸체와 이어져 있어서 그 덩어리가 **보드 오른쪽 경계에
+    # 반드시 닿는다**. 손으로 그린 도형은 보드 안에 갇혀 있다.
+    #
+    # 보드 폭을 줄여서 팔을 잘라내는 방법은 못 쓴다. 실측(6개 데이터셋 첫 프레임)에서
+    # 팔은 보드 로컬 x=405부터 파고드는데 실제 도형은 x+w=465까지 뻗어서 구간이 겹친다.
+    # 폭으로 자르면 0813 같은 데이터의 진짜 도형이 잘린다.
+    #
+    # 병합 "전에" 버려야 한다. 팔과 도형이 MERGE_GAP(30px) 안으로 붙는 경우가 있어서
+    # (0804: 팔 x=420 / 도형 x+w=413) 나중에 버리면 둘이 한 덩어리로 묶여버린다.
+    def not_arm(c):
+        x, y, w, h = cv2.boundingRect(c)
+        return x + w < bw - BORDER_MARGIN
+
+    contours = merge_nearby([c for c in contours if achromatic(c) and not_arm(c)])
+    # 병합 결과가 경계에 닿았다면 놓친 팔 조각이 섞인 것이므로 한 번 더 거른다
+    contours = [c for c in contours if not_arm(c)]
     shapes = []
     for c in contours:
         x, y, w, h = cv2.boundingRect(c)
@@ -434,7 +451,12 @@ def _selftest():
         if i >= 30:
             cv2.circle(f, (100, 100), 40, board_bgr, 8)
         cv2.rectangle(f, (250, 250), (330, 330), ink_bgr, 3)  # distractor: 그대로
+        # distractor 2 — 도형이 3개일 때도 전부 잡히는지 (같은 종류 중복은 label#i로 갈린다)
+        cv2.polylines(f, [np.array([[290, 70], [250, 140], [330, 140]])], True, ink_bgr, 3)
         cv2.rectangle(f, (60, 250), (150, 330), wood_bgr, -1)  # 나무 지우개 블록: 검출되면 안 됨
+        # 로봇 팔 — 보드 오른쪽 경계에 닿은 검은 덩어리. 무채색이라 채도 필터엔 안 걸리고
+        # 면적·종횡비도 도형 조건을 통과한다. BORDER_MARGIN 규칙으로만 걸러진다.
+        f[150:280, 360:400] = 40
         if 20 <= i < 25:
             f[40:160, 40:160] = 40  # 팔이 target을 통째로 가림
         if 10 <= i < 15:
@@ -445,7 +467,8 @@ def _selftest():
     board = (0, 0, 400, 400)
     shapes, ink, occ = track(vid, board, 0.72)
     labels = sorted(k.split("#")[0] for k, _ in shapes)
-    assert labels == ["circle", "rectangle"], f"도형 검출/분류 오류: {labels}"
+    # 팔이 섞였으면 4개가 되고, 팔이 도형과 병합됐으면 3개 미만이거나 분류가 깨진다
+    assert labels == ["circle", "rectangle", "triangle"], f"도형 검출/분류 오류: {labels}"
     per_shape = summarize(ink, occ)
     assert occ["circle#0"][22] and not occ["circle#0"][5], "가림 판정 오류"
     c, r = aggregate(per_shape, "circle"), aggregate(per_shape, "rectangle")
