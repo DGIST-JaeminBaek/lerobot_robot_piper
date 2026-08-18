@@ -42,6 +42,7 @@ import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
+from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -67,6 +68,15 @@ FAILURE_LABELS = {
     "repetition_loop": "6 같은 곳만 반복",
     "incomplete_erase": "7 그 외 미완료",
 }
+DETAIL_ROWS = [
+    ("erased_target", "지움(target)"),
+    ("erased_distractor", "지움(distractor)"),
+    ("t", "t@50 / t@90"),
+    ("grip", "파지 / 놓기"),
+    ("termination", "종료 사유"),
+    ("stall", "정체 / 회복"),
+    ("occluded", "가림 비율"),
+]
 STAGE_LABELS = {
     "approach": "1 접근(파지)",
     "contact": "2 접촉",
@@ -74,6 +84,23 @@ STAGE_LABELS = {
     "complete": "4 실질 완료",
     "selective": "5 선택성 유지",
 }
+
+
+def _font(base: str, size: int, bold: bool = False) -> tkfont.Font:
+    """명명 폰트(TkDefaultFont/TkFixedFont)를 크기만 바꿔 복제한다.
+
+    ("TkDefaultFont", 12, "bold")처럼 튜플의 **가족 이름 자리**에 명명 폰트를 넣으면
+    안 된다. Tk는 "TkDefaultFont"를 실제 폰트 가족으로 찾다가 실패하고 한글 글리프가
+    없는 폰트로 떨어져서, 해당 라벨이 통째로 □로 나온다. 폰트를 지정하지 않은 위젯만
+    멀쩡했던 게 그 증거였다 (2026-08-18 실물 캡처에서 발견).
+
+    이 환경의 Tk는 Xft 없이 X 코어 폰트 20개만 본다 — Noto CJK가 목록에 아예 없어서
+    폴백이 곧 한글 손실이다. 그래서 "한글 되는 가족을 직접 지정"하는 해법도 못 쓴다.
+    명명 폰트를 복제하면 Tk가 잡아둔 폴백 사슬이 그대로 유지된다.
+    """
+    f = tkfont.nametofont(base).copy()
+    f.configure(size=size, weight="bold" if bold else "normal")
+    return f
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -193,11 +220,11 @@ class EvalSession(tk.Tk):
         ttk.Label(
             top,
             text=f"{self.args.model or '?'} / {self.args.condition or '?'} · {mode}",
-            font=("TkDefaultFont", 12, "bold"),
+            font=_font("TkDefaultFont", 12, True),
         ).pack(side="left")
-        self.trial_label = ttk.Label(top, text="", font=("TkDefaultFont", 12))
+        self.trial_label = ttk.Label(top, text="", font=_font("TkDefaultFont", 12))
         self.trial_label.pack(side="left", padx=16)
-        self.clock = ttk.Label(top, text="", font=("TkDefaultFont", 12))
+        self.clock = ttk.Label(top, text="", font=_font("TkDefaultFont", 12))
         self.clock.pack(side="right")
 
         warn = ttk.Frame(self, padding=(10, 0))
@@ -223,12 +250,27 @@ class EvalSession(tk.Tk):
         # 왼쪽: 점수판
         left = ttk.LabelFrame(body, text="이번 시도 결과", padding=10)
         left.pack(side="left", fill="both", expand=True)
-        self.headline = ttk.Label(left, text="아직 시도 없음", font=("TkDefaultFont", 20, "bold"))
+        self.headline = ttk.Label(left, text="아직 시도 없음", font=_font("TkDefaultFont", 20, True))
         self.headline.pack(anchor="w")
-        self.detail = ttk.Label(left, text="", justify="left", font=("TkFixedFont", 11))
-        self.detail.pack(anchor="w", pady=(8, 10))
+        # 여러 줄을 라벨 하나에 담지 않는다. 이 환경의 Tk는 한글을 폴백 폰트로 그리는데
+        # 줄 간격은 기본 폰트의 linespace(13px)로 잡혀서, 한글이 섞인 줄이 위아래로
+        # 겹쳐 읽을 수 없게 된다 (2026-08-18 실물 캡처에서 발견). 한 줄짜리 라벨은
+        # 각자 자기 높이를 요구하므로 겹치지 않는다 → 이름/값 2열 그리드로 쪼갠다.
+        # 공백으로 열을 맞추던 것도 같이 없어져서 폭 계산에 기대지 않게 된다.
+        self.detail = ttk.Frame(left)
+        self.detail.pack(anchor="w", pady=(8, 10), fill="x")
+        self._detail_vals: dict[str, ttk.Label] = {}
+        for i, (key, label) in enumerate(DETAIL_ROWS):
+            ttk.Label(self.detail, text=label, font=_font("TkDefaultFont", 11)).grid(
+                row=i, column=0, sticky="w", padx=(0, 16))
+            val = ttk.Label(self.detail, text="", font=_font("TkFixedFont", 11))
+            val.grid(row=i, column=1, sticky="w")
+            self._detail_vals[key] = val
+        self.detail_note = ttk.Label(self.detail, text="", font=_font("TkDefaultFont", 11),
+                                     wraplength=480, justify="left")
+        self.detail_note.grid(row=len(DETAIL_ROWS), column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        ttk.Label(left, text="단계", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Label(left, text="단계", font=_font("TkDefaultFont", 11, True)).pack(anchor="w")
         self.stage_labels: dict[str, ttk.Label] = {}
         for key, caption in STAGE_LABELS.items():
             lab = ttk.Label(left, text=f"· {caption}")
@@ -237,7 +279,7 @@ class EvalSession(tk.Tk):
 
         ttk.Separator(left).pack(fill="x", pady=10)
         ttk.Label(left, text="실패 유형 (자동 판정 — 틀렸으면 고치세요)",
-                  font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+                  font=_font("TkDefaultFont", 11, True)).pack(anchor="w")
         for mode in FAILURE_MODES:
             ttk.Radiobutton(left, text=FAILURE_LABELS[mode], value=mode,
                             variable=self.failure).pack(anchor="w")
@@ -255,10 +297,10 @@ class EvalSession(tk.Tk):
         # 오른쪽: 로그 + 지금까지 기록
         right = ttk.Frame(body)
         right.pack(side="left", fill="both", expand=True, padx=(10, 0))
-        ttk.Label(right, text="롤아웃 로그", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        self.logbox = tk.Text(right, height=16, width=60, font=("TkFixedFont", 10))
+        ttk.Label(right, text="롤아웃 로그", font=_font("TkDefaultFont", 11, True)).pack(anchor="w")
+        self.logbox = tk.Text(right, height=16, width=60, font=_font("TkFixedFont", 10))
         self.logbox.pack(fill="both", expand=True)
-        ttk.Label(right, text="이번 세션 기록", font=("TkDefaultFont", 11, "bold")).pack(anchor="w", pady=(8, 2))
+        ttk.Label(right, text="이번 세션 기록", font=_font("TkDefaultFont", 11, True)).pack(anchor="w", pady=(8, 2))
         self.tree = ttk.Treeview(right, columns=("score", "erased", "term", "fail"),
                                  show="headings", height=10)
         for col, cap, w in (("score", "점수", 60), ("erased", "지움", 70),
@@ -296,7 +338,7 @@ class EvalSession(tk.Tk):
         self.started_at = time.monotonic()
         self._set_phase("running")
         self.headline.configure(text="롤아웃 진행 중…")
-        self.detail.configure(text="")
+        self._clear_detail()
         self._set_status(f"시도 {self.trial} 실행 중")
 
     def on_stop(self) -> None:
@@ -406,7 +448,8 @@ class EvalSession(tk.Tk):
 
         if not row.get("valid"):
             self.headline.configure(text="채점 실패")
-            self.detail.configure(text=row.get("note", ""))
+            self._clear_detail()
+            self.detail_note.configure(text=row.get("note", ""))
             self.valid.set(False)
             self.failure.set("")
         else:
@@ -414,24 +457,22 @@ class EvalSession(tk.Tk):
             self.headline.configure(
                 text=f"{'성공' if ok else '실패'}   {row['score']}/10   진행률 {row['task_progress']:.0f}%"
             )
-            self.detail.configure(
-                text=(
-                    f"지움(target)      {row['erased_target']:.3f}\n"
-                    f"지움(distractor)  {row['erased_distractor']:.3f}\n"
-                    f"t@50 / t@90       {_s(row['t50_s'])} / {_s(row['t90_s'])}\n"
-                    f"파지 / 놓기       {_s(row['grasp_s'])} / {_s(row['release_s'])}\n"
-                    f"종료 사유         {row['termination']}\n"
-                    f"정체 / 회복       {row['stall_events']} / {row['recovered']}"
-                    f"   (사람 시연 기준 정체 2.2건)\n"
-                    f"가림 비율         {row['occluded_frac']}"
-                )
-            )
+            self._set_detail({
+                "erased_target": f"{row['erased_target']:.3f}",
+                "erased_distractor": f"{row['erased_distractor']:.3f}",
+                "t": f"{_s(row['t50_s'])} / {_s(row['t90_s'])}",
+                "grip": f"{_s(row['grasp_s'])} / {_s(row['release_s'])}",
+                "termination": str(row["termination"]),
+                "stall": f"{row['stall_events']} / {row['recovered']}"
+                         f"   (사람 시연 기준 정체 2.2건)",
+                "occluded": str(row["occluded_frac"]),
+            })
             self.valid.set(True)
             self.failure.set(row.get("failure_mode") or "")
 
         for key, lab in self.stage_labels.items():
             got = row.get(f"stage_{key}")
-            mark = "✔" if got else ("✘" if got is not None else "·")
+            mark = "[O]" if got else ("[X]" if got is not None else "[ ]")
             lab.configure(text=f"{mark} {STAGE_LABELS[key]}",
                           foreground="#070" if got else ("#b00" if got is not None else "#666"))
 
@@ -471,9 +512,19 @@ class EvalSession(tk.Tk):
         ]
         return len(same) + 1
 
+    def _set_detail(self, values: dict[str, str]) -> None:
+        for key, lab in self._detail_vals.items():
+            lab.configure(text=values.get(key, ""))
+        self.detail_note.configure(text="")
+
+    def _clear_detail(self) -> None:
+        for lab in self._detail_vals.values():
+            lab.configure(text="")
+        self.detail_note.configure(text="")
+
     def _reset_card(self, message: str) -> None:
         self.headline.configure(text=message)
-        self.detail.configure(text="")
+        self._clear_detail()
         self.note.delete("1.0", "end")
         self.failure.set("")
         self.valid.set(True)

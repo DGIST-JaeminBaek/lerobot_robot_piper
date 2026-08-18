@@ -50,7 +50,10 @@ def run(episodes: list[Path], out_dir: Path) -> None:
     assert app.row is not None, "채점 결과가 안 옴"
     assert app.phase == "review", app.phase
     print("headline:", app.headline.cget("text"))
-    print(app.detail.cget("text"))
+    for key, label in U.DETAIL_ROWS:
+        print(f"  {label:18} {app._detail_vals[key].cget('text')}")
+    # 값이 실제로 채워졌는지 — 빈 칸만 나오면 표시 경로가 끊긴 것이다
+    assert app._detail_vals["termination"].cget("text"), "상세 표에 종료 사유가 안 뜸"
 
     # 사람이 자동 판정을 뒤집는 경로 — 원본이 메모에 남아야 나중에 일치도를 볼 수 있다.
     app.note.insert("1.0", "테스트 메모")
