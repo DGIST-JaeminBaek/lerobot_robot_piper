@@ -749,6 +749,17 @@ def main():
             if record_path and not args.no_save_frames:
                 import cv2
                 cv2.imwrite(str(Path(record_path) / "judge_frame.png"), after_frame)
+                # ★ 기준 프레임도 롤아웃 폴더에 같이 넣는다. erase_check(실시간
+                # 게이트)는 grab_judge_frame()으로 카메라를 직접 찍어 기준을 잡는데,
+                # erase_eval(오프라인 채점기)은 지금까지 녹화 영상의 "첫 프레임"을
+                # 기준으로 썼다 — 둘은 서로 다른 순간·다른 노출로 찍힌 별개의
+                # 사진이라 같은 보드를 보고도 분모(기준 잉크량)가 달라졌다. 실측
+                # 2026-08-18: 실시간 게이트는 77.8% 지움, 나중 오프라인 채점은
+                # 86.4%로 서로 어긋났다(둘 다 같은 최종 프레임을 봤는데도).
+                # reference_frame.png로 저장해두면 erase_eval이 이걸 우선 써서
+                # 둘의 기준이 하나로 합쳐진다 — 실시간에 본 숫자와 나중 채점
+                # 결과가 항상 일치하게 된다.
+                cv2.imwrite(str(Path(record_path) / "reference_frame.png"), ref_frame)
             r = checker.check(after_frame, args.target)
             r["attempt"] = i
             r.update(summary)

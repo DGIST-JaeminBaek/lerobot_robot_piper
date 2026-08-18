@@ -260,6 +260,22 @@ def stall_and_recovery(progress: np.ndarray, valid: np.ndarray) -> dict:
 # ═══════════════════════════════════════════════════════════════════
 # 에피소드 1개 채점
 # ═══════════════════════════════════════════════════════════════════
+def _ink_from_side_frame(ep_dir: Path, filename: str, shapes, target: str,
+                         board, dark_ratio: float, exclude) -> float | None:
+    """ep_dir에 있는 보조 이미지(reference_frame.png/judge_frame.png)로 target
+    bbox의 잉크량을 잰다. 파일이 없거나 target bbox가 없으면 None."""
+    path = ep_dir / filename
+    if not path.exists():
+        return None
+    frame = M.imread(path)
+    if frame is None:
+        return None
+    boxes = [box for k, box in shapes if k.split("#")[0] == target]
+    if not boxes:
+        return None
+    return M.ink_in_boxes(frame, boxes, board, dark_ratio, exclude)
+
+
 def _rescore_from_judge_frame(ep_dir: Path, shapes, target: str, board,
                               dark_ratio: float, exclude) -> dict | None:
     """park 프레임(judge_frame.png)으로 target의 최종 잉크를 다시 잰다.
@@ -270,18 +286,26 @@ def _rescore_from_judge_frame(ep_dir: Path, shapes, target: str, board,
     기준 잉크(ink_init)는 영상 첫 프레임 값을 그대로 두고 분자만 갈아끼운다.
     둘을 같은 자(같은 bbox·같은 임계)로 재야 비율이 의미가 있기 때문이다.
     """
-    path = ep_dir / "judge_frame.png"
-    if not path.exists():
-        return None
-    frame = M.imread(path)
-    if frame is None:
-        return None
-
-    boxes = [box for k, box in shapes if k.split("#")[0] == target]
-    if not boxes:
-        return None
-    total = M.ink_in_boxes(frame, boxes, board, dark_ratio, exclude)
+    total = _ink_from_side_frame(ep_dir, "judge_frame.png", shapes, target,
+                                 board, dark_ratio, exclude)
     return None if total is None else {"ink_final": round(total, 5)}
+
+
+def _rescore_from_reference_frame(ep_dir: Path, shapes, target: str, board,
+                                  dark_ratio: float, exclude) -> dict | None:
+    """erase_check가 실시간 게이트를 잡을 때 쓴 기준 프레임(reference_frame.png)으로
+    target의 기준 잉크(ink_init)를 다시 잰다.
+
+    안 하면 게이트(erase_run 실행 중 화면에 뜨는 %)와 이 채점기의 결과가
+    서로 다른 사진을 기준으로 계산돼 어긋난다 — erase_check는 카메라로 직접
+    찍은 사진을, 이 채점기는 지금까지 녹화 영상의 첫 프레임을 기준으로 썼다.
+    실측 2026-08-18: 같은 최종 상태를 보고도 게이트 77.8% vs 이 채점기 86.4%로
+    갈렸다. reference_frame.png가 있으면 그걸 우선한다 — 둘이 하나의 사진을
+    기준으로 삼게 되어 실행 중 본 숫자와 나중 채점 결과가 항상 일치한다.
+    """
+    total = _ink_from_side_frame(ep_dir, "reference_frame.png", shapes, target,
+                                 board, dark_ratio, exclude)
+    return None if total is None else {"ink_init": round(total, 5)}
 
 
 def score_episode(ep_dir: Path, target: str | None, board, dark_ratio: float, fps: float,
@@ -337,14 +361,27 @@ def score_episode(ep_dir: Path, target: str | None, board, dark_ratio: float, fp
     grip = read_gripper(ep_dir)
     ph = gripper_phases(grip) if grip is not None else {"hold_start": None, "release": None}
 
-    # ── 최종 잉크는 park 프레임으로 다시 잰다 ─────────────
-    # erase_run이 파킹 후(팔이 빠진 뒤) 따로 찍어 넣어준 프레임이 있으면 그걸 쓴다.
-    # 영상 마지막 프레임을 쓰면 안 되는 이유: --stop-on-release는 "놓는 순간"
-    # 녹화를 끝내므로 마지막 프레임엔 팔이 아직 보드 앞에 있다. 실측 2026-08-18에
-    # 실제 92.2% 지운 롤아웃이 65.4%로 채점됐다(러너의 park 판정은 88.7%).
+    # ── 기준·최종 잉크를 게이트가 쓴 실제 사진으로 다시 잰다 ─────
+    # 기준(reference_frame.png)과 최종(judge_frame.png) 둘 다 erase_run이
+    # erase_check(실시간 게이트)와 같은 순간에 찍어 롤아웃 폴더에 넣어준다.
+    # 없으면(과거 데이터·erase_run 없이 만든 롤아웃) 영상 첫/마지막 프레임을
+    # 그대로 쓴다 — 이전 동작과 동일.
+    #
+    # 최종 프레임을 영상 마지막 프레임으로 쓰면 안 되는 이유: --stop-on-release는
+    # "놓는 순간" 녹화를 끝내므로 마지막 프레임엔 팔이 아직 보드 앞에 있다.
+    # 실측 2026-08-18에 실제 92.2% 지운 롤아웃이 65.4%로 채점됐다.
+    #
+    # 기준 프레임을 영상 첫 프레임으로 쓰면 안 되는 이유: erase_check는 카메라로
+    # 따로 찍은 사진을 기준으로 게이트를 판정하는데, 영상 첫 프레임은 그와 다른
+    # 순간·다른 노출로 찍힌 별개의 사진이다. 실측 2026-08-18: 같은 최종 상태를
+    # 보고도 게이트(실행 중 표시) 77.8% vs 이전 채점기 86.4%로 갈렸다.
+    ref_ink = _rescore_from_reference_frame(ep_dir, shapes, target, board, dark_ratio, exclude)
+    if ref_ink is not None:
+        tgt = {**tgt, "ink_init": ref_ink["ink_init"]}
+        row["ink_init_source"] = "reference_frame"
+
     judged = _rescore_from_judge_frame(ep_dir, shapes, target, board, dark_ratio, exclude)
     if judged is not None and tgt.get("ink_init"):
-        # 분모(기준 잉크)는 영상 첫 프레임 값을 그대로 두고 분자만 갈아끼운다.
         # erased_frac이 단계 점수(complete)와 성공 판정을 좌우하므로 같이 갱신한다.
         ink_final = judged["ink_final"]
         tgt = {
@@ -595,7 +632,7 @@ FIELDS = [
     "success", "score", "task_progress",
     "stage_approach", "stage_contact", "stage_start", "stage_complete", "stage_selective",
     "erased_target", "erased_distractor", "selective_erase", "ink_init", "ink_final",
-    "t_contact_s", "t50_s", "t90_s", "auc_progress", "duration_s", "ink_source",
+    "t_contact_s", "t50_s", "t90_s", "auc_progress", "duration_s", "ink_source", "ink_init_source",
     "grasp_s", "release_s", "termination", "failure_mode",
     "stall_events", "recovered", "recovery_rate", "ended_stalled",
     "occluded_frac", "shapes_found", "n_frames", "path",
