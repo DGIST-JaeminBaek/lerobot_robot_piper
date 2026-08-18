@@ -535,11 +535,12 @@ def main(argv=None) -> int:
     p.add_argument("--target", default=None, help="지울 도형. 생략하면 폴더명에서 추론")
     p.add_argument("--board", type=int, nargs=4, default=M.DEFAULT_BOARD, metavar=("X", "Y", "W", "H"))
     p.add_argument(
-        "--exclude", action="append", default=[],
+        "--exclude", action="append", default=None,
         type=lambda s: tuple(int(v) for v in s.split(",")),
         metavar="X,Y,W,H",
         help="이 전역좌표 사각형은 도형 검출에서 뺀다 (ink_metric.py --exclude와 동일, "
-             "여러 번 줄 수 있음). 보드에 눌어붙은 테이프 자국처럼 위치가 고정된 이물질용",
+             f"여러 번 줄 수 있음). 기본값은 보드 테이프 자국 자리({M.DEFAULT_EXCLUDE[0]}) — "
+             "떼어냈으면 --exclude 0,0,0,0으로 비울 것",
     )
     p.add_argument("--dark-ratio", type=float, default=0.72)
     p.add_argument("--fps", type=float, default=30.0)
@@ -550,6 +551,7 @@ def main(argv=None) -> int:
     p.add_argument("--summarize", type=Path, default=None,
                    help="이미 있는 episodes.csv로 요약만 다시 만든다 (손 채점 시트도 그대로 됨)")
     args = p.parse_args(argv)
+    args.exclude = M.resolve_exclude(args.exclude)
 
     if args.selftest:
         _selftest()

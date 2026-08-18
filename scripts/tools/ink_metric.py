@@ -41,6 +41,13 @@ OCCL_JUMP = 0.15  # 비-흰색 비율이 이만큼 급증하면 가림 (판정�
 MIN_VISIBLE = 0.70  # dense_progress: 도형 영역이 이만큼 안 보이면 그 프레임은 측정 불가
 PAD = 12  # 도형 bbox 여유
 
+# 보드에 눌어붙은 변색 테이프+카드 — 위치가 고정된 이물질이라 기본으로 늘 뺀다.
+# 2026-08-18 실물에서 확인: 이 자리와 겹쳐 그려진 도형이 완전히 지워졌는데도
+# rectangle로 오검출되어 '남음'으로 오판했다. 도형이 실제로 이 위치에 그려지면
+# 그 프레임도 같이 안 잡힌다는 뜻이니, 카메라를 옮기거나 이 이물질을 실제로
+# 떼어내면 여기를 비우거나 좌표를 다시 잴 것.
+DEFAULT_EXCLUDE = [(370, 260, 150, 110)]
+
 # 성공 판정 임계 (make_done_labels.py, erase_check.py가 공유)
 SUCCESS_ERASED = 0.9  # target이 이만큼 지워지면 성공
 MAX_DISTRACTOR = 0.10  # distractor를 이만큼 넘게 건드리면 실패.
@@ -433,6 +440,18 @@ def dump_roi(ep_dir, board, dark_ratio, path, exclude=None):
     print(f"검출 {len(shapes)}개 저장: {path}")
 
 
+def resolve_exclude(exclude):
+    """CLI --exclude 값을 실제로 쓸 목록으로 바꾼다.
+
+    안 넘기면(None) DEFAULT_EXCLUDE. --exclude 0,0,0,0을 명시하면(면적 0)
+    "기본 배제를 끄겠다"는 뜻으로 보고 빈 목록을 돌려준다 — 이물질을 실제로
+    떼어냈거나 카메라를 옮겼을 때 쓴다.
+    """
+    if exclude is None:
+        return DEFAULT_EXCLUDE
+    return [z for z in exclude if z[2] > 0 and z[3] > 0]
+
+
 def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("path", help="LeRobotDataset 에피소드 디렉터리 (glob 가능)")
@@ -442,14 +461,15 @@ def main(argv=None):
     p.add_argument("--csv", type=Path)
     p.add_argument("--dump-roi", type=Path, help="첫 에피소드 검출 결과를 그려서 저장 후 종료")
     p.add_argument(
-        "--exclude", action="append", default=[],
+        "--exclude", action="append", default=None,
         type=lambda s: tuple(int(v) for v in s.split(",")),
         metavar="X,Y,W,H",
         help="이 전역좌표 사각형은 도형 검출에서 뺀다 (여러 번 줄 수 있음). "
-             "테이프 자국처럼 위치가 고정된 이물질을 배제할 때 쓴다 — 손으로 그린 "
-             "도형은 매 에피소드 위치가 바뀌므로 배제 대상이 아니다",
+             f"기본값은 보드에 눌어붙은 테이프 자국 자리({DEFAULT_EXCLUDE[0]}) — "
+             "떼어냈거나 카메라를 옮겼으면 --exclude 0,0,0,0으로 비울 것",
     )
     a = p.parse_args(argv)
+    a.exclude = resolve_exclude(a.exclude)
 
     dirs = [Path(d) for d in sorted(glob.glob(a.path)) if Path(d).is_dir()]
     if not dirs:

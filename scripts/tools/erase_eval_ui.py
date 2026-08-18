@@ -432,7 +432,8 @@ class EvalSession(tk.Tk):
         def work():
             try:
                 row = E.score_episode(ep, self.args.target, tuple(self.args.board),
-                                      self.args.dark_ratio, self.args.fps)
+                                      self.args.dark_ratio, self.args.fps,
+                                      exclude=self.args.exclude)
             except Exception as exc:
                 row = {"episode": ep.name, "path": str(ep), "valid": False,
                        "note": f"{type(exc).__name__}: {exc}"}
@@ -564,9 +565,17 @@ def main(argv=None) -> int:
     p.add_argument("--out-dir", type=Path, default=None,
                    help="기본값 evaluation/<MMDD>_<model>_<condition> (리포 최상단)")
     p.add_argument("--board", type=int, nargs=4, default=list(E.M.DEFAULT_BOARD))
+    p.add_argument(
+        "--exclude", action="append", default=None,
+        type=lambda s: tuple(int(v) for v in s.split(",")),
+        metavar="X,Y,W,H",
+        help=f"기본값은 보드 테이프 자국 자리({E.M.DEFAULT_EXCLUDE[0]}) — "
+             "떼어냈으면 --exclude 0,0,0,0으로 비울 것",
+    )
     p.add_argument("--dark-ratio", type=float, default=0.72)
     p.add_argument("--fps", type=float, default=30.0)
     args = p.parse_args(argv)
+    args.exclude = E.M.resolve_exclude(args.exclude)
 
     if args.out_dir is None:
         args.out_dir = E.default_out_dir(args.model, args.condition)
