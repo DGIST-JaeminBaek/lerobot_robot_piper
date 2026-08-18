@@ -213,6 +213,7 @@ class EvalSession(tk.Tk):
         # 시도 사이에 띄우는 정렬 확인 도구(block_alignment_tool). 이게 살아 있는
         # 동안은 top 카메라를 그 도구가 잡고 있으므로 다음 롤아웃을 시작하면 안 된다.
         self.align_proc: subprocess.Popen | None = None
+        self._aligning = False  # 정렬 도구 실행 대기(카메라 해제 시간) 중인지
         self.aborted = False
 
         self.failure = tk.StringVar(value="")
@@ -333,7 +334,7 @@ class EvalSession(tk.Tk):
     # ------------------------------------------------------------- 동작
     def _set_phase(self, phase: str) -> None:
         self.phase = phase
-        can_start = phase == "idle" and self.align_proc is None
+        can_start = phase == "idle" and self.align_proc is None and not getattr(self, "_aligning", False)
         self.btn_start.configure(state="normal" if can_start else "disabled")
         self.btn_stop.configure(state="normal" if phase == "running" else "disabled")
         self.btn_confirm.configure(state="normal" if phase == "review" else "disabled")
@@ -400,15 +401,35 @@ class EvalSession(tk.Tk):
         self._refresh_header()
         self._start_alignment_check()
 
+    # 롤아웃 프로세스가 카메라를 닫고 실제로 나간 뒤에도, RealSense 장치가 USB
+    # 레벨에서 완전히 풀리기까지 시간이 더 걸린다. 이 프로젝트에 이미 근거가
+    # 있다(recording.env REALSENSE_WARMUP_S=3.0, CAMERA_POST_CONNECT_WAIT_S=2.0).
+    # 그 전에 다른 프로세스가 같은 장치를 열면 librealsense가 세그폴트로 죽는다 —
+    # 실물에서 확인함(2026-08-18, 정렬 도구를 확인 직후 즉시 띄우게 했더니 GUI가
+    # "Segmentation fault (core dumped)"로 죽었다). 그래서 즉시 실행하지 않고
+    # ALIGN_LAUNCH_DELAY_MS만큼 늦춘다.
+    ALIGN_LAUNCH_DELAY_MS = 2500
+
     def _start_alignment_check(self) -> None:
         """다음 시도 전에 도형·지우개 위치를 눈으로 확인하는 도구를 띄운다.
 
-        top 카메라를 이 도구가 잡으므로 롤아웃과 동시에 뜨면 "Device or resource
-        busy"가 난다. 그래서 시도가 끝나고 기록까지 마친 뒤에만 띄우고, 도구가
-        살아 있는 동안 [시작]을 잠근다(_set_phase). 창을 닫으면 자동으로 풀린다.
+        top 카메라를 이 도구가 잡으므로 롤아웃과 동시에 뜨면 안 된다. 그래서
+        시도가 끝나고 기록까지 마친 뒤에만 예약하고, 실제 실행은 카메라가 완전히
+        풀릴 시간(ALIGN_LAUNCH_DELAY_MS)을 준 뒤에 한다. [시작]은 그 대기
+        구간부터 이미 잠근다 — 사용자가 그 사이 다음 시도를 눌러 롤아웃과
+        카메라를 다시 경합시키면 안 되기 때문이다.
         """
         if not self.args.align_cmd or self.align_proc is not None:
             return
+        self._aligning = True     # 대기 중에도 [시작]을 잠그기 위한 플래그
+        self._set_phase("idle")
+        self._log(f"[ALIGN] {self.ALIGN_LAUNCH_DELAY_MS/1000:.1f}초 뒤 정렬 확인 도구를 띄웁니다 "
+                  f"— 카메라가 풀릴 시간을 준다")
+        self._set_status("카메라 정리 대기 중…")
+        self.after(self.ALIGN_LAUNCH_DELAY_MS, self._launch_alignment_tool)
+
+    def _launch_alignment_tool(self) -> None:
+        self._aligning = False
         try:
             self.align_proc = subprocess.Popen(
                 shlex.split(self.args.align_cmd), start_new_session=True
@@ -416,8 +437,9 @@ class EvalSession(tk.Tk):
         except Exception as error:
             self._log(f"[WARN] 정렬 확인 도구 실행 실패: {error}")
             self.align_proc = None
+            self._set_phase("idle")
             return
-        self._set_phase("idle")   # 잠금 반영
+        self._set_phase("idle")   # 잠금 유지(align_proc가 안 None이면 계속 잠김)
         self._log("[ALIGN] 정렬 확인 도구를 띄웠습니다 — 닫으면 다음 시도를 시작할 수 있습니다")
         self._set_status("정렬 확인 중 — 도구 창을 닫으면 [시작]이 열립니다")
 
