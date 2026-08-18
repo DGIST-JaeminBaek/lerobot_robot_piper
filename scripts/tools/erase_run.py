@@ -271,6 +271,9 @@ def run_attempt_with_runner(settings, on_log=None, on_step=None,
         "engage_deviation_details": run.engage_deviation_details,
         "measured_fps": round(run.measured_fps(), 2),
         "aborted": run.hil_aborted,
+        # 이번 롤아웃이 기록된 데이터셋 폴더(--mode augment). 파킹 후 판정 프레임을
+        # 여기에 같이 넣어야 채점기가 그걸 쓸 수 있다 (main의 judge_frame.png 참고).
+        "record_path": str(run.recorded_path) if run.recorded_path else None,
         "_steps": steps,
         # ★ 스무딩 이전의 정책 원출력(각 chunk의 첫 스텝). 실물 검증에서
         #   "그리퍼가 시연의 강한 폐합 명령(80~100)을 한 번도 안 낸다"가 나왔는데,
@@ -689,6 +692,17 @@ def main():
                               intervention_steps=summary["interventions"])
             after_frame = grab()
             save_frame(f"{i:02d}_after", after_frame)
+            # ★ 채점기(erase_eval)가 쓸 수 있게 롤아웃 데이터셋 폴더에도 넣는다.
+            # 영상 마지막 프레임으로 최종 잉크를 재면 안 된다 — --stop-on-release를
+            # 켜면 "놓는 순간" 녹화가 끝나므로 마지막 프레임엔 팔이 아직 보드 앞에
+            # 있고, 팔은 검은 무채색이라 채도 필터도 못 걸러 잉크로 세어진다.
+            # 실측 2026-08-18: 실제 92.2% 지웠는데 채점기는 65.4%로 봤다(러너의
+            # park 판정은 88.7%로 정확했다). 이 프레임은 파킹이 끝나고 팔이 빠진
+            # 뒤에 따로 찍은 것이라 그 오차가 없다.
+            record_path = summary.get("record_path")
+            if record_path and not args.no_save_frames:
+                import cv2
+                cv2.imwrite(str(Path(record_path) / "judge_frame.png"), after_frame)
             r = checker.check(after_frame, args.target)
             r["attempt"] = i
             r.update(summary)

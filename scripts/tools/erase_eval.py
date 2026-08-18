@@ -229,6 +229,30 @@ def stall_and_recovery(progress: np.ndarray, valid: np.ndarray) -> dict:
 # ═══════════════════════════════════════════════════════════════════
 # 에피소드 1개 채점
 # ═══════════════════════════════════════════════════════════════════
+def _rescore_from_judge_frame(ep_dir: Path, shapes, target: str, board,
+                              dark_ratio: float, exclude) -> dict | None:
+    """park 프레임(judge_frame.png)으로 target의 최종 잉크를 다시 잰다.
+
+    erase_run이 파킹 후 팔이 빠진 상태에서 따로 찍어 넣어준다. 없으면 None을
+    돌려주고 호출부는 기존(영상 기반) 값을 그대로 쓴다 — 과거 데이터 호환.
+
+    기준 잉크(ink_init)는 영상 첫 프레임 값을 그대로 두고 분자만 갈아끼운다.
+    둘을 같은 자(같은 bbox·같은 임계)로 재야 비율이 의미가 있기 때문이다.
+    """
+    path = ep_dir / "judge_frame.png"
+    if not path.exists():
+        return None
+    frame = M.imread(path)
+    if frame is None:
+        return None
+
+    boxes = [box for k, box in shapes if k.split("#")[0] == target]
+    if not boxes:
+        return None
+    total = M.ink_in_boxes(frame, boxes, board, dark_ratio, exclude)
+    return None if total is None else {"ink_final": round(total, 5)}
+
+
 def score_episode(ep_dir: Path, target: str | None, board, dark_ratio: float, fps: float,
                    exclude=None) -> dict:
     video = M.top_video(ep_dir)
@@ -281,6 +305,23 @@ def score_episode(ep_dir: Path, target: str | None, board, dark_ratio: float, fp
 
     grip = read_gripper(ep_dir)
     ph = gripper_phases(grip) if grip is not None else {"hold_start": None, "release": None}
+
+    # ── 최종 잉크는 park 프레임으로 다시 잰다 ─────────────
+    # erase_run이 파킹 후(팔이 빠진 뒤) 따로 찍어 넣어준 프레임이 있으면 그걸 쓴다.
+    # 영상 마지막 프레임을 쓰면 안 되는 이유: --stop-on-release는 "놓는 순간"
+    # 녹화를 끝내므로 마지막 프레임엔 팔이 아직 보드 앞에 있다. 실측 2026-08-18에
+    # 실제 92.2% 지운 롤아웃이 65.4%로 채점됐다(러너의 park 판정은 88.7%).
+    judged = _rescore_from_judge_frame(ep_dir, shapes, target, board, dark_ratio, exclude)
+    if judged is not None and tgt.get("ink_init"):
+        # 분모(기준 잉크)는 영상 첫 프레임 값을 그대로 두고 분자만 갈아끼운다.
+        # erased_frac이 단계 점수(complete)와 성공 판정을 좌우하므로 같이 갱신한다.
+        ink_final = judged["ink_final"]
+        tgt = {
+            **tgt,
+            "ink_final": ink_final,
+            "erased_frac": round(max(0.0, 1.0 - ink_final / tgt["ink_init"]), 4),
+        }
+        row["ink_source"] = "park_frame"
 
     # ── 단계 점수 ────────────────────────────────────────
     stages = {
@@ -520,7 +561,7 @@ FIELDS = [
     "success", "score", "task_progress",
     "stage_approach", "stage_contact", "stage_start", "stage_complete", "stage_selective",
     "erased_target", "erased_distractor", "selective_erase", "ink_init", "ink_final",
-    "t_contact_s", "t50_s", "t90_s", "auc_progress", "duration_s",
+    "t_contact_s", "t50_s", "t90_s", "auc_progress", "duration_s", "ink_source",
     "grasp_s", "release_s", "termination", "failure_mode",
     "stall_events", "recovered", "recovery_rate", "ended_stalled",
     "occluded_frac", "shapes_found", "n_frames", "path",

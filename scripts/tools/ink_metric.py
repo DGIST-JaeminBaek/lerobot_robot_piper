@@ -37,6 +37,12 @@ MAX_SAT = 25  # 평균 채도 상한 — 나무 지우개 블록(≈45)은 걸�
 MERGE_GAP = 30  # 이 픽셀 이내로 붙어있는 조각은 한 도형으로 병합 (도형 간 간격은 100px 이상)
 BORDER_MARGIN = 3  # 보드 오른쪽 경계에 이만큼 이내로 닿은 덩어리는 로봇 팔로 본다 (아래 참고)
 OCCLUDER_KERNEL = 11  # 이 크기로 opening해서 남는 어두운 덩어리 = 팔·그리퍼 (얇은 잉크 획은 사라짐)
+# 잉크 계산에서 팔을 뺄 때 쓰는 커널. OCCLUDER_KERNEL(11)을 그대로 쓰면 안 된다 —
+# 그건 '굵은 팔뚝'을 잡으려고 큰 값인데, 도형 위를 지나는 팔 끝/케이블은 실측 약 6px
+# 이라 11로 opening하면 통째로 사라져 blob이 비고 배제가 아예 안 걸린다(2026-08-18
+# 실측: kernel 7~15 전부 blob=0). 5면 그 팔은 잡히고(잉크 0.01018 -> 0.00248,
+# 실제 보드 0.0023과 일치) 시연 6개 첫 프레임의 진짜 잉크 손실은 0.0%였다.
+ARM_KERNEL = 5
 OCCL_JUMP = 0.15  # 비-흰색 비율이 이만큼 급증하면 가림 (판정용 track에서 사용)
 MIN_VISIBLE = 0.70  # dense_progress: 도형 영역이 이만큼 안 보이면 그 프레임은 측정 불가
 PAD = 12  # 도형 bbox 여유
@@ -244,7 +250,18 @@ def track(video, board, dark_ratio, occl_jump=OCCL_JUMP, exclude=None):
             # 놓인 프레임에서 잉크가 늘어난 것으로 잡혀 '다 지웠는데 실패'가 된다.
             # occ(가림) 판정에는 일부러 안 건다 — 가림 검출은 블록이 보여야 한다.
             sat = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)[:, :, 1]
-            ink[lbl].append(float(((g < ink_thr) & (sat <= MAX_SAT)).mean()))
+            dark = g < ink_thr
+            # 검은 무채색 덩어리(팔·그리퍼·케이블)는 채도 필터를 통과해버린다.
+            # dense_progress가 쓰는 것과 같은 opening으로 뺀다 — 얇은 잉크 획은
+            # 사라지고 굵은 덩어리만 남으므로 그 부분을 잉크에서 제외한다.
+            # 실측 2026-08-18: --stop-on-release로 놓는 순간 녹화가 끝나면 마지막
+            # 프레임에 팔이 보드를 가로질러 있고, 그게 잉크로 세어져 실제 92.2%
+            # 지운 롤아웃이 65.4%로 채점됐다.
+            blob = cv2.morphologyEx(
+                dark.astype(np.uint8), cv2.MORPH_OPEN,
+                np.ones((ARM_KERNEL, ARM_KERNEL), np.uint8),
+            ).astype(bool)
+            ink[lbl].append(float((dark & (sat <= MAX_SAT) & ~blob).mean()))
             nw = float((g < white_thr).mean())
             base_nonwhite.setdefault(lbl, nw)
             occ[lbl].append(nw > base_nonwhite[lbl] + occl_jump)
@@ -409,6 +426,30 @@ def residual(frame, box, ink_thr, grid=3):
         # 그만큼 가려진 상태로 나온 것이므로 값을 곧이곧대로 믿으면 안 된다.
         "occluded_frac": round(float(chromatic.mean()), 4),
     }
+
+
+def ink_in_boxes(frame, boxes, board, dark_ratio, exclude=None):
+    """주어진 bbox들의 잉크 비율 합. park 프레임으로 최종 잔량을 잴 때 쓴다.
+
+    임계값(보드 흰색 기준)은 이 프레임에서 다시 잡는다 — 조명이 미세하게 달라도
+    detect_shapes와 같은 방식으로 매번 새로 잡아야 같은 자로 잰 것이 된다.
+    """
+    _, white = detect_shapes(frame, board, dark_ratio, exclude)
+    thr = white * dark_ratio
+    total = 0.0
+    for x, y, w, h in boxes:
+        sub = frame[y : y + h, x : x + w]
+        if sub.size == 0:
+            return None
+        g = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
+        sat = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)[:, :, 1]
+        total += float(((g < thr) & (sat <= MAX_SAT)).mean())
+    return total
+
+
+def imread(path):
+    """cv2 의존을 이 모듈에 묶어두기 위한 얇은 래퍼."""
+    return cv2.imread(str(path))
 
 
 def top_video(ep_dir: Path) -> Path:
