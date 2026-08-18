@@ -229,11 +229,12 @@ def stall_and_recovery(progress: np.ndarray, valid: np.ndarray) -> dict:
 # ═══════════════════════════════════════════════════════════════════
 # 에피소드 1개 채점
 # ═══════════════════════════════════════════════════════════════════
-def score_episode(ep_dir: Path, target: str | None, board, dark_ratio: float, fps: float) -> dict:
+def score_episode(ep_dir: Path, target: str | None, board, dark_ratio: float, fps: float,
+                   exclude=None) -> dict:
     video = M.top_video(ep_dir)
     target = target or M.task_of(ep_dir)
 
-    shapes, ink, occ = M.track(video, board, dark_ratio)
+    shapes, ink, occ = M.track(video, board, dark_ratio, exclude=exclude)
     per_shape = M.summarize(ink, occ)
     labels = sorted({k.split("#")[0] for k, _ in shapes})
 
@@ -259,7 +260,7 @@ def score_episode(ep_dir: Path, target: str | None, board, dark_ratio: float, fp
     distractor = max(d_erased) if d_erased else 0.0
 
     env = target_envelope(per_shape, target)
-    dense = M.dense_progress(video, board, dark_ratio)
+    dense = M.dense_progress(video, board, dark_ratio, exclude=exclude)
     curve = progress_curve(dense, target)
     if curve is not None:
         progress, valid = curve
@@ -533,6 +534,13 @@ def main(argv=None) -> int:
     p.add_argument("--condition", default="", help="비교 축 2 (async / sync …)")
     p.add_argument("--target", default=None, help="지울 도형. 생략하면 폴더명에서 추론")
     p.add_argument("--board", type=int, nargs=4, default=M.DEFAULT_BOARD, metavar=("X", "Y", "W", "H"))
+    p.add_argument(
+        "--exclude", action="append", default=[],
+        type=lambda s: tuple(int(v) for v in s.split(",")),
+        metavar="X,Y,W,H",
+        help="이 전역좌표 사각형은 도형 검출에서 뺀다 (ink_metric.py --exclude와 동일, "
+             "여러 번 줄 수 있음). 보드에 눌어붙은 테이프 자국처럼 위치가 고정된 이물질용",
+    )
     p.add_argument("--dark-ratio", type=float, default=0.72)
     p.add_argument("--fps", type=float, default=30.0)
     p.add_argument("--out-dir", type=Path, default=None,
@@ -569,7 +577,8 @@ def main(argv=None) -> int:
     rows = []
     for i, ep in enumerate(paths, 1):
         try:
-            row = score_episode(ep, args.target, tuple(args.board), args.dark_ratio, args.fps)
+            row = score_episode(ep, args.target, tuple(args.board), args.dark_ratio, args.fps,
+                                 exclude=args.exclude)
         except Exception as exc:  # 한 에피소드가 깨져도 나머지는 채점한다
             row = {"episode": ep.name, "path": str(ep), "valid": False, "note": f"{type(exc).__name__}: {exc}"}
         row.update(model=args.model, condition=args.condition, trial=i, scored_by="auto")

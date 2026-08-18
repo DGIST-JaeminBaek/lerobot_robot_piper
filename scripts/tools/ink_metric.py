@@ -48,14 +48,29 @@ MAX_DISTRACTOR = 0.10  # distractor를 이만큼 넘게 건드리면 실패.
 # 0.10은 플로어의 약 3배 — 이보다 조이면 정상 시연이 오탐으로 걸린다.
 
 
-def detect_shapes(frame, board, dark_ratio):
-    """첫 프레임에서 도형 bbox와 종류를 찾는다. -> [(label, (x,y,w,h)), ...]"""
+def detect_shapes(frame, board, dark_ratio, exclude=None):
+    """첫 프레임에서 도형 bbox와 종류를 찾는다. -> [(label, (x,y,w,h)), ...]
+
+    exclude: [(x,y,w,h), ...] 전역(원본 프레임) 좌표. 이 안의 픽셀은 잉크 마스크에서
+    아예 지워버려서 컨투어 단계에 안 들어간다 — 손으로 그린 도형(위치가 에피소드마다
+    바뀜)과 달리, 보드에 눌어붙은 테이프 자국·스티커처럼 **위치가 고정된 이물질**을
+    배제할 때 쓴다. 기본은 빈 리스트라 기존 동작을 안 바꾼다.
+    실제로 이런 이물질이 도형 자리와 겹쳐서 다 지운 도형을 '남음'으로 오판한 사례가
+    있었다(2026-08-18, 보드에 붙은 변색 테이프+카드가 지워진 삼각형 자리를 rectangle로
+    오검출). 위치가 안 바뀌는 게 확인되면 --exclude로 좌표를 넘긴다.
+    """
     bx, by, bw, bh = board
     sub = frame[by : by + bh, bx : bx + bw]
     roi = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
     sat = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)[:, :, 1]
     white = float(np.percentile(roi, 90))
     ink = (roi < white * dark_ratio).astype(np.uint8)
+    for ex, ey, ew, eh in exclude or []:
+        # 전역 좌표 -> 보드 로컬로 옮기고 프레임 밖으로 안 나가게 자른다
+        lx0, ly0 = max(ex - bx, 0), max(ey - by, 0)
+        lx1, ly1 = min(ex - bx + ew, bw), min(ey - by + eh, bh)
+        if lx1 > lx0 and ly1 > ly0:
+            ink[ly0:ly1, lx0:lx1] = 0
     # 선이 끊겨 있어도 한 도형으로 묶이도록 닫기
     ink = cv2.morphologyEx(ink, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
 
@@ -199,10 +214,10 @@ def _first_and_rest(video):
     return first, itertools.chain([first], it)
 
 
-def track(video, board, dark_ratio, occl_jump=OCCL_JUMP):
+def track(video, board, dark_ratio, occl_jump=OCCL_JUMP, exclude=None):
     first, frames = _first_and_rest(video)
 
-    detected, white = detect_shapes(first, board, dark_ratio)
+    detected, white = detect_shapes(first, board, dark_ratio, exclude)
     # 같은 종류가 여러 개 나올 수 있으므로 키를 유일하게 만든다 (circle#0, circle#1 ...)
     shapes = [(f"{lbl}#{i}", box) for i, (lbl, box) in enumerate(detected)]
     ink_thr = white * dark_ratio
@@ -229,7 +244,7 @@ def track(video, board, dark_ratio, occl_jump=OCCL_JUMP):
     return shapes, ink, occ
 
 
-def dense_progress(video, board, dark_ratio=0.72, min_visible=MIN_VISIBLE):
+def dense_progress(video, board, dark_ratio=0.72, min_visible=MIN_VISIBLE, exclude=None):
     """접촉 중에도 쓸 수 있는 조밀한 진행도 시계열. -> {label: (density, valid)}
 
     track()의 잔량 측정은 도형 영역이 조금이라도 가려지면 프레임을 통째로 버린다.
@@ -243,7 +258,7 @@ def dense_progress(video, board, dark_ratio=0.72, min_visible=MIN_VISIBLE):
     추세·진행도 용도로만 쓸 것.
     """
     first, frames = _first_and_rest(video)
-    detected, white = detect_shapes(first, board, dark_ratio)
+    detected, white = detect_shapes(first, board, dark_ratio, exclude)
     shapes = [(f"{lbl}#{i}", box) for i, (lbl, box) in enumerate(detected)]
     ink_thr = white * dark_ratio
     kernel = np.ones((OCCLUDER_KERNEL, OCCLUDER_KERNEL), np.uint8)
@@ -404,11 +419,11 @@ def task_of(ep_dir: Path) -> str:
     return "?"
 
 
-def dump_roi(ep_dir, board, dark_ratio, path):
+def dump_roi(ep_dir, board, dark_ratio, path, exclude=None):
     # read_frames를 거쳐야 AV1 롤아웃에서도 확인 이미지를 뽑을 수 있다.
     # 카메라 점검(§4-4)은 롤아웃 영상으로도 해야 하므로 여기가 막히면 안 된다.
     frame, _ = _first_and_rest(top_video(ep_dir))
-    shapes, _ = detect_shapes(frame, board, dark_ratio)
+    shapes, _ = detect_shapes(frame, board, dark_ratio, exclude)
     bx, by, bw, bh = board
     cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (255, 0, 0), 1)
     for lbl, (x, y, w, h) in shapes:
@@ -426,6 +441,14 @@ def main(argv=None):
     p.add_argument("--occl-jump", type=float, default=OCCL_JUMP, help="비-흰색 비율이 이만큼 급증하면 가림 처리")
     p.add_argument("--csv", type=Path)
     p.add_argument("--dump-roi", type=Path, help="첫 에피소드 검출 결과를 그려서 저장 후 종료")
+    p.add_argument(
+        "--exclude", action="append", default=[],
+        type=lambda s: tuple(int(v) for v in s.split(",")),
+        metavar="X,Y,W,H",
+        help="이 전역좌표 사각형은 도형 검출에서 뺀다 (여러 번 줄 수 있음). "
+             "테이프 자국처럼 위치가 고정된 이물질을 배제할 때 쓴다 — 손으로 그린 "
+             "도형은 매 에피소드 위치가 바뀌므로 배제 대상이 아니다",
+    )
     a = p.parse_args(argv)
 
     dirs = [Path(d) for d in sorted(glob.glob(a.path)) if Path(d).is_dir()]
@@ -433,13 +456,13 @@ def main(argv=None):
         p.error(f"에피소드 디렉터리를 찾지 못함: {a.path}")
 
     if a.dump_roi:
-        dump_roi(dirs[0], a.board, a.dark_ratio, a.dump_roi)
+        dump_roi(dirs[0], a.board, a.dark_ratio, a.dump_roi, a.exclude)
         return 0
 
     rows = []
     for d in dirs:
         target = task_of(d)
-        shapes, ink, occ = track(top_video(d), a.board, a.dark_ratio, a.occl_jump)
+        shapes, ink, occ = track(top_video(d), a.board, a.dark_ratio, a.occl_jump, a.exclude)
         per_shape = summarize(ink, occ)
         labels = {k.split("#")[0] for k in per_shape}
         tgt = aggregate(per_shape, target) or {}
