@@ -10,6 +10,8 @@
 | 이 문서 | LeRobot의 기본 동기/비동기 실행 주기와 action chunk |
 | [Offline Action Chunk Rollout](offline_chunk_rollout.md) | 학습 데이터 observation을 이용한 비실물 예측 궤적 검사 |
 | [인간 승인형 Policy 실행](human_approved_policy_execution.md) | Action chunk를 구간별로 RViz 확인하고 승인 후 실행하는 구현 |
+| [평가 프로토콜](evaluation_protocol.md) | 지우기 롤아웃 채점 지표 정의·통계 근거·실험 설계 |
+| [평가 세션 실행 설명서](eval_session_howto.md) | 환경 세팅부터 GUI로 모델별 실물 롤아웃 돌리는 명령까지 — 실전 절차 |
 
 권장 확인 순서는 다음과 같다.
 
