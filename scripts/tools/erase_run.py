@@ -206,36 +206,56 @@ def run_attempt_with_runner(settings, on_log=None, on_step=None,
     run.start()
     if on_runner:
         on_runner(run)
-    while True:
-        try:
-            kind, payload = run.events.get(timeout=1.0)
-        except _queue.Empty:
-            if not run.is_alive():
-                break
-            continue
-        if kind == Event.LOG:
-            if on_log:
-                on_log(payload)
-            else:
-                print(f"    {payload}")
-        elif kind == Event.STEP:
-            # 스텝별 진단. 요약만 남기면 "왜 실패했는지"를 사후에 못 가린다 —
-            # 클램프 포화가 원인인지 결과인지 같은 질문이 여기서 갈린다.
-            steps.append(
-                {
-                    "step": payload["step"],
-                    "action": payload["action"],
-                    "measured": payload["measured"],
-                    "votes": payload["votes"],
-                    "rate_clamp": payload["rate_clamp"],
-                    "intervention": payload.get("intervention", False),
-                    "infer_ms": payload["infer_ms"],
-                }
-            )
-            if on_step:
-                on_step(payload)
-        elif kind == Event.FINISHED:
-            break
+
+    def _pump_events() -> bool:
+        """이벤트 큐를 계속 비운다. FINISHED를 만나면 True."""
+        while True:
+            try:
+                kind, payload = run.events.get(timeout=1.0)
+            except _queue.Empty:
+                if not run.is_alive():
+                    return True
+                continue
+            if kind == Event.LOG:
+                if on_log:
+                    on_log(payload)
+                else:
+                    print(f"    {payload}")
+            elif kind == Event.STEP:
+                # 스텝별 진단. 요약만 남기면 "왜 실패했는지"를 사후에 못 가린다 —
+                # 클램프 포화가 원인인지 결과인지 같은 질문이 여기서 갈린다.
+                steps.append(
+                    {
+                        "step": payload["step"],
+                        "action": payload["action"],
+                        "measured": payload["measured"],
+                        "votes": payload["votes"],
+                        "rate_clamp": payload["rate_clamp"],
+                        "intervention": payload.get("intervention", False),
+                        "infer_ms": payload["infer_ms"],
+                    }
+                )
+                if on_step:
+                    on_step(payload)
+            elif kind == Event.FINISHED:
+                return True
+
+    try:
+        _pump_events()
+    except KeyboardInterrupt:
+        # erase_eval_ui.py의 [컷오프]/[중단]은 프로세스 그룹에 SIGINT를 보낸다
+        # ("러너의 park 정리를 태운다"는 주석이 있는데, 이 핸들러가 없으면 그
+        # 기대가 거짓이 된다). 예전엔 여기서 그대로 죽어서 InferenceRunner가
+        # disconnect(park=True) 도중(최대 ~15초, parking+램프+그리퍼 사이클)이면
+        # 팔이 그 상태로 프로세스와 함께 끊기고, 녹화 중이던 영상도 마감이 안 돼
+        # 다음 판정이 "top 영상 없음"으로 죽었다. 실물에서 실제로 겪었다
+        # (2026-08-18, stop-on-release가 916/940에서 걸린 직후 60초 컷오프와
+        # 거의 동시에 발생). stop_event만 세우고 정리가 끝날 때까지 계속
+        # 이벤트를 뽑아준다 — piper_infer_runner.py 자체 CLI가 쓰는 것과 같은
+        # 패턴(_drain_until_finished)이다.
+        print("[INTERRUPT] 중단 요청 — 정리 중…")
+        run.stop_event.set()
+        _pump_events()
     run.join(timeout=30)
     return {
         "status": run.status,
