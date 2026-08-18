@@ -196,6 +196,32 @@ def _filtered_log(message: str) -> None:
         print(f"    {message}", flush=True)
 
 
+def judge_frame_from_video(record_path, expect_hw=(720, 1280)):
+    """녹화 영상의 마지막 프레임을 판정 프레임으로 가져온다. 못 쓰면 None.
+
+    러너가 파킹 후 한 장을 더 녹화해 넣기 때문에(judge_frame_in_video) 마지막
+    프레임이 곧 "팔이 빠진 최종 상태"다. board ROI는 1280x720 원본 좌표계라
+    크롭본(512x512)으로 녹화한 경우엔 쓸 수 없어 None을 돌려준다 —
+    그때는 호출부가 카메라에서 직접 찍는다.
+    """
+    if not record_path:
+        return None
+    try:
+        import ink_metric as M
+
+        video = M.top_video(Path(record_path))
+        last = None
+        for frame in M.read_frames(video):
+            last = frame
+        if last is None:
+            return None
+        if tuple(last.shape[:2]) != tuple(expect_hw):
+            return None  # 크롭본 등 board 좌표계와 안 맞는 영상
+        return last
+    except Exception:
+        return None
+
+
 def run_attempt_with_runner(settings, on_log=None, on_step=None,
                             on_runner=None) -> dict:
     """InferenceRunner로 시도 1회. 반환: 요약 dict.
@@ -707,16 +733,19 @@ def main():
                 panel.set_phase("판정 중")
                 panel.set_fps(summary["measured_fps"],
                               intervention_steps=summary["interventions"])
-            after_frame = grab()
-            save_frame(f"{i:02d}_after", after_frame)
-            # ★ 채점기(erase_eval)가 쓸 수 있게 롤아웃 데이터셋 폴더에도 넣는다.
-            # 영상 마지막 프레임으로 최종 잉크를 재면 안 된다 — --stop-on-release를
-            # 켜면 "놓는 순간" 녹화가 끝나므로 마지막 프레임엔 팔이 아직 보드 앞에
-            # 있고, 팔은 검은 무채색이라 채도 필터도 못 걸러 잉크로 세어진다.
-            # 실측 2026-08-18: 실제 92.2% 지웠는데 채점기는 65.4%로 봤다(러너의
-            # park 판정은 88.7%로 정확했다). 이 프레임은 파킹이 끝나고 팔이 빠진
-            # 뒤에 따로 찍은 것이라 그 오차가 없다.
+            # 판정 프레임은 **녹화 영상의 마지막 프레임**이다.
+            # 러너가 파킹을 마친 뒤(팔이 빠진 뒤) 한 장을 더 녹화해 넣어주므로
+            # (judge_frame_in_video), 그 프레임이 곧 "다 지우고 난 상태"다.
+            # 영상에서 뽑아 쓰면 판정·채점·사람이 보는 영상이 전부 같은 한 장을
+            # 가리키게 되어 셋이 어긋날 여지가 없다.
+            #
+            # 영상이 없거나(--mode demo) 크롭본으로 녹화한 경우엔 board 좌표계가
+            # 안 맞으므로 예전처럼 카메라에서 직접 찍는다.
             record_path = summary.get("record_path")
+            after_frame = judge_frame_from_video(record_path)
+            if after_frame is None:
+                after_frame = grab()
+            save_frame(f"{i:02d}_after", after_frame)
             if record_path and not args.no_save_frames:
                 import cv2
                 cv2.imwrite(str(Path(record_path) / "judge_frame.png"), after_frame)
