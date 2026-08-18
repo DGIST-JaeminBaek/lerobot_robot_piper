@@ -1217,7 +1217,10 @@ class InferenceRunner(threading.Thread):
                 if release_detector is not None and release_detector.update(
                     float(action[6]), measured_state[:6]
                 ):
-                    self._log(f"[STOP] 지우개를 놓았거나 정지했다 — {step}스텝에서 끊고 파킹한다")
+                    fumble_note = (f" (헛놓기 {release_detector.fumbles}회 무시)"
+                                   if release_detector.fumbles else "")
+                    self._log(f"[STOP] 지우개를 놓았거나 정지했다 — "
+                              f"{step}스텝에서 끊고 파킹한다{fumble_note}")
                     status = "released"
                     break
 
@@ -1973,6 +1976,13 @@ HOLD_FRAMES = 15  # 0.5초(30fps) 이상 유지돼야 파지로 인정
 HOLD_TOL = 3.0  # 그 15프레임 동안 값이 이보다 더 흔들리면 파지가 아니라 '지나가는 중'
 RELEASE_JUMP = 15.0  # 파지 수준에서 이만큼 벌어지면 놓은 것
 RELEASE_HOLD_STEPS = 5  # 그 열린 상태가 이만큼 이어져야 진짜 놓기로 본다
+# 파지가 이만큼 이어진 뒤에 놓아야 "일을 마치고 놓았다"로 인정한다. 그보다 짧으면
+# 제대로 못 잡고 흘린 것(헛놓기)으로 보고 감지기를 리셋해 다시 잡을 기회를 준다.
+# 실측 근거: 0804 시연 15개의 파지 지속은 최소 246프레임(8.2초), 중앙값 341이다.
+# 120프레임(4초)은 그 최소값의 절반이라 진짜 파지를 자를 위험이 없고, 잠깐 스쳐
+# 잡았다 놓는 헛놓기와는 확실히 갈린다. 실물에서 "제대로 잡지도 못했는데 살짝
+# 놨더니 평가가 끝나버린" 사례로 추가했다(2026-08-18).
+MIN_HOLD_BEFORE_RELEASE = 120
 
 # 파지 이후, 실측 관절(그리퍼 제외 6축)의 3초 롤링평균 변화량이 이 밑으로 떨어지면
 # 정지로 본다. 0804 시연 15개의 "파지~놓기" 작업 구간에서 3초 롤링평균의 최솟값이
@@ -1999,6 +2009,8 @@ class ReleaseDetector:
       램프는 같은 창에서 30 넘게 움직인다. 실측 2026-08-18 롤아웃 2회차.
     - 열린 상태가 RELEASE_HOLD_STEPS만큼 이어져야 한다. 한 스텝짜리 튐으로
       실물 시도를 끊어버리면 되돌릴 방법이 없다.
+    - 놓기 전에 파지가 MIN_HOLD_BEFORE_RELEASE만큼 이어졌어야 한다. 못 잡고
+      흘린 헛놓기는 시도를 끝내지 않고 감지기를 리셋해 재파지를 기다린다.
 
     파지 이후에는 관절 정지도 같이 본다 (update_stall 참고) — "확실히 놓았다"만
     잡으면, 그리퍼가 열림·닫힘 사이를 오가며 확신 없이 굳어버리는 경우(2026-08-18
@@ -2010,8 +2022,19 @@ class ReleaseDetector:
         self.window: collections.deque[float] = collections.deque(maxlen=HOLD_FRAMES)
         self.hold_level: float | None = None
         self.open_run = 0
+        self.hold_frames = 0        # 파지가 확정된 뒤 지난 스텝 수
+        self.fumbles = 0            # 헛놓기로 판정해 리셋한 횟수(로그용)
         self.joint_window: collections.deque[float] = collections.deque(maxlen=JOINT_STALL_WINDOW)
         self._prev_joints: np.ndarray | None = None
+
+    def _reset_hold(self) -> None:
+        """헛놓기 — 파지 상태를 버리고 처음부터 다시 찾는다(재파지 허용)."""
+        self.hold_level = None
+        self.hold_frames = 0
+        self.open_run = 0
+        self.window.clear()
+        self.joint_window.clear()
+        self._prev_joints = None
 
     def update(self, grip: float, joints: np.ndarray | None = None) -> bool:
         """이번 스텝의 그리퍼 명령(과 선택적으로 실측 관절)을 먹인다.
@@ -2028,10 +2051,17 @@ class ReleaseDetector:
                 self.hold_level = sum(self.window) / len(self.window)
             return False
 
+        self.hold_frames += 1
         if grip > self.hold_level + RELEASE_JUMP:
             self.open_run += 1
             if self.open_run >= RELEASE_HOLD_STEPS:
-                return True
+                # 충분히 오래 쥐고 있다가 놓았을 때만 "끝났다"로 본다.
+                if self.hold_frames >= MIN_HOLD_BEFORE_RELEASE:
+                    return True
+                # 헛놓기 — 시도를 끝내지 않고 다시 잡을 기회를 준다.
+                self.fumbles += 1
+                self._reset_hold()
+                return False
         else:
             self.open_run = 0
 
