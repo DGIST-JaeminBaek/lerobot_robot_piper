@@ -396,6 +396,9 @@ def main():
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--max-steps", type=int, default=940, help="시도당 상한 (중앙값 720의 약 1.3배)")
     p.add_argument("--max-attempts", type=int, default=3)
+    p.add_argument("--stop-on-release", action="store_true",
+                   help="지우개를 놓으면 그 시도를 즉시 끊고 파킹한다 (러너로 전달). "
+                        "판정은 어차피 park에서 하므로 판정 품질에는 영향이 없다")
     p.add_argument("--mode", default="demo", help="러너 모드 프리셋 (demo | augment)")
     p.add_argument(
         "--top-crop",
@@ -498,6 +501,7 @@ def main():
         real_robot_confirm=REAL_ROBOT_CONFIRM,
         fps=float(args.fps),
         max_steps=args.max_steps,
+        stop_on_release=args.stop_on_release,
         rviz=False,
         park_on_exit=True,          # 시도 끝 park는 러너가 강제한다
         crops=resolve_crops({}, args.top_crop, args.wrist_crop or None),
@@ -547,6 +551,7 @@ def main():
         "hil": bool(args.hil),
         "max_attempts": args.max_attempts,
         "max_steps": args.max_steps,
+        "stop_on_release": args.stop_on_release,
         "aggregate_fn": args.aggregate_fn,
         "top_crop": args.top_crop,
         "wrist_crop": args.wrist_crop,

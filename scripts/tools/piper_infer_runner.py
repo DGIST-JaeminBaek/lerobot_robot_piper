@@ -43,6 +43,7 @@ ensemble은 매 스텝 새로 예측한 action chunk들을 겹쳐서 가중평�
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import dataclasses
 import json
@@ -506,6 +507,9 @@ class RunSettings:
     latency_align: bool = True
     horizon: int = 50
     max_steps: int = 0
+    # 지우개를 놓으면 그 자리에서 끊고 파킹으로 간다. 기본은 꺼둔다 — 실물에서
+    # 검증된 기존 거동(스텝 예산을 다 쓰고 끝냄)을 조용히 바꾸지 않기 위해서다.
+    stop_on_release: bool = False
     loop_dataset: bool = False
     rviz: bool = True
     joint_state_topic: str = "/joint_states"
@@ -941,6 +945,7 @@ class InferenceRunner(threading.Thread):
             state_names = list(dataset.features["observation.state"]["names"])
             action_names = list(dataset.features["action"]["names"])
             last_loop_start: float | None = None
+            release_detector = ReleaseDetector() if settings.stop_on_release else None
 
             while not self.stop_event.is_set():
                 # 개입 스텝은 정책 예산에서 깎지 않는다.
@@ -1178,6 +1183,14 @@ class InferenceRunner(threading.Thread):
 
                 self.trajectory.append(action.copy())
                 self._rate_adjustments.append(pipeline.last_rate_adjustment)
+
+                # 놓았으면 남은 스텝 예산을 버리고 파킹으로 간다. 정책이 스스로
+                # 끝내지 못해도(CLAUDE.md '마무리 판단 실패') 러너가 끊어준다.
+                # 실측 2026-08-18: 놓기 19.8초인데 max_steps 940을 채우느라 계속 돌았다.
+                if release_detector is not None and release_detector.update(float(action[6])):
+                    self._log(f"[STOP] 지우개를 놓았다 — {step}스텝에서 끊고 파킹한다")
+                    status = "released"
+                    break
 
                 # 스무딩된 궤적 자체의 속도(정규화 단위/초). 룩어헤드와 MIT가
                 # 둘 다 이걸 쓴다 — 정책 chunk는 시간 매개화된 궤적이라 의도된
@@ -1858,6 +1871,57 @@ def resolve_crops(
     }
 
 
+# ── 놓기 감지 ────────────────────────────────────────────────
+# 상수는 erase_eval.py의 GRIP_*/HOLD_FRAMES/RELEASE_JUMP와 같은 뜻이다. 일부러
+# import하지 않고 복제한다 — 실물 제어 루프가 채점기(cv2·numpy 무거운 의존)를
+# 끌어오지 않게 하려는 것이다. 값을 바꾸면 양쪽을 같이 고쳐야 한다.
+GRIP_HOLD_MIN, GRIP_HOLD_MAX = 8.0, 35.0  # 이 사이면 뭔가 쥔 상태
+HOLD_FRAMES = 15  # 0.5초(30fps) 이상 유지돼야 파지로 인정
+HOLD_TOL = 3.0  # 그 15프레임 동안 값이 이보다 더 흔들리면 파지가 아니라 '지나가는 중'
+RELEASE_JUMP = 15.0  # 파지 수준에서 이만큼 벌어지면 놓은 것
+RELEASE_HOLD_STEPS = 5  # 그 열린 상태가 이만큼 이어져야 진짜 놓기로 본다
+
+
+class ReleaseDetector:
+    """그리퍼 명령만 보고 '지우개를 놓았다'를 실시간으로 판정한다.
+
+    채점기(erase_eval.gripper_phases)는 에피소드 전체를 보고 **가장 긴** 파지 구간을
+    고르지만, 제어 루프는 과거밖에 못 본다. 그래서 조건을 셋 건다:
+
+    - 파지가 HOLD_FRAMES만큼 연속으로 성립해야 한다.
+    - 그 구간이 **평평해야 한다**(폭 ≤ HOLD_TOL). 이게 없으면 못 쓴다 —
+      지우개를 잡으러 갈 때 그리퍼를 여는 램프(1.2 → 65)가 rate_limit 때문에
+      천천히 올라가면서 파지 대역 8~35를 약 20프레임에 걸쳐 지나간다. 폭 조건
+      없이 돌려봤더니 실물 궤적에서 165프레임(5.6초)에 발화했다 — 지우개를
+      집기도 전이다. 진짜 파지 구간(240~570프레임)은 18.5~19.3으로 폭이 1 미만이고,
+      램프는 같은 창에서 30 넘게 움직인다. 실측 2026-08-18 롤아웃 2회차.
+    - 열린 상태가 RELEASE_HOLD_STEPS만큼 이어져야 한다. 한 스텝짜리 튐으로
+      실물 시도를 끊어버리면 되돌릴 방법이 없다.
+    """
+
+    def __init__(self) -> None:
+        self.window: collections.deque[float] = collections.deque(maxlen=HOLD_FRAMES)
+        self.hold_level: float | None = None
+        self.open_run = 0
+
+    def update(self, grip: float) -> bool:
+        """이번 스텝의 그리퍼 명령을 먹인다. 놓기가 확정되면 True."""
+        if self.hold_level is None:
+            self.window.append(grip)
+            if len(self.window) < HOLD_FRAMES:
+                return False
+            lo, hi = min(self.window), max(self.window)
+            if lo >= GRIP_HOLD_MIN and hi <= GRIP_HOLD_MAX and hi - lo <= HOLD_TOL:
+                self.hold_level = sum(self.window) / len(self.window)
+            return False
+
+        if grip > self.hold_level + RELEASE_JUMP:
+            self.open_run += 1
+            return self.open_run >= RELEASE_HOLD_STEPS
+        self.open_run = 0
+        return False
+
+
 def default_record_root(settings: RunSettings) -> pathlib.Path:
     stamp = time.strftime("%Y%m%d_%H%M%S")
     name = pathlib.Path(settings.dataset_root).name
@@ -1980,6 +2044,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--horizon", type=int, default=50)
     parser.add_argument("--max-steps", type=int, default=0)
+    parser.add_argument("--stop-on-release", action="store_true",
+                        help="지우개를 놓으면 남은 스텝을 버리고 바로 파킹한다. "
+                             "정책이 스스로 끝내지 못해 상한까지 도는 것을 막는다")
     parser.add_argument("--loop-dataset", action="store_true")
     parser.add_argument("--no-rviz", dest="rviz", action="store_false")
     parser.add_argument("--joint-state-topic", default="/joint_states")
@@ -2128,6 +2195,7 @@ def settings_from_args(args: argparse.Namespace) -> RunSettings:
         "latency_align": args.latency_align,
         "horizon": args.horizon,
         "max_steps": args.max_steps,
+        "stop_on_release": args.stop_on_release,
         "loop_dataset": args.loop_dataset,
         "rviz": args.rviz,
         "joint_state_topic": args.joint_state_topic,
