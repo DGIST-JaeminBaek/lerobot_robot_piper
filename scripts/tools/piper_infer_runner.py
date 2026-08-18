@@ -382,6 +382,26 @@ class RolloutRecorder:
         # "쌓인 프레임이 없다" 판정과 로그가 전부 틀어진다.
         self.frames_written = 0
 
+    def close(self) -> None:
+        """parquet writer를 닫는다. **안 부르면 데이터셋이 통째로 무효다.**
+
+        lerobot 0.4.4 LeRobotDataset.finalize()의 docstring 그대로다 — 호출하지 않으면
+        footer 메타가 안 쓰여서 파일이 parquet으로 열리지 않고(`Parquet magic bytes not
+        found in footer`) meta/episodes/도 안 생긴다. save_episode()만으로는 부족하다.
+
+        2026-08-18 첫 실물 롤아웃에서 드러났다. 영상(670프레임)은 멀쩡히 마감됐는데
+        data/chunk-000/file-000.parquet은 헤더만 PAR1이고 푸터가 없었다. 그래서 채점기가
+        그리퍼 로그를 못 읽어 종료 사유가 전부 unknown(no_log)이 됐다. 증강 재학습용으로
+        모아둔 롤아웃도 같은 이유로 못 읽었을 것이다.
+        """
+        finalize = getattr(self.dataset, "finalize", None)
+        if finalize is None:  # 구버전 호환 — 없으면 조용히 넘어간다
+            return
+        try:
+            finalize()
+        except Exception as error:
+            print(f"[RECORD] 경고: 데이터셋 마감 실패 — {error}")
+
     def discard_episode(self) -> None:
         # 쓰기가 밀린 채로 지우면 버퍼에 남은 프레임이 다음 에피소드로 새어든다.
         self.drain()
@@ -1317,6 +1337,10 @@ class InferenceRunner(threading.Thread):
             if recorder is not None:
                 with contextlib.suppress(Exception):
                     self._finalize_recording(recorder, status)
+                # 저장/폐기 어느 쪽이든 writer는 닫아야 한다. _finalize_recording이
+                # discard로 일찍 빠져나가도 여기는 지나가도록 밖에 둔다.
+                with contextlib.suppress(Exception):
+                    recorder.close()
             if robot is not None:
                 try:
                     if getattr(robot, "is_connected", False) and self.settings.use_mit:

@@ -19,6 +19,7 @@
 import argparse
 import csv
 import glob
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -150,11 +151,56 @@ def classify(contour):
     return "rectangle" if n <= 4 else "circle"
 
 
-def track(video, board, dark_ratio, occl_jump=OCCL_JUMP):
+def read_frames(video):
+    """영상을 BGR 프레임으로 훑는다. OpenCV로 못 읽으면 PyAV로 넘어간다.
+
+    OpenCV만 쓰면 **실물 롤아웃을 한 건도 채점할 수 없다.** 러너(piper_infer_runner)의
+    증강 녹화는 AV1(SVT-AV1)로 인코딩하는데, 이 환경 OpenCV는 AV1 디코더가 없어서
+    "Missing Sequence Header"만 뱉고 첫 프레임부터 실패한다. 기존 시연 데이터는
+    다른 코덱이라 여태 안 드러났다 (2026-08-18 첫 실물 롤아웃에서 발견).
+
+    PyAV는 libdav1d로 같은 파일을 문제없이 연다 — lerobot도 영상은 PyAV/torchcodec으로
+    읽는다. OpenCV를 먼저 시도하는 이유는 기존 경로의 거동을 그대로 두기 위해서다.
+    """
     cap = cv2.VideoCapture(str(video))
-    ok, first = cap.read()
-    if not ok:
-        raise RuntimeError(f"영상 첫 프레임 읽기 실패: {video}")
+    ok, frame = cap.read()
+    if ok:
+        while ok:
+            yield frame
+            ok, frame = cap.read()
+        cap.release()
+        return
+    cap.release()
+
+    try:
+        import av
+    except ImportError as e:  # noqa: F841
+        raise RuntimeError(
+            f"영상 첫 프레임 읽기 실패(OpenCV): {video}. AV1 등 OpenCV가 못 읽는 "
+            f"코덱일 수 있는데 PyAV도 없어서 대체 경로를 못 쓴다 — pip install av"
+        ) from None
+
+    with av.open(str(video)) as container:
+        for f in container.decode(video=0):
+            yield f.to_ndarray(format="bgr24")
+
+
+def _first_and_rest(video):
+    """첫 프레임과, **첫 프레임을 포함한** 전체 이터레이터를 함께 준다.
+
+    첫 프레임은 도형 검출(기준 잉크량)에 쓰고, 시계열에도 그대로 들어가야 한다 —
+    빼면 t=0의 잉크량이 사라져 erased_frac의 분모가 한 프레임 밀린다.
+    """
+    it = read_frames(video)
+    try:
+        first = next(it)
+    except StopIteration:
+        raise RuntimeError(f"영상 첫 프레임 읽기 실패: {video}") from None
+    return first, itertools.chain([first], it)
+
+
+def track(video, board, dark_ratio, occl_jump=OCCL_JUMP):
+    first, frames = _first_and_rest(video)
 
     detected, white = detect_shapes(first, board, dark_ratio)
     # 같은 종류가 여러 개 나올 수 있으므로 키를 유일하게 만든다 (circle#0, circle#1 ...)
@@ -167,8 +213,7 @@ def track(video, board, dark_ratio, occl_jump=OCCL_JUMP):
     occ = {k: [] for k, _ in shapes}
     base_nonwhite = {}
 
-    frame = first
-    while ok:
+    for frame in frames:
         for lbl, (x, y, w, h) in shapes:
             sub = frame[y : y + h, x : x + w]
             g = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
@@ -181,8 +226,6 @@ def track(video, board, dark_ratio, occl_jump=OCCL_JUMP):
             nw = float((g < white_thr).mean())
             base_nonwhite.setdefault(lbl, nw)
             occ[lbl].append(nw > base_nonwhite[lbl] + occl_jump)
-        ok, frame = cap.read()
-    cap.release()
     return shapes, ink, occ
 
 
@@ -199,10 +242,7 @@ def dense_progress(video, board, dark_ratio=0.72, min_visible=MIN_VISIBLE):
     판정에는 쓰지 말고(그 용도로 쓰면 distractor 노이즈가 0.05 -> 0.20으로 뛴다)
     추세·진행도 용도로만 쓸 것.
     """
-    cap = cv2.VideoCapture(str(video))
-    ok, first = cap.read()
-    if not ok:
-        raise RuntimeError(f"영상 첫 프레임 읽기 실패: {video}")
+    first, frames = _first_and_rest(video)
     detected, white = detect_shapes(first, board, dark_ratio)
     shapes = [(f"{lbl}#{i}", box) for i, (lbl, box) in enumerate(detected)]
     ink_thr = white * dark_ratio
@@ -210,8 +250,7 @@ def dense_progress(video, board, dark_ratio=0.72, min_visible=MIN_VISIBLE):
 
     dens = {k: [] for k, _ in shapes}
     valid = {k: [] for k, _ in shapes}
-    frame = first
-    while ok:
+    for frame in frames:
         for lbl, (x, y, w, h) in shapes:
             sub = frame[y : y + h, x : x + w]
             g = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
@@ -223,8 +262,6 @@ def dense_progress(video, board, dark_ratio=0.72, min_visible=MIN_VISIBLE):
             n_vis = int(visible.sum())
             dens[lbl].append(float((dark & visible).sum() / n_vis) if n_vis else 0.0)
             valid[lbl].append(float(visible.mean()) >= min_visible)
-        ok, frame = cap.read()
-    cap.release()
     return {k: (np.array(dens[k]), np.array(valid[k])) for k, _ in shapes}
 
 
@@ -368,9 +405,9 @@ def task_of(ep_dir: Path) -> str:
 
 
 def dump_roi(ep_dir, board, dark_ratio, path):
-    cap = cv2.VideoCapture(str(top_video(ep_dir)))
-    ok, frame = cap.read()
-    cap.release()
+    # read_frames를 거쳐야 AV1 롤아웃에서도 확인 이미지를 뽑을 수 있다.
+    # 카메라 점검(§4-4)은 롤아웃 영상으로도 해야 하므로 여기가 막히면 안 된다.
+    frame, _ = _first_and_rest(top_video(ep_dir))
     shapes, _ = detect_shapes(frame, board, dark_ratio)
     bx, by, bw, bh = board
     cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (255, 0, 0), 1)
