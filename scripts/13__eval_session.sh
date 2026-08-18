@@ -24,13 +24,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# run_common.sh는 자기 자신(scripts/lib) 기준으로 SCRIPT_DIR을 다시 정의한다 —
+# source 뒤에 여기 SCRIPT_DIR을 그대로 쓰면 scripts/lib/tools/... 로 잘못 잡힌다
+# (13__erase_gate.sh는 REPO_DIR을 미리 빼놔서 이 문제를 피한다. 2026-08-18 실물
+# 첫 실행에서 TOOL 경로가 깨져 즉시 실패하는 것으로 발견).
+EVAL_SESSION_SCRIPT_DIR="${SCRIPT_DIR}"
 # shellcheck source=lib/run_common.sh
 source "${SCRIPT_DIR}/lib/run_common.sh"
 
 load_recording_env
 activate_conda_env
 
-TOOL="${SCRIPT_DIR}/tools/erase_eval_ui.py"
+TOOL="${EVAL_SESSION_SCRIPT_DIR}/tools/erase_eval_ui.py"
 OUT_DIR="${EVAL_OUT_DIR:-}"
 
 args=()
