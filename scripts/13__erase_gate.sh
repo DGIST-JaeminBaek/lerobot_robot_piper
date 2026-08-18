@@ -9,11 +9,11 @@
 #   STAGE=hil    게이트 + 리더암 개입. ★ 팔이 실제로 움직인다
 #
 # 조건 비교 실험을 할 때는 CONDITION으로 로그를 나눠 담는다. 그래야
-# erase_eval.py가 조건별로 읽는다:
+# erase_stats.py가 조건별로 읽는다:
 #
 #   CONDITION=gate STAGE=gate TARGET=triangle bash scripts/13__erase_gate.sh
 #   ...20회 반복 (매번 사람이 도형을 새로 그린다 — 자동 리셋 불가)
-#   python scripts/tools/erase_eval.py \
+#   python scripts/tools/erase_stats.py \
 #       --condition baseline:runs/baseline/*.json \
 #       --condition gate:runs/gate/*.json --plot
 #

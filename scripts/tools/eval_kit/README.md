@@ -21,7 +21,7 @@
 ## 기존 코드에 대한 영향: 없음
 
 이 폴더 밖의 파일은 **한 줄도 수정하지 않았다.** `erase_run.py`, `erase_check.py`,
-`erase_eval.py`, `13__erase_gate.sh` 전부 그대로다. 입력은 `erase_run.py`가 이미
+`erase_stats.py`, `13__erase_gate.sh` 전부 그대로다. 입력은 `erase_run.py`가 이미
 남기고 있는 산출물뿐이고, 전부 사후(offline) 처리다 — 로봇도 카메라도 정책도 필요 없다.
 
 **지우는 법:**
@@ -68,7 +68,7 @@ python scripts/tools/eval_kit/summarize.py --markdown
 ```
 
 성공률 + Wilson 95% CI, `target_erased` 평균±sd, 훼손률, 위반/타임아웃 건수,
-게이트 불일치 건수. 조건 간 유의성 검정과 효과 크기는 기존 `erase_eval.py`에 이미
+게이트 불일치 건수. 조건 간 유의성 검정과 효과 크기는 기존 `erase_stats.py`에 이미
 있으니 거기서 본다 — 같은 걸 두 번 구현하지 않았다.
 
 ### 4. theta 캘리브레이션 (한 번, 실물 불필요)
