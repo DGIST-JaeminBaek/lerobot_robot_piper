@@ -2,7 +2,7 @@
 
 ## 검증 결과
 
-`scripts/tools/kinematics_check.py`로 팔 펌웨어가 CAN으로 직접 보고하는 EEF 피드백(`GetArmEndPoseMsgs()`)과 SDK 계산(`CalFK`/`GetFK`)을 실물 로봇에서 비교했고, 검증을 완료했다.
+`scripts/piper/hardware/kinematics_check.py`로 팔 펌웨어가 CAN으로 직접 보고하는 EEF 피드백(`GetArmEndPoseMsgs()`)과 SDK 계산(`CalFK`/`GetFK`)을 실물 로봇에서 비교했고, 검증을 완료했다.
 
 따라서 현재 컨벤션에서는 `CalFK()`/`GetFK()` 계산값을 EEF state/action 계산에 사용해도 된다. 자세한 오차 수치는 별도 실험 로그가 있으면 이 문서에 추가한다.
 
@@ -24,7 +24,7 @@ RViz/EEF 관련 논의에서 확인된 것들 — 전부 **하드웨어 없이**
 
 **준비물**:
 - Follower 팔 전원 켜기
-- CAN 인터페이스가 bring-up 상태일 것(`can_follower1` 등) — `scripts/1__init_can.sh` 또는 GUI의 CAN Setup 패널로 미리 이름/bitrate만 잡아두면 됨(그 뒤 GUI는 꺼도 무방). `configs/recording.env`의 `FOLLOWER_PORT` 값 확인
+- CAN 인터페이스가 bring-up 상태일 것(`can_follower` 등) — `scripts/1__init_can.sh` 또는 GUI의 CAN Setup 패널로 미리 이름/bitrate만 잡아두면 됨(그 뒤 GUI는 꺼도 무방). `configs/recording.env`의 `FOLLOWER_PORT` 값 확인
 - `ugrp` conda 환경
 
 ```bash
@@ -32,15 +32,15 @@ source ~/miniconda3/etc/profile.d/conda.sh
 conda activate ugrp
 
 # 기본 실행 (1회 측정)
-python3 scripts/tools/kinematics_check.py --port can_follower1
+python3 scripts/piper/hardware/kinematics_check.py --port can_follower
 
 # 여러 자세에서 반복 확인 (더 신뢰도 높음 — 그 사이 leader를 손으로 움직이면 됨)
-python3 scripts/tools/kinematics_check.py --port can_follower1 --samples 5 --interval 3.0
+python3 scripts/piper/hardware/kinematics_check.py --port can_follower --samples 5 --interval 3.0
 ```
 
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
-| `--port` | `can_follower1` | follower CAN 인터페이스 |
+| `--port` | `can_follower` | follower CAN 인터페이스 |
 | `--samples` | `1` | 비교 샘플 개수 |
 | `--interval` | `2.0` | 샘플 사이 대기 시간(초) |
 

@@ -10,8 +10,7 @@
 | 이 문서 | LeRobot의 기본 동기/비동기 실행 주기와 action chunk |
 | [Offline Action Chunk Rollout](offline_chunk_rollout.md) | 학습 데이터 observation을 이용한 비실물 예측 궤적 검사 |
 | [인간 승인형 Policy 실행](human_approved_policy_execution.md) | Action chunk를 구간별로 RViz 확인하고 승인 후 실행하는 구현 |
-| [평가 프로토콜](evaluation_protocol.md) | 지우기 롤아웃 채점 지표 정의·통계 근거·실험 설계 |
-| [평가 세션 실행 설명서](eval_session_howto.md) | 환경 세팅부터 GUI로 모델별 실물 롤아웃 돌리는 명령까지 — 실전 절차 |
+| [도형 지우기 평가 세션 실행 설명서](../tasks/erase_shape/evaluation/eval_session_howto.md) | 판정 방법 + 환경 세팅부터 GUI로 모델별 실물 롤아웃 돌리는 명령까지 |
 
 권장 확인 순서는 다음과 같다.
 
@@ -36,12 +35,12 @@ Checkpoint: outputs/train/smolvla_erase_shape_512/checkpoints/030000/pretrained_
 
 | 파일 | 목적 | 상태 |
 |---|---|---|
-| `scripts/tools/preview_video_crop.py` | SSH에서 TOP/WRIST crop 입력 확인 | 실행·확인 완료 |
-| `scripts/tools/piper_offline_chunk_rollout.py` | Dataset observation 기반 teacher-forced rollout | 15,000-step episode 0 실행 완료 |
-| `scripts/tools/piper_offline_rollout_rviz.py` | 저장한 rollout을 RViz에서 재생 | 구현 완료 |
-| `scripts/tools/piper_first_chunk_fk_analysis.py` | 60개 episode 첫 chunk의 Piper FK/EEF 비교 | 최종 30,000-step으로 실행 완료 |
-| `scripts/tools/piper_human_approved_inference.py` | Dataset 또는 live observation의 구간별 인간 승인 실행 | Dataset/RViz 확인 완료, 실물 경로 구현 완료 |
-| `scripts/tools/test_human_approved_inference_mock.py` | 승인 전 차단·분할 실행·effort trip 검증 | 5개 mock 통과 |
+| `scripts/piper/validation/preview_video_crop.py` | SSH에서 TOP/WRIST crop 입력 확인 | 실행·확인 완료 |
+| `scripts/piper/inference/piper_offline_chunk_rollout.py` | Dataset observation 기반 teacher-forced rollout | 15,000-step episode 0 실행 완료 |
+| `scripts/piper/inference/piper_offline_rollout_rviz.py` | 저장한 rollout을 RViz에서 재생 | 구현 완료 |
+| `scripts/tasks/erase_shape/analysis/first_chunk_fk_analysis.py` | 60개 episode 첫 chunk의 Piper FK/EEF 비교 | 최종 30,000-step으로 실행 완료 |
+| `scripts/piper/inference/piper_human_approved_inference.py` | Dataset 또는 live observation의 구간별 인간 승인 실행 | Dataset/RViz 확인 완료, 실물 경로 구현 완료 |
+| `scripts/tests/piper/inference/test_human_approved_inference_mock.py` | 승인 전 차단·분할 실행·effort trip 검증 | 5개 mock 통과 |
 
 아직 완료하지 않은 항목:
 

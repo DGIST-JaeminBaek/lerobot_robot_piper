@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # CAN 인터페이스 초기화 → 관절값 프리플라이트 체크 → teleop_ui GUI 실행을 한 번에 수행.
-# 개별 단계만 필요하면 기존 1__init_can.sh / scripts/tools/piper_session.py를
-# 직접 실행할 것 — 이 스크립트는 그 둘을 그대로 호출하는 얇은 래퍼임.
+# 개별 사전점검만 필요하면 1__init_can.sh 또는 hardware/joint_check.py를 직접 실행한다.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,7 +52,7 @@ if [[ "${SKIP_JOINT_CHECK}" == "true" ]]; then
 elif ! ip link show "${LEADER_PORT}" >/dev/null 2>&1 || ! ip link show "${FOLLOWER_PORT}" >/dev/null 2>&1; then
   echo "[INFO] ${LEADER_PORT}/${FOLLOWER_PORT} 이름이 아직 없어 건너뜀 — GUI에서 이름 배정 후 CAN Monitor로 직접 확인하세요."
 else
-  if ! python "${REPO_DIR}/scripts/tools/piper_session.py" --step joint_check --check_leader \
+  if ! python "${REPO_DIR}/scripts/piper/hardware/joint_check.py" --check-leader \
       --follower_can_interface="${FOLLOWER_PORT}" --leader_can_interface="${LEADER_PORT}"; then
     echo "[WARN] joint_check 실패 — CAN 배선/전원을 확인하세요." >&2
     read -r -p "그래도 GUI를 실행할까요? (y/N): " reply
@@ -78,4 +77,16 @@ fi
 
 echo
 echo "=== [3/4] teleop_ui GUI 실행 ==="
+# conda 기본 Tk는 Xft/fontconfig 없이 빌드되어 한글이 저해상도 X11 비트맵
+# 글리프로 보인다. 시스템 Tk는 Noto Sans CJK KR을 정상 인식하므로, GUI 프로세스에만
+# 시스템 Tcl/Tk를 선행 로드한다. 상세 운영 안내는 docs/operations.md의
+# "Teleop UI 한글 글꼴" 섹션을 참고한다. Python·프로젝트 패키지는 여전히 ugrp 환경 것을 쓴다.
+SYSTEM_TK_PRELOAD="/lib/x86_64-linux-gnu/libtcl8.6.so /lib/x86_64-linux-gnu/libtk8.6.so"
+if [[ -r /lib/x86_64-linux-gnu/libtcl8.6.so && -r /lib/x86_64-linux-gnu/libtk8.6.so ]]; then
+  echo "[INFO] 시스템 Tk 사용 — Noto 한글 글꼴 렌더링 적용"
+  exec env LD_PRELOAD="${SYSTEM_TK_PRELOAD}${LD_PRELOAD:+ ${LD_PRELOAD}}" \
+    python -m lerobot_robot_piper.teleop_ui
+fi
+
+echo "[WARN] 시스템 Tcl/Tk를 찾지 못해 conda Tk로 실행합니다." >&2
 exec python -m lerobot_robot_piper.teleop_ui

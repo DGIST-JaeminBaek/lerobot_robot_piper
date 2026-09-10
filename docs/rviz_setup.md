@@ -209,7 +209,7 @@ ros2 launch agx_arm_description display_piper.launch.py
 프로젝트 도구로 실행:
 
 ```bash
-python scripts/tools/piper_session.py --step rviz
+# Teleop UI를 연 뒤 CAN Setup 패널의 "RViz Start"를 누른다.
 ```
 
 또는 통합 GUI의 `RViz Start` 버튼을 사용합니다.

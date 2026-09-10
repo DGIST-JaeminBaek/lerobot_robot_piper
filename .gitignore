@@ -15,8 +15,16 @@ last_launch.log
 .DS_Store
 tmp/
 outputs/
+synthetic/
 메모장.txt
 timeline.md
+CLAUDE.md
 
 # QC / 구간 자르기 산출물 (scripts/tools/qc_studio.py 등) — 검토 결과는 재생성 가능
 configs/qc_review_*.json
+
+# 로컬 실행 산출물 / 개인 사본 (재생성 가능하거나 저장소에 둘 필요 없음)
+runs/
+erase_run_log.json
+configs/recording (copy).env
+*.pptx

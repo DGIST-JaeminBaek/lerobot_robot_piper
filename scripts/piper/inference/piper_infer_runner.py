@@ -1,0 +1,2679 @@
+#!/usr/bin/env python3
+"""piper_infer_runner.py — 정책 추론 제어 루프 본체 (GUI 없음).
+
+piper_infer_gui.py의 InferenceWorker를 여기로 뺀 것이다. GUI도, teleop_ui의
+Infer 프리셋도, CLI도 전부 이 한 루프를 쓴다. lerobot-record --policy.path를
+대체하지만 우회하지는 않는다 — LeRobotDataset / make_policy / PiperFollower 등
+lerobot API 위에 그대로 얹혀 있고, 실물 명령은 전부 PiperFollower.send_action()을
+지나가므로 max_relative_target과 effort 안전 컷오프가 유지된다.
+
+lerobot-record 대신 우리가 루프를 드는 이유는 temporal ensemble 때문이다.
+ensemble은 매 스텝 새로 예측한 action chunk들을 겹쳐서 가중평균하므로 chunk
+단위 접근이 필요한데, lerobot-record의 policy 경로는 chunk를 노출하지 않는다.
+자세한 근거와 실측값은 docs/policy/smoothing.md 참고.
+
+## 모드
+
+모드는 프리셋일 뿐이다 — 고르면 아래 값들이 세팅되고, 개별 값은 그대로 보이고
+따로 덮어쓸 수 있다. 논문에 조건을 명시해야 하므로 모드 뒤에 값을 숨기지 않는다.
+
+  demo(시연용)     기록 없음. 스무딩 강하게. 궤적/지표만 npz로 남긴다.
+  augment(증강용)  롤아웃을 LeRobotDataset으로 기록. 카메라는 크롭 전 원본
+                   프레임을 저장하고, 끝나면 성공/실패를 물어 sidecar에 남긴다.
+
+## 증강용 기록에서 지키는 것
+
+- 기록되는 action은 정책 raw 출력이 아니라 **스무딩을 거쳐 실제로 send_action()에
+  넘어간 값**이다. 그래야 영상과 움직임의 인과가 맞아 BC 학습에 쓸 수 있다.
+  raw chunk는 학습 호환성을 깨지 않도록 dataset feature가 아니라 옆의
+  `rollout_meta.json` / `raw_actions.npz`에 따로 남긴다.
+- 카메라는 정책에 먹인 512 크롭이 아니라 **원본 프레임**을 저장한다. 기존
+  Record 경로와 같은 형태라 scripts/tasks/erase_shape/dataset/prepare_erase_shape_dataset.py로
+  똑같이 학습용 변환을 돌릴 수 있다.
+- 실행 조건(스무딩 파라미터 전부 + 실제 측정 제어 주기)을 sidecar에 기록한다.
+
+주의: temporal ensemble을 켜고 기록하면 action_t가 과거 스텝의 chunk 예측에도
+영향을 받는다. 관찰↔행동 인과가 한 스텝 수준에서 살짝 번지므로, 순수한 BC
+데이터가 필요하면 ensemble을 끄고 기록하거나 raw_actions.npz 쪽을 쓸 것.
+
+실행:
+    python scripts/piper/inference/piper_infer_runner.py --help
+"""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import contextlib
+import dataclasses
+import json
+import logging
+import os
+import pathlib
+import queue
+import signal
+import sys
+import threading
+import time
+from typing import Any, Callable
+
+import numpy as np
+
+SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parents[2]
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+PIPER_DIR = SCRIPT_DIR.parent
+if str(PIPER_DIR) not in sys.path:
+    sys.path.insert(0, str(PIPER_DIR))
+
+from action_smoothing import (  # noqa: E402
+    AGGREGATE_FUNCTIONS,
+    GLOBAL_HIGH,
+    GLOBAL_LOW,
+    SmoothingConfig,
+    SmoothingPipeline,
+    smoothness_metrics,
+)
+from rviz_joint_state import piper_normalized_to_physical  # noqa: E402
+
+MOTOR_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"]
+REAL_ROBOT_CONFIRM = "I_UNDERSTAND_REAL_ROBOT"
+# MIT는 토크 제어라 위치 제어용 안전장치(max_relative_target, effort 컷오프)의
+# 의미가 달라진다. 실물 확인 문구와 별개로 하나 더 요구한다.
+MIT_CONFIRM = "I_UNDERSTAND_TORQUE_CONTROL"
+DEFAULT_ENV_FILE = REPO_ROOT / "configs" / "recording.env"
+
+
+class _GripperClampWarningFilter(logging.Filter):
+    """그리퍼만 클램프됐다고 알리는 lerobot 경고를 걸러낸다.
+
+    lerobot의 ensure_safe_goal_position()(robots/utils.py)은 클램프가 생길 때마다
+    매 스텝 logging.warning을 낸다. 그런데 그리퍼는 물체를 쥐고 있으면 "더 조여"라는
+    명령이 물리적으로 막혀 항상 클램프되므로(학습 데이터에서도 동일), 30Hz로 로그가
+    도배돼 정작 봐야 할 줄이 묻힌다.
+
+    관절 이름이 하나라도 들어 있으면 통과시킨다 — 그건 진짜 봐야 하는 경고다.
+    """
+
+    JOINT_NAMES = tuple(MOTOR_NAMES[:6])
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if "had to be clamped to be safe" not in message:
+            return True
+        return any(joint in message for joint in self.JOINT_NAMES)
+
+
+class RvizPublisher:
+    """예측 action을 /joint_states로 publish해서 RViz에서 보게 한다.
+
+    piper_infer_gui.py에 있던 것을 여기로 옮겼다 — GUI가 runner를 import하므로
+    반대 방향 import는 순환이 된다. GUI는 이제 여기서 가져다 쓴다.
+    """
+
+    def __init__(self, topic: str = "/joint_states", node_name: str = "piper_infer_runner") -> None:
+        import rclpy
+        from rclpy.node import Node
+        from sensor_msgs.msg import JointState
+
+        self._rclpy = rclpy
+        self._JointState = JointState
+        self._unnormalize = piper_normalized_to_physical
+        if not rclpy.ok():
+            rclpy.init()
+        self._node = Node(node_name)
+        self._publisher = self._node.create_publisher(JointState, topic, 10)
+        self.topic = topic
+
+    def publish(self, action: np.ndarray) -> None:
+        message = self._JointState()
+        message.header.stamp = self._node.get_clock().now().to_msg()
+        message.name = MOTOR_NAMES
+        message.position = [
+            self._unnormalize(name, float(value)) for name, value in zip(MOTOR_NAMES, action)
+        ]
+        self._publisher.publish(message)
+        self._rclpy.spin_once(self._node, timeout_sec=0.0)
+
+    def close(self) -> None:
+        try:
+            self._node.destroy_node()
+            if self._rclpy.ok():
+                self._rclpy.shutdown()
+        except Exception:
+            pass
+
+
+class Event:
+    """runner가 바깥(GUI/CLI)으로 보내는 이벤트 종류."""
+
+    LOG = "log"
+    STEP = "step"
+    FINISHED = "finished"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 모드 프리셋
+# ═══════════════════════════════════════════════════════════════════
+@dataclasses.dataclass(frozen=True)
+class ModePreset:
+    """모드를 고르면 적용되는 기본값. 개별 값은 이후 자유롭게 덮어쓸 수 있다."""
+
+    name: str
+    label: str
+    record_dataset: bool
+    record_raw_frames: bool
+    prompt_outcome: bool
+    smoothing: SmoothingConfig
+    description: str
+
+
+DEMO_MODE = ModePreset(
+    name="demo",
+    label="시연용",
+    record_dataset=False,
+    record_raw_frames=False,
+    prompt_outcome=False,
+    # 실측 최적값. docs/policy/smoothing.md의 TV/RMS jerk 표 참고.
+    #
+    # ema_alpha는 오랫동안 1.0(꺼짐)이었는데, 실물에서 위치 명령 자체가 스텝의
+    # 33.7%에서 방향을 뒤집는 걸 확인하고 켰다. MOVE J는 점대점 플래너가 그
+    # 지터를 뭉개줘서 티가 안 났지만, MIT는 충실한 추종기라 그대로 재현해
+    # 팔이 ~10Hz로 떤다. alpha=0.2면 방향 반전이 5.8%로 줄고 이동폭은 그대로다
+    # (42.28 vs 42.57) — 실제 움직임이 아니라 지터만 걷힌다.
+    smoothing=SmoothingConfig(
+        temporal_ensemble=True, ensemble_m=0.01, ema_alpha=0.2, rate_limit=5.0
+    ),
+    description="기록 없이 부드럽게 움직이는 데 집중. 궤적/지표만 npz로 남긴다.",
+)
+
+AUGMENT_MODE = ModePreset(
+    name="augment",
+    label="증강용",
+    record_dataset=True,
+    record_raw_frames=True,
+    prompt_outcome=True,
+    smoothing=SmoothingConfig(
+        temporal_ensemble=True, ensemble_m=0.01, ema_alpha=0.2, rate_limit=5.0
+    ),
+    description="롤아웃을 LeRobotDataset으로 기록. 원본 프레임 저장 + 성공/실패 표시.",
+)
+
+MODES: dict[str, ModePreset] = {DEMO_MODE.name: DEMO_MODE, AUGMENT_MODE.name: AUGMENT_MODE}
+MODE_LABELS = {mode.label: mode.name for mode in MODES.values()}
+
+
+def mode_preset(name: str) -> ModePreset:
+    if name not in MODES:
+        raise ValueError(f"알 수 없는 모드 {name!r} — {sorted(MODES)} 중 하나여야 합니다")
+    return MODES[name]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 롤아웃 dataset 기록
+# ═══════════════════════════════════════════════════════════════════
+def build_rollout_features(
+    *,
+    camera_shapes: dict[str, tuple[int, int, int]],
+    state_names: list[str],
+    action_names: list[str],
+) -> dict:
+    """롤아웃 dataset의 feature 정의를 만든다.
+
+    lerobot-record가 만드는 것과 같은 형태 — observation.state / action은 float32
+    벡터, 카메라는 HWC video. camera_shapes는 실제로 저장할 프레임 크기여야 한다
+    (증강용에서는 크롭 전 원본).
+    """
+    features: dict[str, dict] = {
+        "observation.state": {
+            "dtype": "float32",
+            "shape": (len(state_names),),
+            "names": list(state_names),
+        },
+        "action": {
+            "dtype": "float32",
+            "shape": (len(action_names),),
+            "names": list(action_names),
+        },
+    }
+    for camera, shape in camera_shapes.items():
+        features[f"observation.images.{camera}"] = {
+            "dtype": "video",
+            "shape": tuple(shape),
+            "names": ["height", "width", "channels"],
+        }
+    return features
+
+
+class RolloutRecorder:
+    """추론 롤아웃을 LeRobotDataset으로 기록한다.
+
+    기존 Record 경로가 만드는 데이터셋과 같은 형태를 유지해서, 녹화한 롤아웃을
+    prepare_erase_shape_dataset.py로 똑같이 학습용 변환할 수 있게 한다.
+    raw chunk와 실행 조건은 dataset feature를 오염시키지 않도록 sidecar로 뺀다.
+    """
+
+    def __init__(
+        self,
+        *,
+        root: pathlib.Path,
+        repo_id: str,
+        fps: int,
+        features: dict,
+        task: str,
+        robot_type: str = "piper_follower",
+        max_pending: int = 300,
+        vcodec: str = "h264",
+        # teleop(lerobot-record)의 num_image_writer_threads_per_camera와 같은 값이고,
+        # lerobot AsyncImageWriter docstring의 권장값("4 threads per camera")이기도 하다.
+        # 이 값을 켠 직후 libarrow.so 세그폴트가 같이 나타나서 한때 범인으로 의심했지만,
+        # 실측으로 무관함이 밝혀졌다(2026-08-21) — 진짜 원인은 채점 GUI(erase_eval_ui.py)가
+        # 워커 스레드에서 pyarrow를 최초 임포트한 것이었고(erase_eval.py 상단 주석 참고),
+        # 그쪽을 고치니 재현이 멈췄다. 그래서 원래 값(4)으로 되돌렸다.
+        image_writer_threads_per_camera: int = 4,
+    ) -> None:
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+        self.root = pathlib.Path(root)
+        self.repo_id = repo_id
+        self.task = task
+        self.fps = fps
+        self.frames_written = 0
+        self.episodes_written = 0
+        # ── 비동기 기록 ────────────────────────────────────
+        # 이 클래스 자신의 큐+쓰기 스레드는 LeRobotDataset.add_frame()을 제어
+        # 루프에서 분리하기 위한 것이다. 그런데 add_frame() 자체도 이미지를
+        # 어떻게 쓰는지는 image_writer_threads에 달렸다 — 0(과거 기본값)이면
+        # LeRobotDataset._save_image()가 write_image()를 그 자리에서 동기 호출한다.
+        # 실측(실제 카메라 프레임, 카메라 2대, 동기 쓰기 기준):
+        #     raw 1280x720  80.5ms/프레임  -> 30Hz 예산(33.3ms)의 241%
+        #     crop 512x512  25.3ms/프레임  -> 76%
+        # 즉 크롭본으로 줄여도 예산의 3/4를 녹화가 먹는다. 실물에서 raw로
+        # 녹화했을 때 이 스레드 자신의 큐가 못 따라가 프레임을 드롭했다
+        # (2026-08-21 실측: 687스텝 중 230프레임 드롭).
+        #
+        # teleop 녹화(lerobot-record, num_image_writer_threads_per_camera=4)는
+        # 이 문제가 없다 — image_writer_threads를 넘겨서 LeRobotDataset 자체의
+        # AsyncImageWriter(스레드풀, 무제한 큐)가 실제 디스크 쓰기를 병렬로
+        # 하기 때문에 add_frame()이 큐에 넣기만 하고 바로 리턴한다. 여기도
+        # image_writer_threads_per_camera만큼(기본값 근거는 그 인자 주석 참고)
+        # 넘겨서 이 클래스 자신의 큐가 정상 상황에서는 거의 안 밀리게 한다 —
+        # max_pending 드롭 로직은 안전장치로 그대로 남긴다.
+        self._queue: queue.Queue = queue.Queue(maxsize=max_pending)
+        self._dropped = 0
+        # 큐에 넣었지만 아직 dataset에 반영되지 않은 프레임 수.
+        # queue.empty()로 기다리면 안 된다 — 마지막 항목을 '꺼낸' 순간 empty가
+        # True가 되는데 그때는 아직 쓰는 중이라, 프레임 하나가 빠진 채 에피소드가
+        # 닫힌다(실측: 300개 넣고 299개만 반영돼 parquet 길이 불일치로 죽었다).
+        self._inflight = 0
+        self._inflight_lock = threading.Lock()
+        self._idle = threading.Condition(self._inflight_lock)
+        self._writer_error: str | None = None
+        self._stop = threading.Event()
+        num_cameras = sum(1 for key in features if key.startswith("observation.images."))
+        # 인코더 선택 근거는 RunSettings.vcodec 주석 참고.
+        self.dataset = LeRobotDataset.create(
+            repo_id=repo_id,
+            fps=fps,
+            features=features,
+            root=self.root,
+            robot_type=robot_type,
+            use_videos=True,
+            vcodec=vcodec,
+            image_writer_threads=image_writer_threads_per_camera * max(num_cameras, 1),
+        )
+        self._writer = threading.Thread(target=self._writer_loop, name="rollout-writer",
+                                        daemon=True)
+        self._writer.start()
+
+    def _writer_loop(self) -> None:
+        """큐를 비우며 실제 디스크 쓰기를 담당한다. 이 스레드만 dataset을 만진다."""
+        while True:
+            item = self._queue.get()
+            if item is None:           # 종료 신호
+                self._queue.task_done()
+                return
+            try:
+                self.dataset.add_frame(item)
+            except Exception as exc:   # 한 프레임 실패로 실행을 멈추지 않는다
+                self._writer_error = f"{type(exc).__name__}: {exc}"
+            finally:
+                self._queue.task_done()
+                with self._idle:
+                    self._inflight -= 1
+                    if self._inflight == 0:
+                        self._idle.notify_all()
+
+    def drain(self, timeout: float = 60.0) -> None:
+        """큐가 빌 때까지 기다린다. save_episode 전에 반드시 불러야 한다 —
+        안 그러면 아직 안 쓰인 프레임이 있는 채로 에피소드를 닫는다."""
+        with self._idle:
+            if self._inflight:
+                self._idle.wait_for(lambda: self._inflight == 0, timeout=timeout)
+        if self._inflight:
+            self._log_drain_timeout()
+
+    def _log_drain_timeout(self) -> None:
+        print(f"[RECORD] 경고: 쓰기가 밀려 {self._inflight}프레임이 반영되지 않았습니다")
+
+    @property
+    def dropped_frames(self) -> int:
+        """큐가 꽉 차서 버린 프레임 수. 0이 아니면 기록이 제어 주기를 못 따라간 것."""
+        return self._dropped
+
+    def add_frame(
+        self,
+        *,
+        state: np.ndarray,
+        action: np.ndarray,
+        images: dict[str, np.ndarray],
+    ) -> None:
+        frame: dict[str, Any] = {
+            "observation.state": np.asarray(state, dtype=np.float32),
+            "action": np.asarray(action, dtype=np.float32),
+            "task": self.task,
+        }
+        for camera, image in images.items():
+            # 복사한다. 호출자가 다음 스텝에 같은 버퍼를 재사용하면 쓰기 스레드가
+            # 뒤바뀐 내용을 저장하게 된다.
+            frame[f"observation.images.{camera}"] = np.asarray(image).copy()
+        with self._idle:
+            self._inflight += 1
+        try:
+            self._queue.put_nowait(frame)
+        except queue.Full:
+            with self._idle:
+                self._inflight -= 1
+            # 버리는 편이 낫다 — 여기서 블로킹하면 제어 루프가 멈춘다.
+            # 몇 장 버렸는지는 세서 실행 끝에 보고한다.
+            self._dropped += 1
+            return
+        self.frames_written += 1
+
+    def save_episode(self) -> None:
+        if self.frames_written == 0:
+            return
+        self.drain()          # 쓰기 스레드가 밀린 프레임을 다 반영할 때까지
+        if self._writer_error:
+            print(f"[RECORD] 경고: 쓰기 스레드 오류 — {self._writer_error}")
+        if self._dropped:
+            print(f"[RECORD] 경고: 큐가 밀려 {self._dropped}프레임을 버렸습니다 "
+                  f"— 학습에 쓰기 전에 확인하세요")
+        # nvenc를 쓸 때만 순차(같은 프로세스) 인코딩으로 내린다.
+        # lerobot 기본은 ProcessPoolExecutor로 fork해서 카메라별로 병렬 인코딩하는데,
+        # 부모가 이미 CUDA를 잡은 뒤라 fork된 자식에서 cuInit(0)이 실패한다
+        # (CUDA_ERROR_NOT_INITIALIZED) — nvenc가 죽고 폴백이 없어 영상이 아예 안
+        # 생겼다(2026-08-18 실측). 같은 프로세스에서는 nvenc가 정상 동작한다.
+        # CPU 인코더(h264 등)는 이 문제가 없으므로 병렬을 그대로 살린다 —
+        # 실측 660프레임 1280x720 2대: 병렬 1.54s vs 순차 약 3s.
+        self.dataset.save_episode(parallel_encoding="nvenc" not in self.dataset.vcodec)
+        self.episodes_written += 1
+        # 다음 에피소드를 위해 리셋한다. 수동 녹화는 한 실행에서 구간을 여러 번
+        # 끊어 담으므로, 안 지우면 두 번째 에피소드부터 프레임 수가 누적돼
+        # "쌓인 프레임이 없다" 판정과 로그가 전부 틀어진다.
+        self.frames_written = 0
+
+    def close(self) -> None:
+        """parquet writer를 닫는다. **안 부르면 데이터셋이 통째로 무효다.**
+
+        lerobot 0.4.4 LeRobotDataset.finalize()의 docstring 그대로다 — 호출하지 않으면
+        footer 메타가 안 쓰여서 파일이 parquet으로 열리지 않고(`Parquet magic bytes not
+        found in footer`) meta/episodes/도 안 생긴다. save_episode()만으로는 부족하다.
+
+        2026-08-18 첫 실물 롤아웃에서 드러났다. 영상(670프레임)은 멀쩡히 마감됐는데
+        data/chunk-000/file-000.parquet은 헤더만 PAR1이고 푸터가 없었다. 그래서 채점기가
+        그리퍼 로그를 못 읽어 종료 사유가 전부 unknown(no_log)이 됐다. 증강 재학습용으로
+        모아둔 롤아웃도 같은 이유로 못 읽었을 것이다.
+        """
+        finalize = getattr(self.dataset, "finalize", None)
+        if finalize is None:  # 구버전 호환 — 없으면 조용히 넘어간다
+            return
+        try:
+            finalize()
+        except Exception as error:
+            print(f"[RECORD] 경고: 데이터셋 마감 실패 — {error}")
+
+    def discard_episode(self) -> None:
+        # 쓰기가 밀린 채로 지우면 버퍼에 남은 프레임이 다음 에피소드로 새어든다.
+        self.drain()
+        buffer = getattr(self.dataset, "episode_buffer", None)
+        if buffer is not None:
+            episode_index = self._current_episode_index(buffer)
+            self.dataset.clear_episode_buffer()
+            self._remove_leftover_frames(episode_index)
+        self.frames_written = 0
+
+    @staticmethod
+    def _current_episode_index(buffer: dict) -> int:
+        index = buffer.get("episode_index", 0)
+        if isinstance(index, np.ndarray):
+            return int(index.item() if index.size == 1 else index[0])
+        if isinstance(index, list):
+            return int(index[0]) if index else 0
+        return int(index)
+
+    def _remove_leftover_frames(self, episode_index: int) -> None:
+        """폐기한 에피소드의 임시 PNG를 지운다.
+
+        lerobot 0.4.4의 clear_episode_buffer()는 meta.image_keys만 정리하는데,
+        우리 카메라는 video dtype이라 video_keys로 분류돼서 그 정리를 못 받는다.
+        그대로 두면 폐기할 때마다 images/ 밑에 프레임이 쌓인다.
+        """
+        import shutil
+
+        video_keys = list(getattr(self.dataset.meta, "video_keys", []))
+        for camera_key in video_keys:
+            try:
+                directory = self.dataset._get_image_file_dir(episode_index, camera_key)
+            except Exception:
+                continue
+            if directory.is_dir():
+                shutil.rmtree(directory, ignore_errors=True)
+
+    def write_sidecar(self, payload: dict) -> pathlib.Path:
+        """실행 조건 / 성공-실패 라벨 / raw chunk를 dataset 옆에 남긴다."""
+        path = self.root / "rollout_meta.json"
+        existing: list = []
+        if path.exists():
+            with contextlib.suppress(json.JSONDecodeError, OSError):
+                existing = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(existing, list):
+            existing = [existing]
+        existing.append(payload)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(existing, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
+        )
+        return path
+
+    def write_raw_actions(self, raw_actions: np.ndarray, episode_index: int) -> pathlib.Path:
+        path = self.root / f"raw_actions_ep{episode_index:04d}.npz"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(path, raw_first_actions=raw_actions)
+        return path
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 실행 설정
+# ═══════════════════════════════════════════════════════════════════
+@dataclasses.dataclass
+class RunSettings:
+    """runner 한 번의 실행에 필요한 전부. GUI/CLI가 공통으로 채운다."""
+
+    dataset_root: pathlib.Path
+    policy_path: str
+    # HAMLET 등 서드파티 policy 타입을 쓸 때 지정. lerobot-train의
+    # --policy.discover_packages_path와 같은 값(예: smolvla_hamlet)을 주면
+    # load_policy() 전에 그 패키지를 import해서 등록한다. PYTHONPATH에 해당
+    # 패키지가 있어야 함(예: PYTHONPATH=/home/ugrp43/jmbaek:$PYTHONPATH).
+    policy_discover_packages_path: str | None = None
+    episode: int = 0
+    task: str = ""
+    device: str = "cuda"
+    source: str = "dataset"  # dataset | robot
+    apply_to_robot: bool = False
+    real_robot_confirm: str = ""
+    # 학습 데이터 fps와 맞춘다. 정책은 "다음 프레임의 action"을 예측하므로 이 값이
+    # 학습 fps보다 낮으면 시연 동작이 그 비율만큼 슬로모션이 된다(30fps 학습을
+    # 6Hz로 재생 = 5배 느림). 낮은 명령 주파수는 "움직였다 멈췄다"를 반복해
+    # 물리적 끊김/진동도 만든다 — 궤적이 아무리 매끄러워도 티가 안 난다.
+    fps: float = 30.0
+    # chunk 하나가 이미 chunk_size(=50)스텝 분량을 담고 있어 매 스텝 추론할 필요가
+    # 없다. 5스텝마다 추론하면 30Hz에서 추론 간격이 167ms라 115ms 추론이 여유 있게
+    # 들어가고, 겹치는 chunk가 50/5=10개라 temporal ensemble도 유지된다.
+    infer_every: int = 5
+    # lerobot async_inference의 chunk_size_threshold(= SmolVLA 논문 Algorithm 1의
+    # threshold g)를 이식한 것. "threshold"(기본, 2026-08-11부로 전환)면 남은
+    # 큐(pending_steps) 비율이 chunk_threshold 이하로 떨어질 때마다 추론을
+    # 요청한다 — 논문이 말하는 "aggregating queues" 방식(g=0.7 sweet spot ↔
+    # chunk_threshold=1-g=0.3).
+    # "fixed"를 주면 이전 기본값이었던 infer_every 고정 간격 방식으로 돌아간다.
+    # 이전 동작은 scripts/archive/piper_infer_runner_prev.py에 그대로 남아있다.
+    trigger_mode: str = "threshold"
+    chunk_threshold: float = 0.3
+    # 추론 지연 보정. chunk[0]은 요청 시점의 예측인데 도착까지 3~4스텝이 흐르므로,
+    # 그만큼 앞을 잘라 '지금'에 맞춘다(_align_chunk 참고). 끄면 2026-08-12 이전
+    # 동작과 같아진다 — A/B 비교용으로 남겨둔다.
+    latency_align: bool = True
+    # 연속성 제약 재적합(CCR). smolvla_abp 계열 정책에서만 동작한다.
+    # 끄면(기본) 새 chunk는 latency_align의 `chunk[lag:]` 절단으로 이어붙는다.
+    # 켜면 정책이 낸 B-스플라인 제어점의 앞쪽 몇 개를 "이미 실행된 행동"에 맞춰
+    # 다시 풀어서, 새 궤적이 직전 과거에서 매끄럽게 이어지게 한다
+    # (ABPolicy arXiv:2602.23901 III-C). 기본 꺼짐 -- 켜고 끄며 A/B 하려고 남긴다.
+    ccr: bool = False
+    # 재적합할 앞쪽 제어점 개수. None이면 정책 config의 ccr_n_free(기본 4)를 쓴다.
+    ccr_n_free: int | None = None
+    horizon: int = 50
+    max_steps: int = 0
+    # 지우개를 놓으면 그 자리에서 끊고 파킹으로 간다. 기본은 꺼둔다 — 실물에서
+    # 검증된 기존 거동(스텝 예산을 다 쓰고 끝냄)을 조용히 바꾸지 않기 위해서다.
+    stop_on_release: bool = False
+    # 녹화 영상 인코더. 기본 h264(libx264) — 실측으로 고른 값이다.
+    # 660프레임 1280x720 2대 병렬: h264 1.54s / h264_nvenc 1.91s / libsvtav1 1.90s.
+    # 화이트보드 영상은 압축이 잘 돼서 GPU 이득이 없고 오히려 프레임 전송
+    # 오버헤드가 붙는다. 결정적인 건 속도가 아니라 **읽을 수 있느냐**다 —
+    # lerobot 기본 libsvtav1은 AV1이라 이 환경 OpenCV가 못 읽어서 채점기가
+    # PyAV로 우회해야 했고, cv2에 AV1을 넘기면 간헐적으로 프로세스가 죽었다
+    # (2026-08-18 평가 GUI Segmentation fault). h264는 cv2가 그냥 읽는다.
+    vcodec: str = "h264"
+    # 파킹 이동 도중에도 계속 녹화해서 영상을 파킹 완료 시점까지 이어 붙인다.
+    # --stop-on-release는 "놓는 순간" 녹화를 끊으므로, 이게 꺼져 있으면 마지막
+    # 프레임에 팔이 보드 앞에 있어서 최종 상태를 볼 수 없다. erase_run.py의
+    # judge_frame_from_video()가 이 영상의 마지막 프레임을 판정용 사진(after)으로
+    # 그대로 쓴다 — 카메라로 새로 한 장 더 찍으면 워밍업 때문에 몇 초 늦어져서
+    # 그 사이 사람이 보드를 정리해버리는 문제가 있었다(2026-08-20 실물 지적).
+    judge_frame_in_video: bool = True
+    loop_dataset: bool = False
+    rviz: bool = True
+    joint_state_topic: str = "/joint_states"
+    park_on_exit: bool = True
+    crops: dict = dataclasses.field(default_factory=dict)
+    camera_output_size: int = 512
+    # send_action의 안전 클램프. smoothing.rate_limit과는 다른 것이다 —
+    # rate_limit은 "직전 *명령*에서 얼마나 변할 수 있나"이고, 이건 "명령이 *실측
+    # 위치*에서 얼마나 떨어질 수 있나"다. 예전에는 둘을 같은 값으로 묶어놨는데,
+    # 그러면 스무딩을 조이려고 rate_limit을 줄일 때 로봇 클램프까지 조여져서
+    # 팔이 목표를 못 쫓아가고 매 스텝 포화된다. None이면 recording.env의
+    # MAX_RELATIVE_TARGET을 쓴다.
+    max_relative_target: float | None = None
+    # ModeCtrl의 MOVE 모드. 1=MOVE J(점대점), 5=MOVE CPV(연속 위치-속도).
+    # 30Hz 스트리밍에서는 MOVE J가 매 스텝 궤적을 다시 계획해 팔이 떤다.
+    # None이면 PiperFollowerConfig 기본값(MOVE J)을 그대로 쓴다.
+    move_mode: int | None = None
+    # ModeCtrl의 속도 백분율(0~100). 팔이 실제로 얼마나 빨리 움직이는지를 정한다 —
+    # smoothing의 rate_limit이나 max_relative_target과는 다르다. 그 둘은 명령값의
+    # 상한(천장)이라 올려도 팔이 빨라지지 않는다. None이면 config 기본값(30).
+    move_speed_rate: int | None = None
+    # A. 룩어헤드(초). 0이면 꺼짐. MOVE J는 목표마다 궤적을 계획하는데, 33ms 앞의
+    # 목표는 거리가 너무 짧아 가속 초입만 밟다 교체된다. 앞을 보고 쏘면 각 명령에
+    # 실제 거리와 일관된 방향이 생긴다(pure pursuit의 carrot). 대신 코너를 자르고
+    # 기준 궤적보다 그만큼 뒤처진다.
+    lookahead_s: float = 0.0
+    # C. MIT(임피던스) 제어. 궤적 재계획이 없어 30Hz 스트리밍에 맞는 인터페이스.
+    # ⚠ 토크 제어라 게인이 잘못되면 팔이 무너지거나 진동한다 — 기본 꺼짐이고
+    # 켜려면 확인 문구까지 필요하다.
+    use_mit: bool = False
+    mit_kp: float = 10.0
+    mit_kd: float = 0.8
+    mit_confirm: str = ""
+    # 관절별 kp 덮어쓰기 "joint2=30,joint3=20". 빈 문자열이면 config 기본값을 쓴다.
+    mit_kp_overrides: str | None = None
+    # vel_ref 다듬기. 30Hz 궤적을 그냥 미분하면((a-prev)*fps) 지터가 30배로
+    # 증폭돼 속도 신호가 아니라 노이즈가 된다 — 실측에서 스텝 간 변화가 속도
+    # 크기의 72%였고 부호가 3스텝에 1번(28.7%) 뒤집혔다. 그걸 kd*(vel_ref-vel)에
+    # 넣으면 초당 10번 방향이 바뀌는 토크가 나가서 팔이 떤다.
+    # EMA alpha=0.2면 부호 반전이 8.1%, 스텝 간 변화가 1.55로 줄고 크기는 유지된다.
+    mit_vel_smoothing: float = 0.2
+    # vel_ref 배율. 0이면 속도 피드포워드를 완전히 끈다(순수 위치 임피던스) —
+    # 흔들림 원인이 속도항인지 가려낼 때 쓴다.
+    mit_vel_scale: float = 1.0
+    # HIL 개입(리더암 클러치). 기본 꺼짐 — 켜지 않으면 아래 경로는 통째로 비활성이라
+    # 기존 동작과 바이트 단위로 같다. 켜면 space로 정책↔사람 제어권을 토글한다.
+    # 상세는 docs/tasks/erase_shape/runtime/erase_run_design.md §5, 구현은 hil_clutch.py.
+    hil: bool = False
+    leader_port: str = "can_leader"
+    clutch_gain: float = 1.0
+    smoothing: SmoothingConfig = dataclasses.field(default_factory=SmoothingConfig)
+    # 모드 프리셋에서 오는 값들 — 개별 수정 가능
+    mode: str = DEMO_MODE.name
+    record_dataset: bool = False
+    # 수동 녹화. True면 녹화기와 이미지 캡처는 준비하되 프레임은 사람이
+    # '녹화 시작'을 누른 구간에만 쌓는다. record_dataset(전체 자동 녹화)과 배타적이
+    # 아니라 보완재다 — HIL에서는 개입 구간만 골라 담고 싶기 때문.
+    record_manual: bool = False
+    # space(개입 토글)에 녹화를 묶는다. 개입 시작 = 녹화 시작, 반환 = 에피소드 저장.
+    # 손이 리더암에 묶여 있어 버튼을 따로 누르기 어렵고, HIL 데이터 수집의 목적이
+    # 정확히 '개입 구간'이라 경계가 그대로 맞는다.
+    record_on_intervention: bool = True
+    record_raw_frames: bool = False
+    prompt_outcome: bool = False
+    record_root: pathlib.Path | None = None
+    record_repo_id: str = ""
+
+    @classmethod
+    def from_mode(cls, mode: str, **overrides: Any) -> "RunSettings":
+        """모드 프리셋을 적용한 뒤 overrides로 덮어쓴다."""
+        preset = mode_preset(mode)
+        base: dict[str, Any] = {
+            "mode": preset.name,
+            "record_dataset": preset.record_dataset,
+            "record_raw_frames": preset.record_raw_frames,
+            "prompt_outcome": preset.prompt_outcome,
+            "smoothing": preset.smoothing,
+        }
+        base.update(overrides)
+        return cls(**base)
+
+    def real_robot_enabled(self) -> bool:
+        """실물 전송이 실제로 열렸는지. 세 조건을 모두 만족해야 한다."""
+        return (
+            self.source == "robot"
+            and self.apply_to_robot
+            and self.real_robot_confirm == REAL_ROBOT_CONFIRM
+        )
+
+    def describe(self) -> str:
+        preset = mode_preset(self.mode)
+        record = "on" if self.record_dataset else "off"
+        trigger = (
+            f"infer_every={self.infer_every}"
+            if self.trigger_mode == "fixed"
+            else f"chunk_threshold={self.chunk_threshold:g}"
+        )
+        return (
+            f"mode={preset.name}({preset.label}) source={self.source} "
+            f"record={record} fps={self.fps:g} trigger={self.trigger_mode}({trigger}) "
+            f"latency_align={'on' if self.latency_align else 'off'} "
+            f"ccr={'on' if self.ccr else 'off'} "
+            f"smoothing={self.smoothing.summary()}"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 제어 루프
+# ═══════════════════════════════════════════════════════════════════
+class InferenceRunner(threading.Thread):
+    """정책 추론 → 스무딩 → (RViz/실물) 전송 → (선택) dataset 기록 루프.
+
+    GUI 없이 단독으로 돈다. 진행 상황은 events 큐로 나가고, GUI는 그걸 그려주기만
+    하면 된다. events를 안 주면 큐를 내부에 만들어 CLI가 소비한다.
+    """
+
+    def __init__(
+        self,
+        settings: RunSettings,
+        events: "queue.Queue[tuple[str, object]] | None" = None,
+        *,
+        outcome_prompt: Callable[[], tuple[str, str]] | None = None,
+    ) -> None:
+        super().__init__(daemon=True)
+        self.settings = settings
+        self.events: "queue.Queue[tuple[str, object]]" = events or queue.Queue()
+        self.outcome_prompt = outcome_prompt
+
+        self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.estop_event = threading.Event()
+
+        self.trajectory: list[np.ndarray] = []
+        self.raw_trajectory: list[np.ndarray] = []
+        self.step_periods: list[float] = []
+        self.status = "not_started"
+        self.recorded_path: pathlib.Path | None = None
+        # 파킹 이어찍기의 **마지막 원본 프레임**(RGB, 크롭 전 1280x720). 지우기 판정은
+        # 지금까지 녹화 영상의 마지막 프레임을 디코딩해서 썼는데, 그건 crf/qp=30으로
+        # 압축된 뒤라 기준 프레임(카메라 직접 촬영, 무손실)과 화질이 비대칭이다.
+        # 실측(2026-08-21): 같은 사진을 h264 crf30에 통과시키면 선명도가 절반으로
+        # 떨어지고(Laplacian var 118->60) 잉크 비율이 6.4% 줄어든다 — ink_after만
+        # 과소평가되므로 erased_frac이 성공 쪽으로 계통 편향된다. 그래서 압축 전
+        # 원본을 여기에 들고 있다가 판정에 쓴다(erase_run.py가 가져간다).
+        self.judge_frame_raw: np.ndarray | None = None
+
+        # HIL 개입 집계 — 개입률은 §8 보고 지표라 러너가 직접 센다.
+        self.intervention_steps = 0
+        self.engage_deviation_details: list[dict] = []
+        # 가장 최근에 잰 리더-팔로워 관절별 편차 (개입 전 정렬 안내용)
+        self.last_leader_dev: dict | None = None
+        self.engage_deviations: list[float] = []
+        self.hil_aborted = False
+        # HIL 개입 토글. --hil일 때 루프가 채운다 (그 전에는 None).
+        self.hil_toggle = None
+        # 개입 명령이 관절 범위를 벗어나 잘린 스텝 수. 0이 아니면 리더암이
+        # 팔로워가 갈 수 없는 곳을 가리키고 있다는 뜻이다.
+        self._hil_clipped_steps = 0
+        # 수동 녹화 상태. 패널/외부 스레드가 건드리므로 lock으로 감싼다.
+        self.record_armed = False
+        self.recorded_episodes = 0
+        self._record_lock = threading.Lock()
+        self._record_stop_requested = False
+
+        self._pending_smoothing: SmoothingConfig | None = None
+        self._smoothing_lock = threading.Lock()
+        self._clamp_window: list[bool] = []          # 관절 6개만
+        self._gripper_clamp_window: list[bool] = []  # 그리퍼는 따로 — _track_send 주석 참고
+        self._gripper_clamp_reported = False
+        self._clamp_saturated_reports = 0
+        # smoothing의 rate_limit이 실제로 얼마나 잘라내는지. max_relative_target과
+        # 다른 것이다 — 이건 "직전 명령 대비" 제한이라 먼저 걸리면 명령이 애초에
+        # 커지지 못해 max_relative_target에는 도달조차 안 한다.
+        self._rate_adjustments: list[float] = []
+        self._phase_totals: dict[str, list[float]] = {
+            name: [] for name in ("loop", "observe", "infer", "send", "record")
+        }
+        self._late_steps = 0
+        # 요청에는 (요청 시점 step, 관찰, 선택 시점의 immutable HAMLET history)를,
+        # 결과에는 (요청 시점 step, chunk)를 싣는다.
+        # 추론이 도는 동안에도 제어 루프는 큐를 계속 소비하므로, chunk가 도착했을 때
+        # 몇 스텝이 흘렀는지 알아야 제자리에 붙일 수 있다. _align_chunk() 참고.
+        self._infer_requests: "queue.Queue[tuple[int, dict, object | None] | None]" = queue.Queue(maxsize=1)
+        self._infer_results: "queue.Queue[tuple[int, np.ndarray, np.ndarray | None]]" = queue.Queue()
+        self._infer_lags: list[int] = []
+        self._stale_chunks = 0
+        # CCR 상태. _align_chunk가 정책을 직접 불러야 해서 참조를 들고 있는다.
+        self._policy = None
+        self._ccr_active = False          # 정책이 지원하고 설정도 켜졌을 때만 True
+        self._ccr_applied = 0
+        self._ccr_skipped = 0             # 이력 부족 등으로 절단으로 되돌아간 횟수
+        self._infer_busy = threading.Event()
+        self._infer_thread: threading.Thread | None = None
+        self._infer_error: str | None = None
+        self._last_infer_seconds = 0.0
+
+    # ── 바깥에서 거는 제어 ─────────────────────────────────
+    def arm_recording(self) -> None:
+        """지금부터 프레임을 쌓기 시작한다 (수동 녹화)."""
+        with self._record_lock:
+            self.record_armed = True
+        self._log("[RECORD] 녹화 시작")
+
+    def stop_recording(self) -> None:
+        """지금까지 쌓은 프레임을 한 에피소드로 저장하고 멈춘다."""
+        with self._record_lock:
+            if not self.record_armed:
+                return
+            self.record_armed = False
+            self._record_stop_requested = True
+        self._log("[RECORD] 녹화 종료 요청 — 다음 스텝에서 에피소드를 저장한다")
+
+    def apply_smoothing(self, config: SmoothingConfig) -> None:
+        with self._smoothing_lock:
+            self._pending_smoothing = config
+
+    def emergency_stop(self) -> None:
+        self.estop_event.set()
+        self.stop_event.set()
+
+    def _take_pending_smoothing(self) -> SmoothingConfig | None:
+        with self._smoothing_lock:
+            pending, self._pending_smoothing = self._pending_smoothing, None
+        return pending
+
+    def _log(self, message: str) -> None:
+        self.events.put((Event.LOG, message))
+
+    # ── 측정된 실제 제어 주기 ──────────────────────────────
+    def measured_fps(self) -> float:
+        if len(self.step_periods) < 2:
+            return 0.0
+        return 1.0 / float(np.mean(self.step_periods))
+
+    def run(self) -> None:  # noqa: C901 — 순차적 셋업이라 나누면 오히려 읽기 나쁨
+        settings = self.settings
+        robot = None
+        rviz = None
+        recorder = None
+        leader = None
+        toggle = None
+        mixer = None
+        status = "finished"
+        try:
+            import torch  # noqa: F401  (정책 로딩 전에 import 비용을 여기서 치른다)
+
+            from lerobot.datasets.lerobot_dataset import LeRobotDataset
+            from lerobot.utils.utils import get_safe_torch_device
+
+            from inference_runtime import (
+                hamlet_real_history_enabled,
+                preprocess_live_camera_observation,
+                state_from_raw_observation,
+                validate_hamlet_real_history_policy,
+                validate_live_camera_output_size,
+            )
+            from inference_runtime import (
+                load_policy,
+                make_raw_observation,
+                predict_chunk,
+            )
+
+            self._log(f"[RUN] {settings.describe()}")
+
+            dataset_root = pathlib.Path(settings.dataset_root).expanduser().resolve()
+            self._log(f"[LOAD] dataset={dataset_root} (episode {settings.episode})")
+            dataset = LeRobotDataset(
+                repo_id=f"local/{dataset_root.name}",
+                root=dataset_root,
+                episodes=[settings.episode],
+                video_backend="pyav",
+            )
+            camera_keys = list(dataset.meta.camera_keys)
+            self._log(f"[LOAD] {dataset.num_frames} frames, cameras={camera_keys}")
+
+            # 정책 로딩(수십 초)과 로봇 연결 전에 확인한다 — 안 맞으면 그 뒤에
+            # 텐서 크기 불일치로 죽는데, 그 시점엔 이미 팔이 연결돼 있다.
+            check_policy_dataset_match(settings.policy_path, dataset_root)
+
+            if settings.policy_discover_packages_path:
+                import importlib
+
+                importlib.import_module(settings.policy_discover_packages_path)
+                self._log(f"[PLUGIN] imported {settings.policy_discover_packages_path!r}")
+
+            self._log(f"[LOAD] policy={settings.policy_path} device={settings.device}")
+            config, policy, preprocessor, postprocessor = load_policy(
+                settings.policy_path, dataset.meta, settings.device
+            )
+            device = get_safe_torch_device(policy.config.device)
+            policy.reset()
+            self._policy = policy
+
+            # CCR은 제어점 공간에서 동작하므로 정책이 그걸 노출해야 한다.
+            # 지원하지 않는 정책(stock SmolVLA 등)에 --ccr을 주면 조용히 무시하지
+            # 않고 여기서 명확히 끈다.
+            if settings.ccr:
+                missing = [
+                    name for name in ("last_control_points", "refit_control_points", "rebuild_actions")
+                    if not hasattr(policy, name)
+                ]
+                if missing:
+                    self._log(
+                        f"[CCR] 이 정책은 CCR을 지원하지 않는다 (없는 항목: {', '.join(missing)}). "
+                        "절단 방식으로 진행한다 — smolvla_abp 계열 체크포인트가 필요하다."
+                    )
+                elif not settings.latency_align:
+                    self._log("[CCR] --no-latency-align과 함께 쓸 수 없다 (지연 보정이 CCR의 전제). CCR을 끈다.")
+                else:
+                    self._ccr_active = True
+                    n_free = settings.ccr_n_free or getattr(policy.config, "ccr_n_free", 4)
+                    self._log(
+                        f"[CCR] on — n_free={n_free}, "
+                        f"history={getattr(policy.config, 'action_history_horizon', '?')}, "
+                        f"n_ctrl={getattr(policy.config, 'n_ctrl', '?')}"
+                    )
+            train_fps = float(getattr(dataset.meta, "fps", 0) or 0)
+            hamlet_history = None
+            hamlet_delta_indices: list[int] | None = None
+            if hamlet_real_history_enabled(policy):
+                from hamlet_history import TimestampedImageRingBuffer, history_retention_s
+
+                validate_hamlet_real_history_policy(policy)
+                if train_fps <= 0:
+                    raise ValueError("HAMLET real-history rollout requires a positive dataset FPS")
+                hamlet_delta_indices = list(policy.config.observation_delta_indices)
+                hamlet_history = TimestampedImageRingBuffer(
+                    max_age_s=history_retention_s(hamlet_delta_indices, train_fps)
+                )
+                self._log(
+                    "[HAMLET] 실제 이미지 history 활성: "
+                    f"delta={hamlet_delta_indices}, fps={train_fps:g}"
+                )
+            chunk_size = int(getattr(config, "chunk_size", 0)) or settings.horizon
+            horizon = min(settings.horizon, chunk_size)
+            self._log(f"[LOAD] policy chunk_size={chunk_size}, using horizon={horizon}")
+
+            if settings.source == "robot":
+                validate_live_camera_output_size(
+                    dataset.features, camera_keys, settings.camera_output_size
+                )
+                # 그리퍼 전용 클램프 경고가 30Hz로 도배되는 걸 막는다. 관절이 걸리면
+                # 그대로 통과하므로 진짜 문제는 여전히 보인다.
+                logging.getLogger().addFilter(_GripperClampWarningFilter())
+                self._log("[LOG] 그리퍼 전용 클램프 경고는 숨깁니다 (관절 경고는 그대로 표시)")
+
+                from inference_runtime import build_robot_from_env
+
+                self._log("[CONNECT] Piper follower + camera 연결 중…")
+                clamp = settings.max_relative_target
+                if clamp is None:
+                    clamp = float(os.environ.get("MAX_RELATIVE_TARGET", "5.0"))
+                self._log(f"[ROBOT] max_relative_target={clamp:g} (실측 위치 기준 클램프)")
+                robot = build_robot_from_env(clamp)
+                if settings.use_mit:
+                    robot.config.use_mit_control = True
+                    robot.config.mit_kp = settings.mit_kp
+                    robot.config.mit_kd = settings.mit_kd
+                    if settings.mit_kp_overrides is not None:
+                        robot.config.mit_kp_overrides = settings.mit_kp_overrides
+                    self._log(
+                        f"[ROBOT] 관절별 kp: {robot.config.mit_kp_overrides or '(없음, 공통)'}"
+                    )
+                    if settings.mit_vel_scale == 0:
+                        self._log("[ROBOT] 속도 피드포워드 꺼짐 — 순수 위치 임피던스")
+                    else:
+                        self._log(
+                            f"[ROBOT] vel_ref: EMA alpha={settings.mit_vel_smoothing:g}, "
+                            f"배율 {settings.mit_vel_scale:g}"
+                        )
+                    self._log(
+                        f"[ROBOT] MIT(임피던스) 제어 kp={settings.mit_kp:g} kd={settings.mit_kd:g} "
+                        "— 궤적 재계획 없음, chunk 속도를 vel_ref로 전달"
+                    )
+                    self._log(
+                        "[WARN] 토크 제어입니다. max_relative_target과 effort 컷오프는 "
+                        "위치 제어 전제라 의미가 달라집니다 — 이상하면 즉시 E-STOP"
+                    )
+                if settings.move_speed_rate is not None:
+                    robot.config.move_speed_rate = settings.move_speed_rate
+                    robot.bus.move_speed_rate = settings.move_speed_rate
+                    self._log(f"[ROBOT] move_speed_rate={settings.move_speed_rate}% (컨트롤러 이동 속도)")
+                if settings.move_mode is not None:
+                    # 연결 전에 바꿔야 첫 명령부터 적용된다.
+                    robot.config.move_mode = settings.move_mode
+                    robot.bus.move_mode = settings.move_mode
+                    label = {1: "MOVE J(점대점)", 5: "MOVE CPV(연속 위치-속도)"}.get(
+                        settings.move_mode, str(settings.move_mode)
+                    )
+                    self._log(f"[ROBOT] move_mode={settings.move_mode} {label}")
+                robot.connect()
+                self._log("[CONNECT] 연결 완료")
+
+            # ── HIL(리더암 개입) 준비 ──────────────────────────
+            # 실물에 명령이 나가는 경우에만 의미가 있다. dataset 소스나 apply_to_robot이
+            # 꺼진 상태에서 리더를 잡으면 CAN만 점유하고 하는 일이 없다.
+            if settings.hil:
+                if not settings.real_robot_enabled():
+                    self._log("[HIL] 실물 전송이 꺼져 있어 개입을 활성화하지 않습니다")
+                else:
+                    from hil_clutch import (
+                        Clutch,
+                        ClutchMixer,
+                        KeyToggle,
+                        deviation_per_joint,
+                    )
+
+                    from lerobot_robot_piper import PiperLeader, PiperLeaderConfig
+
+                    self._log(f"[HIL] 리더암 연결 중… port={settings.leader_port}")
+                    leader = PiperLeader(
+                        PiperLeaderConfig(id="infer_runner", port=settings.leader_port)
+                    )
+                    leader.connect()
+                    toggle = KeyToggle().start()
+                    # 바깥(상태 패널 등)에서 개입 토글을 눌러줄 수 있도록 노출한다.
+                    # 지역 변수로만 두면 pynput 전역 키 말고는 접근 경로가 없다.
+                    self.hil_toggle = toggle
+                    mixer = ClutchMixer(toggle, leader, Clutch(settings.clutch_gain))
+                    self._log(
+                        f"[HIL] 활성 — space = 개입 on/off, q = 중단 "
+                        f"(clutch_gain={settings.clutch_gain:g})"
+                    )
+
+            if settings.rviz:
+                try:
+                    rviz = RvizPublisher(settings.joint_state_topic)
+                    self._log(f"[RVIZ] publishing to {rviz.topic}")
+                except Exception as error:
+                    self._log(f"[WARN] RViz publisher를 만들 수 없음 — 비활성화: {error}")
+                    rviz = None
+
+            task = settings.task or str(dataset[0].get("task", ""))
+            self._log(f"[TASK] {task!r}")
+
+            def predict(raw_observation: dict, rollout_history=None):
+                """(chunk, control_points)를 돌려준다. CCR이 꺼져 있으면 제어점은 None."""
+                result = predict_chunk(
+                    raw_observation=raw_observation,
+                    dataset_features=dataset.features,
+                    policy=policy,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    device=device,
+                    task=task,
+                    rollout_history=rollout_history,
+                    return_control_points=self._ccr_active,
+                )
+                control_points = None
+                if self._ccr_active:
+                    result, control_points = result
+                    if control_points is not None:
+                        control_points = control_points.numpy().astype(np.float32, copy=False)
+                chunk = result.numpy().astype(np.float32, copy=False)[:horizon]
+                if not np.isfinite(chunk).all():
+                    raise ValueError("정책이 NaN/Inf를 출력했습니다")
+                if control_points is not None and not np.isfinite(control_points).all():
+                    raise ValueError("정책이 NaN/Inf 제어점을 출력했습니다")
+                return chunk, control_points
+
+            self._start_inference_worker(predict)
+
+            pipeline = SmoothingPipeline(settings.smoothing)
+            self._log(f"[SMOOTH] {settings.smoothing.summary()}")
+
+            # 명령 주파수가 학습 fps보다 낮으면 동작이 그 비율만큼 슬로모션이 되고,
+            # 낮은 주파수 자체가 "움직였다 멈췄다"를 만들어 물리적으로 끊겨 보인다.
+            # 실측으로 확인된 증상이라 조용히 넘기지 않고 경고한다.
+            if train_fps and settings.fps < train_fps * 0.9:
+                self._log(
+                    f"[WARN] 명령 주파수 {settings.fps:g}Hz < 학습 fps {train_fps:g} "
+                    f"— 동작이 {train_fps / settings.fps:.1f}배 느려지고 끊겨 보입니다. "
+                    f"--fps {train_fps:g} --infer-every {max(1, round(chunk_size / 10))} 권장"
+                )
+            if settings.smoothing.temporal_ensemble:
+                if settings.trigger_mode == "threshold":
+                    votes = max(1, round(1.0 / max(settings.chunk_threshold, 1e-6)))
+                    self._log(
+                        f"[SMOOTH] trigger=threshold({settings.chunk_threshold:g}) "
+                        f"→ ensemble 최대 {votes}표 근사"
+                    )
+                else:
+                    votes = max(1, horizon // max(1, settings.infer_every))
+                    self._log(f"[SMOOTH] infer_every={settings.infer_every} → ensemble 최대 {votes}표")
+                if votes < 3:
+                    self._log("[WARN] 표수가 3 미만이라 temporal ensemble 효과가 거의 없습니다")
+
+            fps = settings.fps
+            period = 1.0 / fps
+            infer_every = max(1, settings.infer_every)
+            max_steps = settings.max_steps
+            cursor = 0
+            step = 0
+            first_state = None
+            previous_action: np.ndarray | None = None
+            smoothed_velocity: np.ndarray | None = None
+            state_names = list(dataset.features["observation.state"]["names"])
+            action_names = list(dataset.features["action"]["names"])
+            last_loop_start: float | None = None
+            release_detector = ReleaseDetector() if settings.stop_on_release else None
+
+            while not self.stop_event.is_set():
+                # 개입 스텝은 정책 예산에서 깎지 않는다.
+                # max_steps는 '정책이 너무 오래 끈다'에 대한 안전장치인데, 사람이
+                # 조작한 시간까지 여기서 빼면 개입할수록 정책에게 남는 시간이 줄어든다.
+                # 실물 3차 HIL에서 26.0초 지점에 개입했더니 5.3초 만에 상한에 걸려
+                # 끊겼다 — 손을 뗀 게 아니라 예산이 없어서 끝난 것이다.
+                policy_steps = step - self.intervention_steps
+                # 사람이 한 번이라도 개입했으면 시간 제한을 아예 푼다.
+                # 개입은 정책이 못 하는 상황을 사람이 수습하는 것이라 얼마나
+                # 걸릴지 미리 알 수 없다. 스텝 예산으로 끊으면 수습 도중에
+                # 끝나버린다(3차 HIL에서 실제로 5.3초 만에 잘렸다).
+                # 종료는 사람이 q로 한다 — 판단 주체가 사람으로 넘어간 상태다.
+                if self.intervention_steps and max_steps:
+                    self._log(
+                        "[HIL] 개입이 있었으므로 max_steps 제한을 해제한다 "
+                        "— 끝내려면 q를 누르세요"
+                    )
+                    max_steps = 0
+                if max_steps and policy_steps >= max_steps:
+                    self._log(
+                        f"[STOP] max_steps({max_steps}) 도달 "
+                        f"(전체 {step}스텝 중 개입 {self.intervention_steps}스텝 제외)"
+                    )
+                    break
+                if self.pause_event.is_set():
+                    time.sleep(0.05)
+                    continue
+
+                pending = self._take_pending_smoothing()
+                if pending is not None:
+                    pipeline.update_config(pending, state=first_state)
+                    settings.smoothing = pending
+                    self._log(f"[SMOOTH] 실행 중 변경 → {pending.summary()}")
+
+                loop_started = time.perf_counter()
+                if last_loop_start is not None:
+                    self.step_periods.append(loop_started - last_loop_start)
+                last_loop_start = loop_started
+
+                # ── observation ────────────────────────────────
+                record_images: dict[str, np.ndarray] = {}
+                observe_started = time.perf_counter()
+                if settings.source == "dataset":
+                    if cursor >= dataset.num_frames:
+                        if not settings.loop_dataset:
+                            self._log("[STOP] dataset episode 끝")
+                            break
+                        cursor = 0
+                        if hamlet_history is not None:
+                            # Dataset source의 반복은 새 episode처럼 취급한다.
+                            # 이전 episode의 실제 image를 다음 episode history에 섞지 않는다.
+                            hamlet_history.clear()
+                            policy.reset()
+                            self._log("[HAMLET] dataset loop 경계 — memory/history 초기화")
+                    raw_observation = make_raw_observation(dataset, dataset[cursor])
+                    observation_frame = cursor
+                    if settings.record_dataset or settings.record_manual:
+                        record_images = {
+                            key.removeprefix("observation.images."): np.asarray(
+                                raw_observation[key.removeprefix("observation.images.")]
+                            )
+                            for key in camera_keys
+                        }
+                else:
+                    live_observation = robot.get_observation()
+                    if (settings.record_dataset or settings.record_manual) and settings.record_raw_frames:
+                        # 정책에 먹이기 전, 크롭/리사이즈 전 원본 프레임을 따로 잡아둔다.
+                        record_images = {
+                            key.removeprefix("observation.images."): np.asarray(
+                                live_observation[key.removeprefix("observation.images.")]
+                            ).copy()
+                            for key in camera_keys
+                        }
+                    raw_observation = preprocess_live_camera_observation(
+                        live_observation,
+                        camera_keys,
+                        settings.crops,
+                        settings.camera_output_size,
+                    )
+                    if (settings.record_dataset or settings.record_manual) and not settings.record_raw_frames:
+                        record_images = {
+                            key.removeprefix("observation.images."): np.asarray(
+                                raw_observation[key.removeprefix("observation.images.")]
+                            ).copy()
+                            for key in camera_keys
+                        }
+                    observation_frame = step
+
+                self._phase_totals["observe"].append(time.perf_counter() - observe_started)
+                measured_state = state_from_raw_observation(raw_observation, dataset.features)
+                history_snapshot = None
+                if hamlet_history is not None:
+                    # The control loop only copies a cropped/resized HWC uint8
+                    # camera bundle. Tensor conversion and policy preprocessing
+                    # happen later in the inference worker from this immutable
+                    # request snapshot.
+                    now = time.monotonic()
+                    hamlet_history.append(
+                        now,
+                        {
+                            key.removeprefix("observation.images."): np.asarray(
+                                raw_observation[key.removeprefix("observation.images.")]
+                            )
+                            for key in camera_keys
+                        },
+                    )
+                    history_snapshot = hamlet_history.snapshot(
+                        current_timestamp_s=now,
+                        delta_indices=hamlet_delta_indices,
+                        fps=train_fps,
+                    )
+                if first_state is None:
+                    first_state = measured_state.copy()
+                    pipeline.reset(first_state)
+                    if settings.record_dataset or settings.record_manual:
+                        # 자동 녹화면 처음부터 무장, 수동이면 사람이 누를 때까지 대기
+                        self.record_armed = settings.record_dataset
+                        recorder = self._make_recorder(
+                            settings=settings,
+                            record_images=record_images,
+                            state_names=state_names,
+                            action_names=action_names,
+                            task=task,
+                        )
+
+                # ── inference (별도 스레드) ────────────────────
+                # 추론은 1회 ~115ms인데 30Hz 명령 주기는 33ms다. 루프 안에서 돌리면
+                # "33ms 4번 → 115ms 1번"이 반복돼 6Hz 주기의 규칙적 끊김이 생기고,
+                # 팔이 그 리듬으로 진동한다. 그래서 추론을 워커로 넘기고 명령
+                # 루프는 일정한 주기를 지킨다. 결과는 준비되는 대로 받아 섞는다.
+                infer_seconds = 0.0
+                with self._phase("infer"):
+                    for chunk in self._collect_chunks(step, settings.latency_align):
+                        self.raw_trajectory.append(chunk[0].copy())
+                        pipeline.add_chunk(chunk)
+
+                    # 트리거: fixed=고정 스텝 간격(기존 동작), threshold=lerobot
+                    # async_inference의 chunk_size_threshold와 같은 적응형 방식
+                    # (남은 큐 비율이 chunk_threshold 이하로 떨어지면 추론).
+                    if settings.trigger_mode == "threshold":
+                        should_infer = (pipeline.pending_steps / horizon) <= settings.chunk_threshold
+                    else:
+                        should_infer = step % infer_every == 0
+                    if should_infer:
+                        self._request_inference(raw_observation, step, history_snapshot)
+
+                    # 쓸 게 떨어졌으면 어쩔 수 없이 기다린다 — 목표 없이 보내느니
+                    # 한 스텝 늦는 게 낫다.
+                    #
+                    # 단 **개입 중에는 기다리지 않는다.** 개입 중에는 매 스텝
+                    # pipeline.reset()으로 버퍼를 비우므로 pending_steps가 항상 0이고,
+                    # 그대로 두면 매 스텝 추론 1회(약 113ms)를 기다리게 된다.
+                    # 실물 첫 HIL에서 개입 108스텝 동안 큐 대기가 107회 발생했고
+                    # 제어 주기가 29.4fps -> 17.5fps로 떨어졌다 — 하필 사람이 팔을
+                    # 몰고 있는 구간에서 제어가 느려진다.
+                    # 어차피 이 스텝의 목표는 리더암이 정하므로 정책 chunk가 필요없다.
+                    # 아래 HIL 분기가 pipeline.next_action() 결과를 통째로 버린다.
+                    intervening_now = (
+                        toggle is not None and getattr(toggle, "active", False)
+                    )
+                    if pipeline.pending_steps == 0 and not intervening_now:
+                        waited = self._await_chunk(5.0, step, settings.latency_align)
+                        if waited is None:
+                            self._log("[ERROR] 추론 결과를 기다리다 시간 초과 — 중단합니다")
+                            status = "error"
+                            break
+                        infer_seconds = self._last_infer_seconds
+                        self.raw_trajectory.append(waited[0].copy())
+                        pipeline.add_chunk(waited)
+
+                if self._infer_error is not None:
+                    self._log(f"[ERROR] 추론 스레드: {self._infer_error}")
+                    status = "error"
+                    break
+
+                votes = pipeline.votes_for_next
+                if pipeline.pending_steps == 0 and intervening_now:
+                    # 개입 중이라 위에서 추론을 안 기다렸으므로 큐가 비어 있을 수
+                    # 있다. 이때 next_action()을 부르면 빈 큐 예외로 러너가
+                    # status=error로 죽는다(실물 2차 HIL에서 개입 첫 스텝에 발생).
+                    # 어차피 아래 HIL 분기가 이 값을 통째로 버리므로, 현재 자세를
+                    # 자리표시자로 쓴다 — 개입이 풀리는 순간에도 목표가 '지금
+                    # 있는 자리'라 튀지 않는다.
+                    action = measured_state.astype(np.float32).copy()
+                else:
+                    action = pipeline.next_action()
+
+                # ── HIL 개입 ───────────────────────────────────
+                # 사람이 잡은 동안에는 정책 대신 리더암 델타가 목표가 된다.
+                # 기록되는 action도 이 값이어야 영상↔움직임 인과가 맞는다
+                # (개입 궤적을 나중에 BC 재학습에 쓰는 게 목적이므로).
+                intervened = False
+                hil_dev = None
+                if mixer is not None:
+                    follower_pose = {
+                        name: float(value)
+                        for name, value in zip(state_names, measured_state)
+                    }
+                    policy_action = {
+                        f"{name}.pos": float(value)
+                        for name, value in zip(MOTOR_NAMES, action)
+                    }
+                    # 매 스텝 재기엔 CAN 읽기가 아까우므로 6스텝(0.2초)마다.
+                    # 사람이 팔을 맞추는 속도에는 이 정도면 충분하다.
+                    if step % 6 == 0:
+                        hil_dev = deviation_per_joint(leader.get_action(), follower_pose)
+                        self.last_leader_dev = hil_dev
+                    mixed, intervened, engage_dev = mixer.step(policy_action, follower_pose)
+                    if engage_dev is not None:
+                        self.engage_deviations.append(engage_dev)
+                        per = deviation_per_joint(leader.get_action(), follower_pose)
+                        self.engage_deviation_details.append(per)
+                        worst = max(per, key=lambda k: abs(per[k])) if per else "?"
+                        self._log(
+                            f"[HIL] 인계 — engage_deviation={engage_dev:.2f} "
+                            f"(최대 {worst}) 관절별={per}"
+                        )
+                    # 개입 시작/반환 경계에서 녹화를 자동으로 켜고 끈다.
+                    if settings.record_manual and settings.record_on_intervention:
+                        if intervened and not self.record_armed:
+                            self.arm_recording()
+                        elif not intervened and self.record_armed:
+                            self.stop_recording()
+                    if intervened:
+                        self.intervention_steps += 1
+                        action = np.asarray(
+                            [mixed[f"{name}.pos"] for name in MOTOR_NAMES], dtype=np.float32
+                        )
+                        # ★ 개입 명령도 관절 범위로 자른다. 정책 경로는
+                        # SmoothingPipeline의 clip_to_range를 지나는데 개입 명령은
+                        # 그 파이프라인 출력을 통째로 대체하므로 안 잘리고 있었다.
+                        # 실물 첫 HIL에서 joint5 목표가 240.42까지 나갔다(정규화
+                        # 범위는 -100~100). 팔로워의 max_relative_target 클램프가
+                        # 막아줘서 사고는 없었지만, 그건 '상대 변화량' 안전장치라
+                        # 절대 범위를 보장하지 않는다 — 매 스텝 클램프 한도만큼씩
+                        # 범위 밖으로 기어갈 수 있다.
+                        # 클러치가 foll0 + gain*(leader - lead0)로 델타를 쌓기
+                        # 때문에, 리더를 크게 움직이면 원리적으로 범위를 넘는다.
+                        clipped = np.clip(action, GLOBAL_LOW, GLOBAL_HIGH)
+                        if not np.array_equal(clipped, action):
+                            self._hil_clipped_steps += 1
+                            if self._hil_clipped_steps in (1, 30, 300):
+                                worst = int(np.argmax(np.abs(action - clipped)))
+                                self._log(
+                                    f"[HIL] 개입 명령이 관절 범위를 벗어나 잘렸다 "
+                                    f"({MOTOR_NAMES[worst]}: {action[worst]:.1f} -> "
+                                    f"{clipped[worst]:.1f}). 리더암을 반대로 되돌리세요."
+                                )
+                        action = clipped
+                        # 개입 중 스무딩 파이프라인은 계속 정책 궤적을 밀고 있으므로,
+                        # 반환 시점에 파이프라인 상태가 팔의 실제 위치와 어긋나 있다.
+                        # 그대로 두면 반환 첫 스텝에서 목표가 튀고, max_relative_target
+                        # 클램프에 걸려 팔이 기어간다. 매 스텝 현재 자세로 리셋해두면
+                        # 반환이 지금 위치에서 이어진다.
+                        pipeline.reset(action)
+                    if toggle is not None and toggle.abort:
+                        self._log("[HIL] q — 시도 중단 요청")
+                        self.hil_aborted = True
+                        status = "hil_abort"
+                        break
+
+                self.trajectory.append(action.copy())
+                self._rate_adjustments.append(pipeline.last_rate_adjustment)
+
+                # 놓았거나(확실한 release) 굳었으면(놓을지 말지 오가며 관절이 멈춤)
+                # 남은 스텝 예산을 버리고 파킹으로 간다. 정책이 스스로 끝내지
+                # 못해도(CLAUDE.md '마무리 판단 실패') 러너가 끊어준다.
+                # 실측 2026-08-18: 2회차는 놓기 19.8초인데 940스텝을 채우느라
+                # 7.2초를 더 돌았다. 그래서 "확실히 놓았다"를 보면 바로 끊는다.
+                # (관절 정지 판정은 2026-08-21에 뺐다 — ReleaseDetector 주석 참고)
+                if release_detector is not None and release_detector.update(float(action[6])):
+                    fumble_note = (f" (헛놓기 {release_detector.fumbles}회 무시)"
+                                   if release_detector.fumbles else "")
+                    self._log(f"[STOP] 지우개를 놓았다 — "
+                              f"{step}스텝에서 끊고 파킹한다{fumble_note}")
+                    status = "released"
+                    break
+
+                # 스무딩된 궤적 자체의 속도(정규화 단위/초). 룩어헤드와 MIT가
+                # 둘 다 이걸 쓴다 — 정책 chunk는 시간 매개화된 궤적이라 의도된
+                # 속도를 이미 담고 있는데, 위치만 보내면 그 정보를 버리게 된다.
+                velocity = np.zeros_like(action)
+                if previous_action is not None:
+                    velocity = (action - previous_action) * fps
+                previous_action = action.copy()
+
+                # 유한차분을 그대로 쓰면 지터가 fps배로 증폭돼 속도가 아니라
+                # 노이즈가 된다. EMA로 다듬고 배율을 곱한 값을 vel_ref로 쓴다.
+                alpha = float(np.clip(settings.mit_vel_smoothing, 0.0, 1.0))
+                smoothed_velocity = (
+                    alpha * velocity + (1.0 - alpha) * smoothed_velocity
+                    if smoothed_velocity is not None
+                    else velocity.copy()
+                )
+                feedforward_velocity = smoothed_velocity * settings.mit_vel_scale
+
+                # A. 룩어헤드 — 목표를 진행 방향으로 lookahead_s만큼 앞서 보낸다.
+                # 기록/지표는 실제 궤적(action) 기준을 유지하고, 로봇에 나가는
+                # 목표만 앞당긴다.
+                commanded = action
+                if settings.lookahead_s > 0:
+                    commanded = np.clip(
+                        action + velocity * settings.lookahead_s, GLOBAL_LOW, GLOBAL_HIGH
+                    )
+
+                # ── 출력 ───────────────────────────────────────
+                if self.estop_event.is_set():
+                    break
+                if rviz is not None:
+                    rviz.publish(action)
+                safety_tripped = False
+                if robot is not None and settings.apply_to_robot:
+                    with self._phase("send"):
+                        sent = robot.send_action(
+                            {
+                                f"{name}.pos": float(value)
+                                for name, value in zip(MOTOR_NAMES, commanded)
+                            },
+                            velocity={
+                                name: float(value)
+                                for name, value in zip(MOTOR_NAMES, feedforward_velocity)
+                            },
+                        )
+                    safety_tripped = bool(robot.safety_tripped)
+                    # 클램프에 걸리면 스무딩한 목표가 "실측 위치 + 제한"으로
+                    # 통째로 대체된다 — 그 상태가 이어지면 스무딩 파라미터를
+                    # 아무리 만져도 소용이 없으므로 눈에 띄게 알린다.
+                    self._track_send(commanded, sent)
+
+                # ── 기록 ───────────────────────────────────────
+                # 기록하는 action은 스무딩을 거쳐 실제로 나간 값이다(raw 아님).
+                if recorder is not None and record_images and self.record_armed:
+                    with self._phase("record"):
+                        recorder.add_frame(
+                            state=measured_state, action=action, images=record_images
+                        )
+                # 사람이 '녹화 종료'를 누르면 여기서 에피소드를 끊는다. 루프를
+                # 멈추지 않는다 — 이어서 다음 구간을 또 녹화할 수 있어야 한다.
+                if self._record_stop_requested and recorder is not None:
+                    self._record_stop_requested = False
+                    if recorder.frames_written:
+                        n = recorder.frames_written
+                        recorder.save_episode()
+                        self.recorded_episodes += 1
+                        self._log(
+                            f"[RECORD] 에피소드 저장 ({n}프레임, "
+                            f"누적 {self.recorded_episodes}개)"
+                        )
+                    else:
+                        self._log("[RECORD] 쌓인 프레임이 없어 저장하지 않는다")
+
+                self.events.put(
+                    (
+                        Event.STEP,
+                        {
+                            "step": step,
+                            "observation_frame": observation_frame,
+                            "action": action.copy(),
+                            "measured": measured_state.copy(),
+                            "votes": votes,
+                            "pending": pipeline.pending_steps,
+                            "infer_ms": infer_seconds * 1000.0,
+                            "rate_clamp": pipeline.last_rate_adjustment,
+                            "recorded": recorder.frames_written if recorder else 0,
+                            "intervention": intervened,
+                            # 개입 전에 리더를 팔로워에 맞출 수 있도록 관절별
+                            # 편차를 실어보낸다. 손목(joint5)은 눈대중으로 못 맞춘다 —
+                            # 실물에서 다른 관절을 ±7까지 맞춰놓고도 joint5만 -52.92가
+                            # 남았고, 그 델타가 클러치에 얹혀 목표를 범위 밖으로 밀었다.
+                            "leader_dev": hil_dev,
+                        },
+                    )
+                )
+
+                if safety_tripped:
+                    self._log("[SAFETY TRIP] effort 한계 초과 — 명령을 중단하고 parking합니다")
+                    status = "safety_tripped"
+                    break
+
+                cursor += 1
+                step += 1
+
+                elapsed = time.perf_counter() - loop_started
+                overrun = elapsed - period
+                self._phase_totals["loop"].append(elapsed)
+                if step % self.TIMING_REPORT_EVERY == 0:
+                    self._report_timing(period)
+                if overrun > 0:
+                    self._late_steps += 1
+                else:
+                    self._sleep_until(loop_started + period)
+
+            if self.estop_event.is_set():
+                status = "estop"
+                self._log("[E-STOP] 명령 전송을 즉시 중단했습니다")
+
+        except Exception as error:  # runner 예외는 그대로 보여준다
+            status = "error"
+            import traceback
+
+            self._log(f"[ERROR] {type(error).__name__}: {error}")
+            self._log(traceback.format_exc())
+        finally:
+            # 추론 워커를 먼저 세운다 — 로봇 disconnect 뒤에 늦은 결과가
+            # 들어오면 이미 닫힌 자원을 건드릴 수 있다.
+            self.stop_event.set()
+            with contextlib.suppress(queue.Full):
+                self._infer_requests.put_nowait(None)
+            if self._infer_thread is not None:
+                self._infer_thread.join(timeout=10)
+            # 키 리스너와 리더는 로봇보다 먼저 놓는다 — park 중에 space가 눌려
+            # 개입 상태로 바뀌어도 반영될 곳이 없어야 한다.
+            #
+            # ★ 아래 전부 Exception이 아니라 BaseException으로 잡는다. KeyboardInterrupt는
+            # Exception의 자식이 아니라서(BaseException 직계) suppress(Exception)이
+            # 그냥 통과시킨다 — finally 블록 "안"에서 예외가 새면 그 지점 이후 나머지
+            # 문장(특히 아래의 robot.disconnect()=파킹+카메라 해제)이 통째로 스킵된다.
+            # 실물에서 겪었다(2026-08-18): GUI 컷오프가 os.killpg로 프로세스 그룹
+            # 전체에 SIGINT를 보내면서 영상 인코딩 워커 프로세스도 같이 죽었고, 그
+            # KeyboardInterrupt가 future.result()를 통해 _finalize_recording()까지
+            # 올라와 suppress(Exception)을 뚫고 나갔다. recorder.close()와
+            # robot.disconnect()가 스킵되면서 (a) parquet이 안 닫히고 (b) 카메라가
+            # 안 풀려서, 다음 판정이 "Device or resource busy"로 죽었다.
+            if toggle is not None:
+                with contextlib.suppress(BaseException):
+                    toggle.stop()
+            if mixer is not None:
+                with contextlib.suppress(BaseException):
+                    mixer.release()
+            if leader is not None:
+                try:
+                    leader.disconnect()
+                except BaseException as error:
+                    self._log(f"[WARN] 리더 disconnect 실패: {error}")
+            if self.intervention_steps:
+                self._log(
+                    f"[HIL] 개입 스텝 {self.intervention_steps}회, "
+                    f"인계 {len(self.engage_deviations)}회"
+                    + (
+                        f", engage_deviation 최대 {max(self.engage_deviations):.2f}"
+                        if self.engage_deviations
+                        else ""
+                    )
+                )
+            # ★ 파킹을 녹화 마감(영상 인코딩)보다 먼저 한다. 예전엔 반대 순서였는데,
+            # 인코딩이 수백 프레임이면 수십 초가 걸릴 수 있고 그동안 팔은 멈춘
+            # 자리에 그대로 있었다 — stop_on_release/컷오프로 "끝났다"고 판단해놓고도
+            # 파킹은 한참 뒤에야 실행되는 셈이라 위험하다(2026-08-18 실물 지적).
+            # RolloutRecorder는 root/repo_id/features만 들고 있고 robot·camera 객체를
+            # 참조하지 않는다 — add_frame()은 루프 안에서 이미 다 호출됐고,
+            # 여기서 하는 건 이미 버퍼링된 프레임을 디스크에 마감하는 순수 후처리라
+            # robot.disconnect()보다 먼저든 나중이든 결과가 같다. 그래서 순서만
+            # 바꿔도 안전하다.
+            if robot is not None:
+                try:
+                    if getattr(robot, "is_connected", False) and self.settings.use_mit:
+                        # parking()은 위치 명령이라 MIT 상태에서는 안 먹는다.
+                        robot.config.use_mit_control = False
+                        robot.bus.leave_mit_mode()
+                        self._log("[ROBOT] MIT 해제 — 위치 제어로 복귀")
+                except BaseException as error:
+                    self._log(f"[WARN] MIT 해제 실패: {error}")
+
+                # 파킹 이동 중에도 계속 녹화한다. 예전엔 parking()이 끝난 뒤 한 장만
+                # 찍어 영상 끝에 붙였는데, 그러면 "마지막 추론 프레임(팔이 도형 옆)"
+                # 에서 "파킹 완료 프레임(팔이 화면 밖)"으로 바로 점프해 영상이 튀어
+                # 보였다(2026-08-19 실물 지적). parking()을 스레드로 돌리고 메인
+                # 루프에서 그 사이를 기존 제어 주기(fps)로 계속 찍어 채운다.
+                # parking() 스레드는 CAN 쓰기만 하고, 여기서는 get_observation()으로
+                # 읽기만 하므로(피퍼 SDK는 수신을 백그라운드 스레드가 캐시하는 구조)
+                # 두 스레드가 동시에 같은 모터에 명령을 보내는 경합은 없다.
+                if (recorder is not None
+                        # 이미 쌓인 프레임이 있을 때만 이어 찍는다 — 0이면 파킹
+                        # 프레임뿐인 가짜 에피소드가 생긴다.
+                        and recorder.frames_written > 0
+                        and settings.judge_frame_in_video
+                        and settings.source == "robot"
+                        and getattr(robot, "is_connected", False)
+                        and not robot.safety_tripped):
+                    try:
+                        park_thread = threading.Thread(target=robot.parking, daemon=True)
+                        park_thread.start()
+                        period = 1.0 / settings.fps
+                        park_frames = 0
+                        while park_thread.is_alive():
+                            loop_started = time.perf_counter()
+                            live = robot.get_observation()
+                            # 크롭본으로 녹화 중이면 이 프레임도 같은 형태여야 한다 —
+                            # 모양이 다르면 데이터셋이 깨진다.
+                            pre = preprocess_live_camera_observation(
+                                live, camera_keys, settings.crops,
+                                settings.camera_output_size,
+                            )
+                            source_images = live if settings.record_raw_frames else pre
+                            park_images = {
+                                k.removeprefix("observation.images."): np.asarray(
+                                    source_images[k.removeprefix("observation.images.")]
+                                ).copy()
+                                for k in camera_keys
+                            }
+                            park_state = state_from_raw_observation(pre, dataset.features)
+                            # action은 "이 프레임에서 새로 낸 명령"이 아니라 파킹 도중
+                            # 자세다. 정책 출력으로 오해되지 않게 state와 같은 값을 넣는다.
+                            recorder.add_frame(state=park_state, action=park_state,
+                                               images=park_images)
+                            # 압축 전 원본을 판정용으로 들고 있는다(위 judge_frame_raw
+                            # 주석 참고). 크롭본으로 녹화 중이면 board ROI 좌표계가
+                            # 안 맞아 판정에 못 쓰므로 raw일 때만 잡는다.
+                            if settings.record_raw_frames and "top" in park_images:
+                                self.judge_frame_raw = park_images["top"]
+                            park_frames += 1
+                            self._sleep_until(loop_started + period)
+                        park_thread.join(timeout=1.0)
+                        recorder.drain()
+                        self._log(f"[RECORD] 파킹 이동 중 {park_frames}프레임을 이어서 녹화했다")
+                    except BaseException as error:
+                        self._log(f"[WARN] 파킹 중 녹화 실패: {error}")
+
+                try:
+                    if getattr(robot, "is_connected", False):
+                        park = self.settings.park_on_exit and not robot.safety_tripped
+                        self._log(f"[DISCONNECT] park={park}")
+                        robot.disconnect(park=park)
+                except BaseException as error:
+                    self._log(f"[WARN] disconnect 실패: {error}")
+            if recorder is not None:
+                with contextlib.suppress(BaseException):
+                    self._finalize_recording(recorder, status)
+                # 저장/폐기 어느 쪽이든 writer는 닫아야 한다. _finalize_recording이
+                # discard로 일찍 빠져나가도 여기는 지나가도록 밖에 둔다.
+                with contextlib.suppress(BaseException):
+                    recorder.close()
+            if rviz is not None:
+                with contextlib.suppress(BaseException):
+                    rviz.close()
+            self.status = status
+            self.events.put((Event.FINISHED, status))
+
+    SLEEP_SLICE = 0.005
+
+    def _sleep_until(self, deadline: float, *, clock=time.perf_counter, sleep=time.sleep) -> None:
+        """다음 스텝까지 잘게 나눠 잔다. E-stop 반응성을 위해 조각으로 자른다.
+
+        남은 시간은 반드시 매번 다시 재고 음수를 걸러야 한다. 예전 구현은
+        `while clock() < deadline: sleep(min(0.005, deadline - clock()))` 였는데,
+        while 판정과 인자 계산 사이에 시각이 지나가면 음수가 되고 time.sleep()이
+        ValueError를 던진다. 그러면 제어 루프가 통째로 죽고 팔이 park로 내려간다
+        — 루프가 빨라져 반복 횟수가 늘어난 뒤 실물에서 실제로 터졌다.
+        """
+        while not self.stop_event.is_set():
+            remaining = deadline - clock()
+            if remaining <= 0:
+                return
+            sleep(min(self.SLEEP_SLICE, remaining))
+
+    # ── 추론 워커 ──────────────────────────────────────────
+    def _start_inference_worker(self, predict) -> None:
+        """추론을 명령 루프 밖으로 뺀다.
+
+        `predict(raw_observation) -> chunk` 하나만 받는다. 요청은 최대 1건만
+        들고 있고(최신 관찰만 의미가 있으므로) 결과는 준비되는 대로 큐로 넘긴다.
+        torch 연산은 GIL을 놓으므로 스레드로도 명령 루프를 막지 않는다.
+        """
+
+        def loop() -> None:
+            while not self.stop_event.is_set():
+                try:
+                    request = self._infer_requests.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if request is None:
+                    break
+                requested_step, observation, rollout_history = request
+                started = time.perf_counter()
+                try:
+                    result = (
+                        predict(observation, rollout_history)
+                        if rollout_history is not None
+                        else predict(observation)
+                    )
+                    # predict는 chunk만 돌려줘도 되고 (chunk, control_points)를
+                    # 돌려줘도 된다. 외부 호출자(GUI·sweep·테스트)가 넘기는 predict는
+                    # 전자이므로 여기서 정규화한다.
+                    chunk, control_points = (
+                        result if isinstance(result, tuple) else (result, None)
+                    )
+                except Exception as error:  # 루프가 알아채고 멈추도록 넘긴다
+                    self._infer_error = f"{type(error).__name__}: {error}"
+                    self._infer_busy.clear()
+                    break
+                self._last_infer_seconds = time.perf_counter() - started
+                self._infer_results.put((requested_step, chunk, control_points))
+                self._infer_busy.clear()
+
+        self._infer_thread = threading.Thread(target=loop, name="piper-infer", daemon=True)
+        self._infer_thread.start()
+
+    def _request_inference(self, raw_observation: dict, step: int, rollout_history=None) -> None:
+        """워커가 놀고 있을 때만 새 관찰을 넘긴다. 밀리면 그냥 건너뛴다 —
+        오래된 관찰로 추론해봐야 쓸모가 없다."""
+        if self._infer_busy.is_set():
+            return
+        self._infer_busy.set()
+        self._infer_requests.put((step, raw_observation, rollout_history))
+
+    def _align_chunk(self, requested_step: int, chunk: np.ndarray, step: int,
+                     control_points: "np.ndarray | None" = None) -> "np.ndarray | None":
+        """추론 지연만큼 chunk를 '지금'에 맞춘다.
+
+        chunk[0]은 요청 시점의 관찰에 대한 예측이다. 그런데 추론이 도는 동안(30Hz에서
+        보통 3~4스텝) 제어 루프는 큐를 계속 소비하므로, 도착 시점에 그냥 index 0에
+        붙이면 그만큼 과거의 목표를 현재 목표로 쓰게 된다.
+
+        방식이 두 가지다:
+        - 기본: 흘러간 스텝 수만큼 앞을 **버린다**(`chunk[lag:]`). 제자리에는 놓이지만
+          새 궤적의 시작점이 직전에 실행된 행동과 이어진다는 보장이 없어, chunk 경계에
+          불연속이 남는다.
+        - CCR(`--ccr`): 버리는 대신 **다시 적합한다**. 정책이 낸 B-스플라인 제어점의
+          앞쪽 n_free개를 "이미 실행된 P+lag개 행동"에 맞춰 최소제곱으로 다시 풀어,
+          새 궤적을 직전 과거에 고정(anchor)시킨다. B-스플라인의 국소 지지 성질 덕분에
+          이 조정은 궤적 앞부분에만 영향을 준다 (ABPolicy arXiv:2602.23901 III-C).
+
+        lerobot 원본은 TimedAction에 절대 timestep을 실어 정렬 문제를 해결한다
+        (robot_client.py::_aggregate_action_queues). 단일 프로세스인 우리는 step
+        카운터만으로 충분하다.
+        """
+        lag = max(0, step - requested_step)
+        self._infer_lags.append(lag)
+        if lag >= len(chunk):
+            # chunk 전체가 이미 지나간 시간이라 쓸 게 없다 — 버린다.
+            self._stale_chunks += 1
+            return None
+
+        if self._ccr_active and control_points is not None:
+            refit = self._refit_chunk(control_points, lag)
+            if refit is not None:
+                self._ccr_applied += 1
+                return refit
+            self._ccr_skipped += 1
+
+        if lag == 0:
+            return chunk
+        return chunk[lag:]
+
+    def _refit_chunk(self, control_points: np.ndarray, lag: int) -> "np.ndarray | None":
+        """CCR — 실행된 행동 이력에 맞춰 앞쪽 제어점을 다시 풀고 궤적을 복원한다.
+
+        되돌릴 수 없는 상황(이력 부족, 정책 예외)에서는 None을 돌려주고, 호출자가
+        기존 절단 방식으로 되돌아간다. 실물이 도는 중에 죽지 않는 것이 우선이다.
+        """
+        policy = self._policy
+        history = int(getattr(policy.config, "action_history_horizon", 0))
+        n_prefix = history + lag
+        if n_prefix <= 0:
+            return None
+        if len(self.trajectory) < n_prefix:
+            # 에피소드 초반 — 고정할 과거가 아직 없다.
+            return None
+
+        executed = np.asarray(self.trajectory[-n_prefix:], dtype=np.float64)
+        if executed.shape[1] != control_points.shape[1]:
+            self._log_ccr_failure(
+                f"차원 불일치: 실행이력 {executed.shape[1]} vs 제어점 {control_points.shape[1]}"
+            )
+            return None
+
+        try:
+            refit = policy.refit_control_points(
+                executed, control_points, n_free=self.settings.ccr_n_free
+            )
+            future = policy.rebuild_actions(refit, drop_history=n_prefix)
+        except Exception as error:
+            self._log_ccr_failure(f"{type(error).__name__}: {error}")
+            return None
+
+        if len(future) == 0 or not np.isfinite(future).all():
+            self._log_ccr_failure("재적합 결과가 비었거나 NaN/Inf")
+            return None
+        return np.ascontiguousarray(future, dtype=np.float32)
+
+    def _log_ccr_failure(self, reason: str) -> None:
+        """CCR 실패는 매 스텝 쏟아질 수 있으므로 한 번만 알린다."""
+        if getattr(self, "_ccr_failure_logged", False):
+            return
+        self._ccr_failure_logged = True
+        self._log(f"[CCR] 재적합 실패 — 절단 방식으로 되돌아간다: {reason}")
+
+    @staticmethod
+    def _unpack_result(item: tuple) -> tuple:
+        """결과 큐 항목을 (step, chunk, control_points)로 편다.
+
+        큐에는 워커가 3-tuple을 넣지만, 테스트나 외부 호출자가 2-tuple을 직접
+        넣는 경우도 받아준다 — CCR 이전의 계약이다.
+        """
+        if len(item) == 3:
+            return item
+        requested_step, chunk = item
+        return requested_step, chunk, None
+
+    def _collect_chunks(self, step: int, align: bool) -> list[np.ndarray]:
+        chunks = []
+        while True:
+            try:
+                item = self._infer_results.get_nowait()
+            except queue.Empty:
+                return chunks
+            requested_step, chunk, control_points = self._unpack_result(item)
+            if align:
+                chunk = self._align_chunk(requested_step, chunk, step, control_points)
+            if chunk is not None and len(chunk):
+                chunks.append(chunk)
+
+    def _await_chunk(self, timeout: float, step: int, align: bool) -> "np.ndarray | None":
+        try:
+            item = self._infer_results.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        requested_step, chunk, control_points = self._unpack_result(item)
+        if align:
+            chunk = self._align_chunk(requested_step, chunk, step, control_points)
+        return chunk if chunk is not None and len(chunk) else None
+
+    # ── 타이밍 진단 ────────────────────────────────────────
+    TIMING_REPORT_EVERY = 90
+
+    def _report_timing(self, period: float) -> None:
+        """루프 시간이 어디로 새는지 단계별로 보고한다.
+
+        명령 주파수가 흔들리면(어떤 스텝은 33ms, 어떤 스텝은 115ms) 팔이
+        "움직였다 멈췄다"를 반복해 진동한다. 평균만 봐서는 이 지터가 안 보이므로
+        단계별 평균과 함께 최대치·지연 스텝 수를 같이 낸다.
+        """
+        loops = self._phase_totals["loop"]
+        if not loops:
+            return
+        mean = float(np.mean(loops))
+        worst = float(np.max(loops))
+        parts = []
+        for name in ("observe", "infer", "send", "record"):
+            samples = self._phase_totals[name]
+            if samples:
+                parts.append(f"{name} {float(np.mean(samples)) * 1000:.0f}ms")
+        late = self._late_steps
+        self._log(
+            f"[TIMING] 최근 {len(loops)}스텝 평균 {mean * 1000:.0f}ms "
+            f"({1.0 / mean if mean else 0:.1f}Hz), 최대 {worst * 1000:.0f}ms, "
+            f"목표({period * 1000:.0f}ms) 초과 {late}회"
+            + (" | " + ", ".join(parts) if parts else "")
+        )
+        if self._infer_lags:
+            lags = self._infer_lags
+            self._log(
+                f"[LAG] 추론 지연 {float(np.mean(lags)):.1f}스텝 평균 "
+                f"(최대 {max(lags)}, chunk {len(lags)}개)"
+                + (f", 전부 지나가 버린 chunk {self._stale_chunks}개" if self._stale_chunks else "")
+            )
+            self._infer_lags = []
+        if self._ccr_active:
+            # skipped가 계속 늘면 이력이 모자란 것 — 대개 에피소드 초반에만 나온다.
+            self._log(
+                f"[CCR] 재적합 {self._ccr_applied}회"
+                + (f", 절단으로 되돌아감 {self._ccr_skipped}회" if self._ccr_skipped else "")
+            )
+
+        # rate_limit이 실제로 걸렸는지. 관절이 max_relative_target에 안 걸린 이유가
+        # "여유가 충분해서"인지 "rate_limit이 먼저 잘라서"인지 여기서 갈린다.
+        if self._rate_adjustments:
+            hits = [v for v in self._rate_adjustments if v > 1e-4]
+            total = len(self._rate_adjustments)
+            self._rate_adjustments = []
+            if hits:
+                self._log(
+                    f"[RATE] rate_limit에 {len(hits)}/{total}회 ({len(hits) / total:.0%}) 걸림, "
+                    f"평균 {float(np.mean(hits)):.2f} 최대 {max(hits):.2f} 깎임"
+                )
+            else:
+                self._log(f"[RATE] rate_limit 미작동 (0/{total}) — 명령 변화량이 상한 이내")
+        if worst > period * 2 and mean < period * 1.5:
+            self._log(
+                "[WARN] 주기가 고르지 않습니다 — 느린 스텝이 섞여 있으면 평균이 맞아도 "
+                "팔이 규칙적으로 끊깁니다"
+            )
+        for samples in self._phase_totals.values():
+            samples.clear()
+        self._late_steps = 0
+
+    @contextlib.contextmanager
+    def _phase(self, name: str):
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._phase_totals[name].append(time.perf_counter() - started)
+
+    # ── 추종 진단 ──────────────────────────────────────────
+    CLAMP_REPORT_EVERY = 60
+
+    def _track_send(self, requested: np.ndarray, sent: dict | None) -> None:
+        """요청한 목표와 실제로 나간 목표의 차이를 추적한다.
+
+        send_action은 안전 클램프를 적용한 뒤의 값을 돌려준다. 둘이 다르면
+        max_relative_target에 걸린 것이고, 그게 계속되면 명령이 사실상
+        "실측 위치 + 제한"으로 고정돼 스무딩 결과가 버려진다. 그 상태에서
+        smoothing 하이퍼파라미터를 만지는 건 의미가 없으므로 미리 알린다.
+        그리퍼는 따로 센다. 물체를 물고 있으면 "더 조여"라는 명령이 물리적으로 막혀
+        실측이 명령을 못 따라가는 게 정상이기 때문이다 — 학습 데이터에서도 지우는
+        내내 실측이 명령보다 평균 +4.8 크다. 이걸 관절과 같이 묶어 max()로 보면
+        그리퍼 하나 때문에 항상 "포화"로 보고돼(2026-08-12 실물에서 실제로 발생)
+        max_relative_target을 올리라는 엉뚱한 처방이 나간다.
+        """
+        if not sent:
+            return
+        actual = np.asarray(
+            [sent.get(f"{name}.pos", np.nan) for name in MOTOR_NAMES], dtype=np.float32
+        )
+        if not np.isfinite(actual).all():
+            return
+
+        difference = np.abs(actual - requested)
+        joint_deviation = float(difference[:6].max())      # 그리퍼(index 6) 제외
+        self._clamp_window.append(joint_deviation > 1e-4)
+        self._gripper_clamp_window.append(float(difference[6]) > 1e-4)
+        if len(self._clamp_window) < self.CLAMP_REPORT_EVERY:
+            return
+
+        clamped = sum(self._clamp_window)
+        ratio = clamped / len(self._clamp_window)
+        gripper_ratio = sum(self._gripper_clamp_window) / len(self._gripper_clamp_window)
+        self._clamp_window.clear()
+        self._gripper_clamp_window.clear()
+
+        if ratio < 0.2:
+            # 관절은 멀쩡한데 그리퍼만 계속 걸리면 물체를 쥐고 있다는 뜻이라 정상이다.
+            # 처음 한 번만 알려주고 이후엔 조용히 넘어간다.
+            if gripper_ratio > 0.9 and not self._gripper_clamp_reported:
+                self._gripper_clamp_reported = True
+                self._log(
+                    "[CLAMP] 그리퍼만 계속 클램프됨 — 물체를 쥔 채 '더 조여'를 보내는 "
+                    "상태입니다. 학습 데이터에서도 같으므로 정상입니다(관절은 이상 없음)."
+                )
+            return
+
+        message = (
+            f"[CLAMP] 최근 {self.CLAMP_REPORT_EVERY}스텝 중 관절 {clamped}회 "
+            f"({ratio:.0%}) max_relative_target에 걸림"
+        )
+        if ratio > 0.9:
+            self._clamp_saturated_reports += 1
+            message += " — 포화 상태입니다. 명령이 사실상 '실측 위치 + 제한'으로"
+            if self._clamp_saturated_reports == 1:
+                message += (
+                    " 대체되고 있어 smoothing 파라미터는 효과가 없습니다."
+                    " max_relative_target을 올리거나 fps를 낮추세요."
+                )
+        self._log(message)
+
+    # ── 기록 헬퍼 ──────────────────────────────────────────
+    def _make_recorder(
+        self,
+        *,
+        settings: RunSettings,
+        record_images: dict[str, np.ndarray],
+        state_names: list[str],
+        action_names: list[str],
+        task: str,
+    ) -> "RolloutRecorder | None":
+        """첫 프레임을 본 뒤에야 실제 카메라 해상도를 알 수 있어 여기서 만든다."""
+        if not record_images:
+            self._log("[WARN] 기록할 카메라 프레임이 없어 dataset 기록을 건너뜁니다")
+            return None
+        camera_shapes = {
+            camera: tuple(np.asarray(image).shape) for camera, image in record_images.items()
+        }
+        features = build_rollout_features(
+            camera_shapes=camera_shapes,
+            state_names=state_names,
+            action_names=action_names,
+        )
+        root = settings.record_root or default_record_root(settings)
+        repo_id = settings.record_repo_id or f"local/{pathlib.Path(root).name}"
+        # 기록 fps는 설정값이 아니라 실제 제어 주기에 맞춰야 하지만, dataset 생성
+        # 시점에는 아직 측정치가 없다. 설정 fps로 만들고 실측치는 sidecar에 남긴다.
+        recorder = RolloutRecorder(
+            root=pathlib.Path(root),
+            repo_id=repo_id,
+            fps=int(round(settings.fps)),
+            features=features,
+            task=task,
+            vcodec=settings.vcodec,
+        )
+        shapes = ", ".join(f"{k}{v}" for k, v in camera_shapes.items())
+        self._log(f"[RECORD] {root} (fps={int(round(settings.fps))}, {shapes})")
+        if settings.record_raw_frames:
+            self._log(
+                "[RECORD] 크롭 전 원본 프레임을 저장합니다 — "
+                "학습에 쓰려면 prepare_erase_shape_dataset.py로 변환하세요"
+            )
+        self.recorded_path = pathlib.Path(root)
+        return recorder
+
+    def _finalize_recording(self, recorder: RolloutRecorder, status: str) -> None:
+        settings = self.settings
+        if recorder.frames_written == 0:
+            self._log("[RECORD] 기록된 프레임이 없어 저장하지 않습니다")
+            return
+
+        outcome, note = "unlabeled", ""
+        if settings.prompt_outcome and self.outcome_prompt is not None:
+            try:
+                outcome, note = self.outcome_prompt()
+            except Exception as error:
+                self._log(f"[WARN] 성공/실패 입력 실패 — unlabeled로 둡니다: {error}")
+
+        if outcome == "discard":
+            recorder.discard_episode()
+            self._log("[RECORD] 에피소드를 폐기했습니다")
+            return
+
+        episode_index = recorder.episodes_written
+        frames = recorder.frames_written
+        recorder.save_episode()
+        # 수동 녹화 요약이 이 카운터를 읽는다. 여기서 안 올리면 실행 끝에 저장된
+        # 에피소드를 '0개'로 보고하게 된다 — 실제로 296프레임을 저장하고도
+        # "저장된 에피소드가 없다"고 찍혀 사람을 헷갈리게 했다.
+        self.recorded_episodes += 1
+
+        raw = np.stack(self.raw_trajectory) if self.raw_trajectory else np.zeros((0, 7), np.float32)
+        raw_path = recorder.write_raw_actions(raw, episode_index)
+
+        measured = self.measured_fps()
+        payload = {
+            "episode_index": episode_index,
+            "frames": frames,
+            "outcome": outcome,
+            "note": note,
+            "status": status,
+            "recorded_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "mode": settings.mode,
+            "source": settings.source,
+            "policy_path": settings.policy_path,
+            "reference_dataset": str(settings.dataset_root),
+            "task": recorder.task,
+            # 논문에 그대로 인용할 수 있게 스무딩 조건 전부를 남긴다.
+            "smoothing": dataclasses.asdict(settings.smoothing),
+            "infer_every": settings.infer_every,
+            "horizon": settings.horizon,
+            "configured_fps": settings.fps,
+            "measured_fps": round(measured, 3) if measured else None,
+            "raw_actions_file": raw_path.name,
+            "camera_frames": "raw" if settings.record_raw_frames else "preprocessed",
+        }
+        sidecar = recorder.write_sidecar(payload)
+        self._log(
+            f"[RECORD] 저장 완료 — {frames} frames, outcome={outcome}, "
+            f"실측 {measured:.2f}Hz (설정 {settings.fps:g})"
+        )
+        self._log(f"[RECORD] 실행 조건: {sidecar}")
+        if measured and abs(measured - settings.fps) / settings.fps > 0.15:
+            self._log(
+                f"[WARN] 기록된 dataset의 fps는 {int(round(settings.fps))}로 적혀 있지만 "
+                f"실제 제어 주기는 {measured:.2f}Hz였습니다 — 학습에 쓰기 전에 확인하세요"
+            )
+
+
+def training_dataset_of(policy_path: str | pathlib.Path) -> str | None:
+    """체크포인트가 어떤 dataset으로 학습됐는지 train_config.json에서 읽는다."""
+    for candidate in (
+        pathlib.Path(policy_path) / "train_config.json",
+        pathlib.Path(policy_path).parent.parent.parent / "train_config.json",
+    ):
+        if candidate.is_file():
+            with contextlib.suppress(json.JSONDecodeError, OSError, KeyError):
+                dataset = json.loads(candidate.read_text(encoding="utf-8"))["dataset"]
+                return dataset.get("root") or dataset.get("repo_id")
+    return None
+
+
+def pads_vectors(policy_path: str | pathlib.Path) -> bool:
+    """state/action을 고정 차원으로 패딩하는 정책인지(max_state_dim이 있는지)."""
+    path = pathlib.Path(policy_path) / "config.json"
+    if not path.is_file():
+        return False
+    with contextlib.suppress(json.JSONDecodeError, OSError):
+        config = json.loads(path.read_text(encoding="utf-8"))
+        return "max_state_dim" in config or "max_action_dim" in config
+    return False
+
+
+def saved_rename_map(policy_path: str | pathlib.Path) -> dict[str, str] | None:
+    """체크포인트에 저장된 rename_map을 꺼낸다.
+
+    학습 때 --rename_map으로 준 값이 policy_preprocessor.json의
+    rename_observations_processor 설정에 그대로 남는다.
+    """
+    path = pathlib.Path(policy_path) / "policy_preprocessor.json"
+    if not path.is_file():
+        return None
+    with contextlib.suppress(json.JSONDecodeError, OSError, KeyError):
+        for step in json.loads(path.read_text(encoding="utf-8"))["steps"]:
+            if step.get("registry_name") == "rename_observations_processor":
+                return step.get("config", {}).get("rename_map") or None
+    return None
+
+
+def check_policy_dataset_match(policy_path: str | pathlib.Path, dataset_root: pathlib.Path) -> None:
+    """정책이 기대하는 입력과 참조 dataset의 feature가 맞는지 미리 본다.
+
+    runner는 dataset의 meta로 정규화 통계와 관찰 형태를 만들기 때문에, 정책이
+    학습된 것과 다른 dataset을 고르면 정책 로딩(수십 초)과 로봇 연결까지 다
+    끝난 뒤에야 텐서 크기 불일치로 죽는다. Dataset Browser에 200개가 다 보이므로
+    실수하기 쉽다 — config.json만 읽어서(torch 로딩 없이) 미리 막는다.
+
+    pi0처럼 카메라 이름이 고정된(base_0_rgb 등) 정책은 학습 때 --rename_map으로
+    우리 top/wrist를 매핑했고, 그 값이 체크포인트의 preprocessor에 남아 있다.
+    여기서도 같은 매핑을 적용해야 멀쩡한 조합을 불일치로 오판하지 않는다.
+    """
+    config_path = pathlib.Path(policy_path) / "config.json"
+    info_path = pathlib.Path(dataset_root) / "meta" / "info.json"
+    if not config_path.is_file() or not info_path.is_file():
+        return  # HF repo id 등 로컬에서 확인 불가한 경우는 그냥 통과시킨다
+
+    try:
+        expected = json.loads(config_path.read_text(encoding="utf-8"))
+        features = json.loads(info_path.read_text(encoding="utf-8"))["features"]
+    except (json.JSONDecodeError, OSError, KeyError):
+        return
+
+    features = dict(features)
+    for source, target in (saved_rename_map(policy_path) or {}).items():
+        if source in features:
+            features[target] = features.pop(source)
+
+    wanted = dict(expected.get("input_features") or {})
+    wanted.update(expected.get("output_features") or {})
+    # 정책이 선언했지만 우리 로봇엔 없는 카메라(pi0의 right_wrist_0_rgb 등)는
+    # 모델이 -1 패딩 + 마스크 0으로 알아서 무시하므로 없다고 문제 삼지 않는다.
+    renamed_targets = set((saved_rename_map(policy_path) or {}).values())
+    if renamed_targets:
+        wanted = {
+            k: v for k, v in wanted.items()
+            if not (k.startswith("observation.images.") and k not in features)
+        }
+
+    problems: list[str] = []
+    for key, spec in wanted.items():
+        if key not in features:
+            problems.append(f"  {key}: dataset에 없음")
+            continue
+        # 이미지 shape은 CHW/HWC 표기가 섞여 있어 채널 위치가 다를 수 있다.
+        # 정규화 문제를 일으키는 건 벡터 feature이므로 그쪽만 엄격히 본다.
+        if key.startswith("observation.images."):
+            continue
+        want = tuple(spec.get("shape") or ())
+        have = tuple(features[key].get("shape") or ())
+        if want == have:
+            continue
+        # pi0 계열은 여러 로봇을 한 모델로 다루려고 state/action을 max_*_dim(32)로
+        # 선언해두고, 실제로는 pad_vector로 0을 채워 넣었다가 출력에서 원래 차원만
+        # 잘라 쓴다(modeling_pi0.py의 prepare_state / sample_actions). 즉 정책 쪽이
+        # 더 크면 패딩이므로 정상이다 — 반대 방향만 진짜 문제다.
+        if len(want) == 1 and len(have) == 1 and want[0] > have[0] and pads_vectors(policy_path):
+            continue
+        problems.append(f"  {key}: 정책은 {want}, dataset은 {have}")
+
+    if not problems:
+        return
+
+    trained_on = training_dataset_of(policy_path)
+    lines = [
+        "정책과 참조 dataset이 맞지 않습니다:",
+        *problems,
+        "",
+        "runner는 참조 dataset의 meta로 정규화 통계와 관찰 형태를 만듭니다 —",
+        "정책을 학습시킨 그 dataset을 고르세요.",
+    ]
+    if trained_on:
+        lines.append(f"이 체크포인트의 학습 dataset: {trained_on}")
+    raise ValueError("\n".join(lines))
+
+
+def load_env_file(path: pathlib.Path) -> dict[str, str]:
+    """configs/recording.env 형식(KEY=VALUE)을 읽는다. 없으면 빈 dict.
+
+    반환 dict는 crop 등 이 파일 안에서 쓰고, 동시에 os.environ에도 반영한다
+    (setdefault라 이미 shell에서 export된 값은 안 덮어씀) — build_robot_from_env()
+    (piper_human_approved_inference.py)가 TOP_CAM/WRIST_CAM 등을 os.environ에서
+    직접 읽기 때문에, 여기서 안 하면 그쪽에서 항상 빈 값으로 보여서 카메라가
+    하나도 등록되지 않는다(2026-08-11 실물 테스트에서 발견: robot.cameras=[]).
+    """
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        values[key] = value
+        os.environ.setdefault(key, value)
+    return values
+
+
+def resolve_crops(
+    env: dict[str, str], top: str | None = None, wrist: str | None = None
+) -> dict:
+    """live 카메라 crop 설정을 정한다.
+
+    source=robot에서는 학습 때와 똑같이 크롭/리사이즈해야 정책이 제대로 본다.
+    GUI는 자기 입력칸에서 받지만 CLI에는 그 값이 없어서, human_approved 도구와
+    같은 recording.env 키를 재사용한다(값이 이미 거기 있고 두 벌로 관리할 이유가
+    없다). --top-crop / --wrist-crop으로 덮어쓸 수 있다.
+    """
+    from inference_runtime import parse_camera_crop
+
+    sources = {
+        "top": top or env.get("HUMAN_APPROVED_TOP_CROP", ""),
+        "wrist": wrist or env.get("HUMAN_APPROVED_WRIST_CROP", ""),
+    }
+    return {
+        camera: parse_camera_crop(value) for camera, value in sources.items() if value
+    }
+
+
+# ── 놓기 감지 ────────────────────────────────────────────────
+# 상수는 erase_eval.py의 GRIP_*/HOLD_FRAMES/RELEASE_JUMP와 같은 뜻이다. 일부러
+# import하지 않고 복제한다 — 실물 제어 루프가 채점기(cv2·numpy 무거운 의존)를
+# 끌어오지 않게 하려는 것이다. 값을 바꾸면 양쪽을 같이 고쳐야 한다.
+GRIP_HOLD_MIN, GRIP_HOLD_MAX = 8.0, 35.0  # 이 사이면 뭔가 쥔 상태
+HOLD_FRAMES = 15  # 0.5초(30fps) 이상 유지돼야 파지로 인정
+HOLD_TOL = 3.0  # 그 15프레임 동안 값이 이보다 더 흔들리면 파지가 아니라 '지나가는 중'
+RELEASE_JUMP = 15.0  # 파지 수준에서 이만큼 벌어지면 놓은 것
+RELEASE_HOLD_STEPS = 5  # 그 열린 상태가 이만큼 이어져야 진짜 놓기로 본다
+# 파지가 이만큼 이어진 뒤에 놓아야 "일을 마치고 놓았다"로 인정한다. 그보다 짧으면
+# 제대로 못 잡고 흘린 것(헛놓기)으로 보고 감지기를 리셋해 다시 잡을 기회를 준다.
+# 실측 근거: 0804 시연 15개의 파지 지속은 최소 246프레임(8.2초), 중앙값 341이다.
+# 120프레임(4초)은 그 최소값의 절반이라 진짜 파지를 자를 위험이 없고, 잠깐 스쳐
+# 잡았다 놓는 헛놓기와는 확실히 갈린다. 실물에서 "제대로 잡지도 못했는데 살짝
+# 놨더니 평가가 끝나버린" 사례로 추가했다(2026-08-18).
+MIN_HOLD_BEFORE_RELEASE = 120
+
+class ReleaseDetector:
+    """그리퍼 명령만 보고 '지우개를 놓았다'를 실시간으로 판정한다.
+
+    채점기(erase_eval.gripper_phases)는 에피소드 전체를 보고 **가장 긴** 파지 구간을
+    고르지만, 제어 루프는 과거밖에 못 본다. 그래서 조건을 셋 건다:
+
+    - 파지가 HOLD_FRAMES만큼 연속으로 성립해야 한다.
+    - 그 구간이 **평평해야 한다**(폭 ≤ HOLD_TOL). 이게 없으면 못 쓴다 —
+      지우개를 잡으러 갈 때 그리퍼를 여는 램프(1.2 → 65)가 rate_limit 때문에
+      천천히 올라가면서 파지 대역 8~35를 약 20프레임에 걸쳐 지나간다. 폭 조건
+      없이 돌려봤더니 실물 궤적에서 165프레임(5.6초)에 발화했다 — 지우개를
+      집기도 전이다. 진짜 파지 구간(240~570프레임)은 18.5~19.3으로 폭이 1 미만이고,
+      램프는 같은 창에서 30 넘게 움직인다. 실측 2026-08-18 롤아웃 2회차.
+    - 열린 상태가 RELEASE_HOLD_STEPS만큼 이어져야 한다. 한 스텝짜리 튐으로
+      실물 시도를 끊어버리면 되돌릴 방법이 없다.
+    - 놓기 전에 파지가 MIN_HOLD_BEFORE_RELEASE만큼 이어졌어야 한다. 못 잡고
+      흘린 헛놓기는 시도를 끝내지 않고 감지기를 리셋해 재파지를 기다린다.
+
+    **관절 정지 판정은 쓰지 않는다(2026-08-21 제거).** 한때 파지 이후 관절이
+    3초간 거의 안 움직이면 같이 끊었는데(2026-08-18 실물 4회차: 그리퍼가 19~33을
+    오가며 확신 없이 32초를 다 쓴 경우를 잡으려고 넣었다), 그러면 "정말 놓아서
+    끝난 것"과 "잠깐 멈칫한 것"이 같은 종료 사유(release)로 섞여 판정이 흐려진다.
+    지금은 **그리퍼를 확실히 놓았을 때만** 끊고, 멈칫해서 안 끝나는 시도는
+    --max-steps 상한(cutoff)에 맡긴다 — 종료 사유가 release/cutoff로 깔끔히 갈린다.
+    """
+
+    def __init__(self) -> None:
+        self.window: collections.deque[float] = collections.deque(maxlen=HOLD_FRAMES)
+        self.hold_level: float | None = None
+        self.open_run = 0
+        self.hold_frames = 0        # 파지가 확정된 뒤 지난 스텝 수
+        self.fumbles = 0            # 헛놓기로 판정해 리셋한 횟수(로그용)
+
+    def _reset_hold(self) -> None:
+        """헛놓기 — 파지 상태를 버리고 처음부터 다시 찾는다(재파지 허용)."""
+        self.hold_level = None
+        self.hold_frames = 0
+        self.open_run = 0
+        self.window.clear()
+
+    def update(self, grip: float) -> bool:
+        """이번 스텝의 그리퍼 명령을 먹인다. 확실히 놓았으면 True."""
+        if self.hold_level is None:
+            self.window.append(grip)
+            if len(self.window) < HOLD_FRAMES:
+                return False
+            lo, hi = min(self.window), max(self.window)
+            if lo >= GRIP_HOLD_MIN and hi <= GRIP_HOLD_MAX and hi - lo <= HOLD_TOL:
+                self.hold_level = sum(self.window) / len(self.window)
+            return False
+
+        self.hold_frames += 1
+        if grip > self.hold_level + RELEASE_JUMP:
+            self.open_run += 1
+            if self.open_run >= RELEASE_HOLD_STEPS:
+                # 충분히 오래 쥐고 있다가 놓았을 때만 "끝났다"로 본다.
+                if self.hold_frames >= MIN_HOLD_BEFORE_RELEASE:
+                    return True
+                # 헛놓기 — 시도를 끝내지 않고 다시 잡을 기회를 준다.
+                self.fumbles += 1
+                self._reset_hold()
+                return False
+        else:
+            self.open_run = 0
+
+        return False
+
+
+def default_record_root(settings: RunSettings) -> pathlib.Path:
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    name = pathlib.Path(settings.dataset_root).name
+    return REPO_ROOT / "records" / "rollout" / f"{name}_rollout_{stamp}"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CLI
+# ═══════════════════════════════════════════════════════════════════
+def terminal_outcome_prompt() -> tuple[str, str]:
+    """롤아웃이 끝나면 성공/실패를 물어본다. 증강용에서만 호출된다."""
+    print("\n" + "=" * 60)
+    print("이 롤아웃을 어떻게 기록할까요?")
+    print("  s = 성공(success)   f = 실패(failure)")
+    print("  u = 판단 보류(unlabeled)   d = 폐기(discard, 저장 안 함)")
+    while True:
+        try:
+            answer = input("선택 [s/f/u/d]: ").strip().lower()
+        except EOFError:
+            return "unlabeled", ""
+        mapping = {"s": "success", "f": "failure", "u": "unlabeled", "d": "discard"}
+        if answer in mapping:
+            outcome = mapping[answer]
+            if outcome == "discard":
+                return outcome, ""
+            try:
+                note = input("메모 (없으면 Enter): ").strip()
+            except EOFError:
+                note = ""
+            return outcome, note
+        print("s, f, u, d 중 하나를 입력하세요.")
+
+
+# 정리(파킹 → 손목 내리기 → 그리퍼 사이클 → 토크 해제)가 끝날 때까지 기다리는 한계.
+# park_lower는 parking(최대 10초) + 램프 2초 + 그리퍼 여닫기 1.5초×2 라서 30초로는
+# 모자랄 수 있다. 모자라면 데몬 스레드가 파킹 도중에 잘려서 팔이 그 자리에 늘어진다
+# — 실제로 Stop을 눌렀을 때 파킹을 안 하고 힘이 풀리던 원인.
+SHUTDOWN_TIMEOUT_S = 120.0
+
+
+def _drain_until_finished(runner: "InferenceRunner") -> str:
+    """중단 요청 뒤에도 이벤트를 계속 소비하면서 정리가 끝나기를 기다린다.
+
+    예전에는 KeyboardInterrupt를 받자마자 이벤트 루프를 빠져나가 join만 했다.
+    그러면 runner 스레드가 정리하면서 남기는 [MIT 해제] / [DISCONNECT] 로그가
+    큐에 쌓인 채 출력되지 않아, 파킹이 됐는지 안 됐는지 알 수 없었다.
+    """
+    deadline = time.perf_counter() + SHUTDOWN_TIMEOUT_S
+    while time.perf_counter() < deadline:
+        try:
+            kind, payload = runner.events.get(timeout=1.0)
+        except queue.Empty:
+            if not runner.is_alive():
+                break
+            continue
+        if kind == Event.LOG:
+            print(payload, flush=True)
+        elif kind == Event.FINISHED:
+            return str(payload)
+    else:
+        print(
+            f"[WARN] 정리가 {SHUTDOWN_TIMEOUT_S:g}초 안에 끝나지 않았습니다 — "
+            "팔이 파킹되지 않았을 수 있습니다",
+            file=sys.stderr,
+            flush=True,
+        )
+    return runner.status
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="정책 추론 제어 루프 (smoothing + 롤아웃 dataset 기록)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--mode",
+        default=DEMO_MODE.name,
+        choices=sorted(MODES),
+        help="; ".join(f"{m.name}={m.description}" for m in MODES.values()),
+    )
+    parser.add_argument("--dataset-root", required=True, type=pathlib.Path)
+    parser.add_argument("--policy-path", required=True)
+    parser.add_argument(
+        "--policy-discover-packages-path",
+        default=None,
+        help="HAMLET 등 서드파티 policy 타입을 쓸 때 지정(예: smolvla_hamlet). "
+        "PYTHONPATH에 해당 패키지가 있어야 함",
+    )
+    parser.add_argument("--episode", type=int, default=0)
+    parser.add_argument("--task", default="")
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--source", default="dataset", choices=["dataset", "robot"])
+    parser.add_argument(
+        "--fps", type=float, default=30.0, help="명령 주파수. 학습 데이터 fps와 맞출 것"
+    )
+    parser.add_argument(
+        "--infer-every", type=int, default=5, help="N 스텝마다 추론. ensemble 표수 = chunk_size/N"
+    )
+    parser.add_argument(
+        "--trigger-mode",
+        default="threshold",
+        choices=["fixed", "threshold"],
+        help="threshold(기본)=lerobot async_inference의 chunk_size_threshold 방식 "
+        "(SmolVLA 논문 Algorithm 1의 g=0.7 sweet spot에 대응, 남은 큐 비율 기반 "
+        "적응형 트리거). fixed=이전 기본값이었던 infer_every 고정 간격 방식",
+    )
+    parser.add_argument(
+        "--chunk-threshold",
+        type=float,
+        default=0.3,
+        help="trigger-mode=threshold일 때만 사용. 남은 큐/horizon 비율이 이 값 이하로 "
+        "떨어지면 추론 요청 (0~1). 기본 0.3 = SmolVLA 논문 Algorithm 1의 g=0.7",
+    )
+    parser.add_argument(
+        "--no-latency-align",
+        dest="latency_align",
+        action="store_false",
+        help="추론 지연 보정을 끈다. 켜면(기본) chunk 도착까지 흐른 스텝만큼 앞을 잘라 "
+        "'지금'에 맞춘다. 끄면 2026-08-12 이전 동작과 같다",
+    )
+    parser.add_argument(
+        "--ccr",
+        action="store_true",
+        help="연속성 제약 재적합(CCR)을 켠다. smolvla_abp 계열 정책 전용 — 새 chunk의 "
+        "앞쪽 B-스플라인 제어점을 이미 실행된 행동에 맞춰 다시 풀어서 chunk 경계 "
+        "불연속을 없앤다. 끄면(기본) 지연만큼 앞을 잘라 붙이는 기존 동작",
+    )
+    parser.add_argument(
+        "--ccr-n-free",
+        type=int,
+        default=None,
+        help="CCR이 다시 푸는 앞쪽 제어점 개수. 기본값은 정책 config의 ccr_n_free(4)",
+    )
+    parser.add_argument("--horizon", type=int, default=50)
+    parser.add_argument("--max-steps", type=int, default=0)
+    parser.add_argument("--no-judge-frame-in-video", dest="judge_frame_in_video",
+                        action="store_false", default=True,
+                        help="파킹 후 판정 프레임을 영상 마지막에 넣지 않는다(예전 동작)")
+    parser.add_argument("--vcodec", default="h264",
+                        help="녹화 영상 인코더. 기본 h264(cv2가 읽을 수 있고 제일 빠름). "
+                             "GPU를 쓰려면 h264_nvenc/auto, 예전 동작은 libsvtav1")
+    parser.add_argument("--stop-on-release", action="store_true",
+                        help="지우개를 놓으면 남은 스텝을 버리고 바로 파킹한다. "
+                             "정책이 스스로 끝내지 못해 상한까지 도는 것을 막는다")
+    parser.add_argument("--loop-dataset", action="store_true")
+    parser.add_argument("--no-rviz", dest="rviz", action="store_false")
+    parser.add_argument("--joint-state-topic", default="/joint_states")
+
+    smoothing = parser.add_argument_group("smoothing (모드 기본값을 덮어씀)")
+    smoothing.add_argument("--no-ensemble", dest="temporal_ensemble", action="store_false")
+    smoothing.add_argument("--ensemble-m", type=float)
+    smoothing.add_argument("--ema-alpha", type=float)
+    smoothing.add_argument("--rate-limit", type=float)
+    smoothing.add_argument(
+        "--aggregate-fn",
+        choices=["temporal_ensemble", *sorted(AGGREGATE_FUNCTIONS)],
+        help="weighted_average(기본)=SmolVLA 논문 Algorithm 1의 aggregate 함수 f "
+        "(lerobot async_inference를 그대로 이식). temporal_ensemble=이전 기본값이었던 "
+        "ACT 방식 exp(-m*i) 전체 평균 — 비교 실험용으로 남겨둠",
+    )
+    parser.set_defaults(temporal_ensemble=None)
+
+    record = parser.add_argument_group("기록 (모드 기본값을 덮어씀)")
+    record.add_argument("--record", dest="record_dataset", action="store_true", default=None)
+    record.add_argument("--no-record", dest="record_dataset", action="store_false")
+    record.add_argument("--record-root", type=pathlib.Path)
+    record.add_argument("--record-repo-id", default="")
+    record.add_argument("--no-prompt-outcome", dest="prompt_outcome", action="store_false", default=None)
+
+    robot = parser.add_argument_group("실물 전송 (셋 다 있어야 열림)")
+    robot.add_argument("--apply-to-robot", action="store_true")
+    robot.add_argument("--real-robot-confirm", default="")
+    robot.add_argument("--no-park-on-exit", dest="park_on_exit", action="store_false")
+
+    hil = parser.add_argument_group("HIL 개입 (리더암 클러치)")
+    hil.add_argument(
+        "--hil",
+        action="store_true",
+        help="리더암 개입 활성화. space=개입 on/off, q=중단. 실물 전송이 열려 있어야 동작",
+    )
+    hil.add_argument("--leader-port", default="can_leader", help="리더암 CAN 인터페이스")
+    hil.add_argument(
+        "--clutch-gain",
+        type=float,
+        default=1.0,
+        help="리더 변화량 -> 팔로워 반영 비율 (1.0=등배, <1이면 정밀 보정이 쉬워진다)",
+    )
+    robot.add_argument(
+        "--move-mode",
+        type=int,
+        choices=[1, 5],
+        help="1=MOVE J(점대점, 기본), 5=MOVE CPV(연속 위치-속도, 30Hz 스트리밍용). "
+        "펌웨어 V1.8-1 이상에서만 5를 쓸 수 있다",
+    )
+    robot.add_argument(
+        "--lookahead-s",
+        type=float,
+        default=0.0,
+        help="목표를 이만큼 앞서 보낸다(초). MOVE J의 재계획 문제를 줄인다. 0=꺼짐",
+    )
+    robot.add_argument("--mit", action="store_true", help="MIT(임피던스) 제어 사용 — 토크 제어")
+    robot.add_argument("--mit-kp", type=float, default=10.0)
+    robot.add_argument("--mit-kd", type=float, default=0.8)
+    robot.add_argument("--mit-confirm", default="", help=f"MIT를 켜려면 {MIT_CONFIRM}")
+    robot.add_argument(
+        "--mit-vel-smoothing",
+        type=float,
+        default=0.2,
+        help="vel_ref EMA 계수(0~1). 작을수록 부드럽다. 1=다듬지 않음(노이즈)",
+    )
+    robot.add_argument(
+        "--mit-vel-scale",
+        type=float,
+        default=1.0,
+        help="vel_ref 배율. 0이면 속도 피드포워드를 끈다 — 원인 가려낼 때",
+    )
+    robot.add_argument(
+        "--mit-kp-overrides",
+        help='관절별 kp, 예: "joint2=30,joint3=20". 중력 부담이 다른 관절에 같은 kp를 '
+        "주면 처짐이 제각각이 된다(처짐 = 중력토크/kp)",
+    )
+    robot.add_argument(
+        "--move-speed-rate",
+        type=int,
+        help="컨트롤러 이동 속도 백분율(0~100, 기본 30). 팔의 실제 속도. "
+        "--rate-limit / --max-relative-target은 명령값의 상한이라 이것과 다르다",
+    )
+    robot.add_argument(
+        "--max-relative-target",
+        type=float,
+        help="명령이 실측 위치에서 벗어날 수 있는 최대치. smoothing의 rate-limit과 다른 것이다. "
+        "기본값은 recording.env의 MAX_RELATIVE_TARGET",
+    )
+    robot.add_argument(
+        "--camera-output-size",
+        type=int,
+        help="기본값은 recording.env의 HUMAN_APPROVED_CAMERA_OUTPUT_SIZE (없으면 512)",
+    )
+    robot.add_argument(
+        "--top-crop", help="X,Y,SIZE. 기본값은 recording.env의 HUMAN_APPROVED_TOP_CROP"
+    )
+    robot.add_argument(
+        "--wrist-crop", help="X,Y,SIZE. 기본값은 recording.env의 HUMAN_APPROVED_WRIST_CROP"
+    )
+    robot.add_argument("--env-file", type=pathlib.Path, default=DEFAULT_ENV_FILE)
+
+    return parser.parse_args(argv)
+
+
+def settings_from_args(args: argparse.Namespace) -> RunSettings:
+    preset = mode_preset(args.mode)
+    smoothing = dataclasses.replace(preset.smoothing)
+    if args.temporal_ensemble is False:
+        smoothing = dataclasses.replace(smoothing, temporal_ensemble=False)
+    if args.ensemble_m is not None:
+        smoothing = dataclasses.replace(smoothing, ensemble_m=args.ensemble_m)
+    if args.ema_alpha is not None:
+        smoothing = dataclasses.replace(smoothing, ema_alpha=args.ema_alpha)
+    if args.rate_limit is not None:
+        smoothing = dataclasses.replace(smoothing, rate_limit=args.rate_limit)
+    if args.aggregate_fn is not None:
+        smoothing = dataclasses.replace(smoothing, aggregate_fn=args.aggregate_fn)
+
+    # live 카메라 전처리는 recording.env를 기본으로 쓴다 — GUI와 CLI가 서로 다른
+    # 크롭으로 돌면 정책이 학습 때와 다른 화면을 보게 된다.
+    env = load_env_file(args.env_file)
+    crops = resolve_crops(env, args.top_crop, args.wrist_crop)
+    camera_output_size = args.camera_output_size or int(
+        env.get("HUMAN_APPROVED_CAMERA_OUTPUT_SIZE", "512")
+    )
+    if args.source == "robot" and not crops:
+        raise SystemExit(
+            "[ERROR] source=robot에는 카메라 crop이 필요합니다. "
+            f"{args.env_file}에 HUMAN_APPROVED_TOP_CROP / HUMAN_APPROVED_WRIST_CROP를 "
+            "두거나 --top-crop / --wrist-crop으로 지정하세요."
+        )
+
+    overrides: dict[str, Any] = {
+        "dataset_root": args.dataset_root,
+        "policy_path": args.policy_path,
+        "policy_discover_packages_path": args.policy_discover_packages_path,
+        "episode": args.episode,
+        "task": args.task,
+        "device": args.device,
+        "source": args.source,
+        "fps": args.fps,
+        "infer_every": args.infer_every,
+        "trigger_mode": args.trigger_mode,
+        "chunk_threshold": args.chunk_threshold,
+        "latency_align": args.latency_align,
+        "horizon": args.horizon,
+        "max_steps": args.max_steps,
+        "stop_on_release": args.stop_on_release,
+        "vcodec": args.vcodec,
+        "judge_frame_in_video": args.judge_frame_in_video,
+        "loop_dataset": args.loop_dataset,
+        "ccr": args.ccr,
+        "ccr_n_free": args.ccr_n_free,
+        "rviz": args.rviz,
+        "joint_state_topic": args.joint_state_topic,
+        "apply_to_robot": args.apply_to_robot,
+        "real_robot_confirm": args.real_robot_confirm,
+        "park_on_exit": args.park_on_exit,
+        "hil": args.hil,
+        "leader_port": args.leader_port,
+        "clutch_gain": args.clutch_gain,
+        "camera_output_size": camera_output_size,
+        "move_mode": args.move_mode,
+        "move_speed_rate": args.move_speed_rate,
+        "lookahead_s": args.lookahead_s,
+        "use_mit": args.mit,
+        "mit_kp": args.mit_kp,
+        "mit_kd": args.mit_kd,
+        "mit_confirm": args.mit_confirm,
+        "mit_kp_overrides": args.mit_kp_overrides,
+        "mit_vel_smoothing": args.mit_vel_smoothing,
+        "mit_vel_scale": args.mit_vel_scale,
+        "max_relative_target": args.max_relative_target
+        or (float(env["MAX_RELATIVE_TARGET"]) if "MAX_RELATIVE_TARGET" in env else None),
+        "crops": crops,
+        "smoothing": smoothing,
+        "record_root": args.record_root,
+        "record_repo_id": args.record_repo_id,
+    }
+    if args.record_dataset is not None:
+        overrides["record_dataset"] = args.record_dataset
+    if args.prompt_outcome is not None:
+        overrides["prompt_outcome"] = args.prompt_outcome
+    return RunSettings.from_mode(args.mode, **overrides)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    settings = settings_from_args(args)
+
+    if settings.apply_to_robot and not settings.real_robot_enabled():
+        print(
+            "[ERROR] 실물 전송을 켜려면 --source=robot --apply-to-robot "
+            f"--real-robot-confirm={REAL_ROBOT_CONFIRM} 를 모두 지정해야 합니다.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if settings.use_mit and settings.mit_confirm != MIT_CONFIRM:
+        print(
+            f"[ERROR] MIT는 토크 제어입니다. 켜려면 --mit-confirm={MIT_CONFIRM} 도 함께 주세요.\n"
+            "        먼저 scripts/piper/hardware/piper_mit_probe.py로 관절 하나씩 확인하시길 권합니다.",
+            file=sys.stderr,
+        )
+        return 2
+
+    runner = InferenceRunner(settings, outcome_prompt=terminal_outcome_prompt)
+
+    # SIGTERM으로 죽여도 파킹/토크 해제를 거치도록 KeyboardInterrupt와 같은 경로로
+    # 보낸다. 기본 동작(즉시 종료)이면 팔이 그 자리에 늘어진다.
+    def _on_terminate(_signum, _frame):
+        raise KeyboardInterrupt
+
+    with contextlib.suppress(ValueError):  # 메인 스레드가 아니면 등록 불가
+        signal.signal(signal.SIGTERM, _on_terminate)
+
+    runner.start()
+
+    try:
+        while True:
+            kind, payload = runner.events.get()
+            if kind == Event.LOG:
+                print(payload, flush=True)
+            elif kind == Event.STEP:
+                data = payload
+                print(
+                    f"  step {data['step']:>4}  votes={data['votes']:>3} "
+                    f"pending={data['pending']:>3}  infer={data['infer_ms']:>6.1f}ms"
+                    + (f"  rec={data['recorded']}" if data["recorded"] else ""),
+                    flush=True,
+                )
+            elif kind == Event.FINISHED:
+                status = payload
+                break
+    except KeyboardInterrupt:
+        # teleop_ui의 Stop 버튼이 프로세스 그룹에 SIGINT를 보낸다.
+        print("\n[INTERRUPT] 중단 요청 — 정리 중…", flush=True)
+        runner.stop_event.set()
+        status = _drain_until_finished(runner)
+
+    runner.join(timeout=SHUTDOWN_TIMEOUT_S)
+
+    if runner.trajectory:
+        trajectory = np.stack(runner.trajectory)
+        metrics = smoothness_metrics(trajectory, fps=settings.fps)
+        measured = runner.measured_fps()
+        print(f"\n[METRICS] {metrics}")
+        if measured:
+            print(f"[METRICS] 실측 제어 주기 {measured:.2f}Hz (설정 {settings.fps:g})")
+    if runner.recorded_path is not None:
+        print(f"[RECORD] {runner.recorded_path}")
+
+    return 0 if status in {"finished", "estop"} else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

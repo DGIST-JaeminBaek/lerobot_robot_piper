@@ -170,7 +170,7 @@ class PiperFollower(Robot):
         # 예전에 병렬 연결을 시도했다가 RealSense 2대를 정확히 동시에 초기화하면
         # 한쪽이 "read failed"/타임아웃 나는 걸 실제 하드웨어에서 확인해서 순차로
         # 되돌렸었는데, 그 원인이 USB 대역폭 경합이 아니라 그 당시 CPU 쿨링 문제였을
-        # 가능성이 제기돼(2026-07-24) scripts/tools/camera_parallel_connect_test.py로
+        # 가능성이 제기돼(2026-07-24) scripts/piper/camera/camera_parallel_connect_test.py로
         # 로봇 없이 카메라만 병렬 connect 3회 재검증 — 매번 성공(~10.3~10.4s, 카메라
         # 1대 warmup_s와 거의 동일해서 실제로 겹쳐서 도는 것도 확인됨), depth 프레임도
         # 정상. 그래서 병렬로 되돌림 — 만약 나중에 이 재현 실패가 다시 나타나면
@@ -635,9 +635,9 @@ class PiperFollower(Robot):
         self._disconnect_cameras()
         # 기본값(park=None)은 기존과 동일하게 항상 parking. park=False를 명시하면
         # (예: 사람이 녹화를 조기 종료했을 때) parking 이동 없이 그 자리에서 바로
-        # disconnect — scripts/tools/piper_record_one.py 참고.
+        # disconnect — scripts/piper/recording/piper_record_one.py 참고.
         # DISABLE_TORQUE_ON_DISCONNECT=false로 두면 parking만 하고 torque는
-        # 켜진 채로 남아 scripts/tools/safe_release_torque.py로 수동 해제 가능.
+        # 켜진 채로 남아 scripts/piper/hardware/safe_release_torque.py로 수동 해제 가능.
         park = True if park is None else park
 
         # torque를 풀 때의 자세는 park_release_mode가 결정한다. park=False(사람이

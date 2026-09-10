@@ -208,7 +208,7 @@ GUI 체크박스("Record Effort")로도 켜고 끌 수 있다.
 
 **2번이 특히 위험했다.** Smooth Start는 기본 ON(100프레임)이라 effort를 켜기만 하면
 30fps 기준 **모든 에피소드의 초반 3.3초**가 오염됐다. 지금은 `.pos`만 보간하므로
-effort/vel은 원본 그대로다 (`scripts/tools/test_smooth_start_mock.py`가 이 계약을 고정).
+effort/vel은 원본 그대로다 (`scripts/tests/piper/recording/test_smooth_start_mock.py`가 이 계약을 고정).
 
 **1번은 추론 경로(`9__run_client.sh`)에도 넣었다** — 학습/추론 사이 state 차원이
 다르면 터지기 때문이다(§C-4).
@@ -274,7 +274,7 @@ RESET_TIME_S=10
 **Recording History**에서 데이터셋 경로 확인 후:
 
 ```bash
-python scripts/tools/check_effort.py <데이터셋경로>
+python scripts/piper/validation/check_effort.py <데이터셋경로>
 ```
 
 기대 출력:

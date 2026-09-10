@@ -155,7 +155,7 @@ run_or_print() {
 
 robot_safety_args() {
   # DISABLE_TORQUE_ON_DISCONNECT=false로 두면 disconnect() 시 parking 자세로는
-  # 이동하되 torque는 자동으로 풀지 않음 — scripts/tools/safe_release_torque.py로
+  # 이동하되 torque는 자동으로 풀지 않음 — scripts/piper/hardware/safe_release_torque.py로
   # 사람이 팔을 잡은 상태에서 수동으로 torque를 해제하는 루틴과 짝을 이룸.
   #
   # MAX_RELATIVE_TARGET=off(또는 none/null/disabled, 대소문자 무관)로 두면 상대

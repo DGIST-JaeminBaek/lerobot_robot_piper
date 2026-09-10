@@ -51,7 +51,7 @@
 | `lerobot_robot_piper/depth_utils.py` (신규) | `depth_to_colormap()` — raw uint16 depth → 고정범위 클리핑 → turbo 컬러맵. `jet` 대신 `turbo`(OpenCV 5.0에서 `COLORMAP_TURBO` 확인됨) |
 | `configs/recording.env(.example)` | `USE_EFFORT`, `USE_DEPTH_OBSERVATION`, `DEPTH_MIN_M`, `DEPTH_MAX_M` 키 추가 |
 | `lerobot_robot_piper/teleop_ui.py` | Record preset에 "Record Effort" / "Record Depth" 체크박스 추가. `_camera_args()`가 `--robot.use_effort`/`--robot.use_depth_observation`/`--robot.depth_min_m`/`--robot.depth_max_m`을 lerobot-record/lerobot-record(--policy.path) 커맨드에 자동 반영. "Save as Default"로 recording.env에 영속화 가능 |
-| `scripts/tools/test_effort_mock.py`, `test_depth_mock.py` (신규) | 하드웨어 없이 mock으로 on/off 분기 검증. 실행: `PYTHONPATH=. python scripts/tools/test_effort_mock.py` |
+| `scripts/tests/piper/recording/test_effort_mock.py`, `test_depth_mock.py` (신규) | 하드웨어 없이 mock으로 on/off 분기 검증. 실행: `PYTHONPATH=. python scripts/tests/piper/recording/test_effort_mock.py` |
 
 ### 알아둘 것 — depth 저장 방식이 원 가이드와 다름
 

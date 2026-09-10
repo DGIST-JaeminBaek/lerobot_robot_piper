@@ -72,7 +72,7 @@ GUI에서: **CAN Setup** 패널 → `Detect` → leader/follower 인터페이스
 **Recording History** 패널에서 방금 만들어진 데이터셋 경로를 확인한 뒤:
 
 ```bash
-python scripts/tools/check_effort.py <데이터셋경로>
+python scripts/piper/validation/check_effort.py <데이터셋경로>
 ```
 
 ### ✅ 통과 기준

@@ -127,7 +127,7 @@ GUI에 `Record Effort` 체크박스를 추가하고 Record 및 Infer 명령에
 `--robot.use_effort`가 반영되도록 했다. 체크박스 변경 시 화면의 실행 명령도 즉시
 다시 생성된다.
 
-### `scripts/tools/smooth_start_frames.py`
+### `scripts/piper/recording/smooth_start_frames.py`
 
 Effort가 추가되면 `observation.state`에 position 이외의 값도 함께 들어간다. 기존
 Smooth Start는 feature 이름에서 관절 이름만 추출해 모든 state 값을 parking position
@@ -161,7 +161,7 @@ USE_EFFORT=false
 녹화된 데이터셋은 다음 도구로 확인한다.
 
 ```bash
-python scripts/tools/check_effort.py <데이터셋 경로>
+python scripts/piper/validation/check_effort.py <데이터셋 경로>
 ```
 
 정상 데이터의 확인 항목은 다음과 같다.
@@ -175,9 +175,9 @@ python scripts/tools/check_effort.py <데이터셋 경로>
 관련 mock 테스트:
 
 ```bash
-python scripts/tools/test_effort_mock.py
-python scripts/tools/test_dataset_features_mock.py
-python scripts/tools/test_smooth_start_mock.py
+python scripts/tests/piper/recording/test_effort_mock.py
+python scripts/tests/piper/recording/test_dataset_features_mock.py
+python scripts/tests/piper/recording/test_smooth_start_mock.py
 ```
 
 ## 6. 수정 파일
@@ -191,14 +191,14 @@ Effort 및 velocity 녹화를 위해 수정한 파일:
 - `scripts/lib/run_common.sh`
 - `scripts/5__record.sh`
 - `scripts/9__run_client.sh`
-- `scripts/tools/smooth_start_frames.py`
+- `scripts/piper/recording/smooth_start_frames.py`
 
 추가한 확인 도구와 테스트:
 
-- `scripts/tools/check_effort.py`
-- `scripts/tools/test_effort_mock.py`
-- `scripts/tools/test_dataset_features_mock.py`
-- `scripts/tools/test_smooth_start_mock.py`
+- `scripts/piper/validation/check_effort.py`
+- `scripts/tests/piper/recording/test_effort_mock.py`
+- `scripts/tests/piper/recording/test_dataset_features_mock.py`
+- `scripts/tests/piper/recording/test_smooth_start_mock.py`
 
 ## 7. 안전 기능과의 구분
 

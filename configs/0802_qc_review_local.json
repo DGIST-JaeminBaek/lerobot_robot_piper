@@ -6,7 +6,7 @@
   "end_event": "release_start",
   "episodes": [
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-130542",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-130542",
       "total_frames": 758,
       "enabled": true,
       "start_frame": 98,
@@ -21,7 +21,7 @@
       "gripper_release_done": 611
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-130825",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-130825",
       "total_frames": 770,
       "enabled": true,
       "start_frame": 91,
@@ -36,7 +36,7 @@
       "gripper_release_done": 624
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-130939",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-130939",
       "total_frames": 734,
       "enabled": true,
       "start_frame": 89,
@@ -51,7 +51,7 @@
       "gripper_release_done": 550
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-131058",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-131058",
       "total_frames": 713,
       "enabled": true,
       "start_frame": 86,
@@ -66,7 +66,7 @@
       "gripper_release_done": 566
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-131216",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-131216",
       "total_frames": 680,
       "enabled": true,
       "start_frame": 90,
@@ -81,7 +81,7 @@
       "gripper_release_done": 532
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-131420",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-131420",
       "total_frames": 655,
       "enabled": true,
       "start_frame": 84,
@@ -96,7 +96,7 @@
       "gripper_release_done": 516
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-132022",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-132022",
       "total_frames": 694,
       "enabled": true,
       "start_frame": 84,
@@ -111,7 +111,7 @@
       "gripper_release_done": 550
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-132211",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-132211",
       "total_frames": 777,
       "enabled": true,
       "start_frame": 86,
@@ -128,7 +128,7 @@
       "gripper_release_done": 617
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-132330",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-132330",
       "total_frames": 796,
       "enabled": true,
       "start_frame": 105,
@@ -143,7 +143,7 @@
       "gripper_release_done": 660
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-132443",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-132443",
       "total_frames": 733,
       "enabled": true,
       "start_frame": 79,
@@ -158,7 +158,7 @@
       "gripper_release_done": 584
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-132556",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-132556",
       "total_frames": 682,
       "enabled": true,
       "start_frame": 110,
@@ -173,7 +173,7 @@
       "gripper_release_done": 641
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-132838",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-132838",
       "total_frames": 787,
       "enabled": true,
       "start_frame": 82,
@@ -188,7 +188,7 @@
       "gripper_release_done": 623
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-132954",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-132954",
       "total_frames": 815,
       "enabled": true,
       "start_frame": 107,
@@ -203,7 +203,7 @@
       "gripper_release_done": 654
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-133231",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-133231",
       "total_frames": 855,
       "enabled": true,
       "start_frame": 146,
@@ -218,7 +218,7 @@
       "gripper_release_done": 702
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-133354",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-133354",
       "total_frames": 739,
       "enabled": true,
       "start_frame": 103,
@@ -233,7 +233,7 @@
       "gripper_release_done": 569
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-133505",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-133505",
       "total_frames": 852,
       "enabled": true,
       "start_frame": 103,
@@ -248,7 +248,7 @@
       "gripper_release_done": 697
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-133624",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-133624",
       "total_frames": 721,
       "enabled": true,
       "start_frame": 79,
@@ -263,7 +263,7 @@
       "gripper_release_done": 587
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-133819",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-133819",
       "total_frames": 828,
       "enabled": true,
       "start_frame": 123,
@@ -278,7 +278,7 @@
       "gripper_release_done": 654
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-134056",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-134056",
       "total_frames": 729,
       "enabled": true,
       "start_frame": 114,
@@ -293,7 +293,7 @@
       "gripper_release_done": 572
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-134204",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-134204",
       "total_frames": 731,
       "enabled": true,
       "start_frame": 98,
@@ -308,7 +308,7 @@
       "gripper_release_done": 582
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-134312",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-134312",
       "total_frames": 730,
       "enabled": true,
       "start_frame": 130,
@@ -323,7 +323,7 @@
       "gripper_release_done": 615
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-134917",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-134917",
       "total_frames": 817,
       "enabled": true,
       "start_frame": 98,
@@ -338,7 +338,7 @@
       "gripper_release_done": 672
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-135033",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-135033",
       "total_frames": 683,
       "enabled": true,
       "start_frame": 92,
@@ -353,7 +353,7 @@
       "gripper_release_done": 538
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-135317",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-135317",
       "total_frames": 654,
       "enabled": true,
       "start_frame": 114,
@@ -368,7 +368,7 @@
       "gripper_release_done": 516
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-135438",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-135438",
       "total_frames": 836,
       "enabled": true,
       "start_frame": 131,
@@ -383,7 +383,7 @@
       "gripper_release_done": 667
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-135558",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-135558",
       "total_frames": 798,
       "enabled": true,
       "start_frame": 121,
@@ -400,7 +400,7 @@
       "gripper_release_done": 671
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-135800",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-135800",
       "total_frames": 756,
       "enabled": true,
       "start_frame": 86,
@@ -415,7 +415,7 @@
       "gripper_release_done": 628
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-135912",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-135912",
       "total_frames": 827,
       "enabled": true,
       "start_frame": 113,
@@ -430,7 +430,7 @@
       "gripper_release_done": 631
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-140037",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-140037",
       "total_frames": 728,
       "enabled": true,
       "start_frame": 101,
@@ -447,7 +447,7 @@
       "gripper_release_done": 597
     },
     {
-      "source_dataset": "records/0802/erase_the_circle_0802-145406",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_circle_0802-145406",
       "total_frames": 650,
       "enabled": true,
       "start_frame": 78,
@@ -464,7 +464,7 @@
       "gripper_release_done": 458
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-140242",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-140242",
       "total_frames": 749,
       "enabled": true,
       "start_frame": 92,
@@ -479,7 +479,7 @@
       "gripper_release_done": 602
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-140354",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-140354",
       "total_frames": 726,
       "enabled": true,
       "start_frame": 98,
@@ -494,7 +494,7 @@
       "gripper_release_done": 586
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-140502",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-140502",
       "total_frames": 744,
       "enabled": true,
       "start_frame": 81,
@@ -509,7 +509,7 @@
       "gripper_release_done": 591
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-140614",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-140614",
       "total_frames": 717,
       "enabled": true,
       "start_frame": 77,
@@ -524,7 +524,7 @@
       "gripper_release_done": 596
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-140722",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-140722",
       "total_frames": 671,
       "enabled": true,
       "start_frame": 79,
@@ -539,7 +539,7 @@
       "gripper_release_done": 554
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-140827",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-140827",
       "total_frames": 693,
       "enabled": true,
       "start_frame": 77,
@@ -554,7 +554,7 @@
       "gripper_release_done": 542
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-140935",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-140935",
       "total_frames": 664,
       "enabled": true,
       "start_frame": 78,
@@ -569,7 +569,7 @@
       "gripper_release_done": 536
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-141044",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-141044",
       "total_frames": 711,
       "enabled": true,
       "start_frame": 75,
@@ -584,7 +584,7 @@
       "gripper_release_done": 565
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-141851",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-141851",
       "total_frames": 824,
       "enabled": true,
       "start_frame": 73,
@@ -599,7 +599,7 @@
       "gripper_release_done": 686
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-142006",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-142006",
       "total_frames": 747,
       "enabled": true,
       "start_frame": 81,
@@ -614,7 +614,7 @@
       "gripper_release_done": 612
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-142116",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-142116",
       "total_frames": 714,
       "enabled": true,
       "start_frame": 100,
@@ -629,7 +629,7 @@
       "gripper_release_done": 596
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-142225",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-142225",
       "total_frames": 767,
       "enabled": true,
       "start_frame": 80,
@@ -644,7 +644,7 @@
       "gripper_release_done": 669
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-142338",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-142338",
       "total_frames": 728,
       "enabled": true,
       "start_frame": 86,
@@ -661,7 +661,7 @@
       "gripper_release_done": 614
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-142550",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-142550",
       "total_frames": 816,
       "enabled": true,
       "start_frame": 69,
@@ -676,7 +676,7 @@
       "gripper_release_done": 616
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-142707",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-142707",
       "total_frames": 723,
       "enabled": true,
       "start_frame": 79,
@@ -691,7 +691,7 @@
       "gripper_release_done": 594
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-142815",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-142815",
       "total_frames": 912,
       "enabled": true,
       "start_frame": 82,
@@ -708,7 +708,7 @@
       "gripper_release_done": 783
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-143049",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-143049",
       "total_frames": 843,
       "enabled": true,
       "start_frame": 103,
@@ -723,7 +723,7 @@
       "gripper_release_done": 694
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-143344",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-143344",
       "total_frames": 802,
       "enabled": true,
       "start_frame": 68,
@@ -740,7 +740,7 @@
       "gripper_release_done": 667
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-143457",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-143457",
       "total_frames": 654,
       "enabled": true,
       "start_frame": 72,
@@ -755,7 +755,7 @@
       "gripper_release_done": 540
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-143602",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-143602",
       "total_frames": 658,
       "enabled": true,
       "start_frame": 67,
@@ -770,7 +770,7 @@
       "gripper_release_done": 494
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-143708",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-143708",
       "total_frames": 687,
       "enabled": true,
       "start_frame": 66,
@@ -785,7 +785,7 @@
       "gripper_release_done": 541
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-143815",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-143815",
       "total_frames": 768,
       "enabled": true,
       "start_frame": 67,
@@ -800,7 +800,7 @@
       "gripper_release_done": 625
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-143926",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-143926",
       "total_frames": 751,
       "enabled": true,
       "start_frame": 77,
@@ -815,7 +815,7 @@
       "gripper_release_done": 513
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-144141",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-144141",
       "total_frames": 732,
       "enabled": true,
       "start_frame": 85,
@@ -830,7 +830,7 @@
       "gripper_release_done": 607
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-144300",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-144300",
       "total_frames": 690,
       "enabled": true,
       "start_frame": 82,
@@ -845,7 +845,7 @@
       "gripper_release_done": 584
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-144407",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-144407",
       "total_frames": 718,
       "enabled": true,
       "start_frame": 75,
@@ -860,7 +860,7 @@
       "gripper_release_done": 592
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-144514",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-144514",
       "total_frames": 778,
       "enabled": true,
       "start_frame": 72,
@@ -875,7 +875,7 @@
       "gripper_release_done": 659
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-144629",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-144629",
       "total_frames": 773,
       "enabled": true,
       "start_frame": 82,
@@ -890,7 +890,7 @@
       "gripper_release_done": 651
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-144740",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-144740",
       "total_frames": 770,
       "enabled": true,
       "start_frame": 74,
@@ -905,7 +905,7 @@
       "gripper_release_done": 632
     },
     {
-      "source_dataset": "records/0802/erase_the_triangle_0802-144858",
+      "source_dataset": "records/outlier/0802_joint4_incorrect/erase_the_triangle_0802-144858",
       "total_frames": 733,
       "enabled": true,
       "start_frame": 74,

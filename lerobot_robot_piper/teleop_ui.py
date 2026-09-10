@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from collections import Counter
 from tkinter import filedialog, ttk
 
 import cv2
@@ -70,10 +71,10 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RECORDING_ENV_PATH = REPO_ROOT / "configs" / "recording.env"
 
 # 녹화(lerobot-record) 종료 후, 각 에피소드 초반 N 프레임을 parking에서 시작하도록 자동
-# 보정(scripts/tools/smooth_start_frames.py)할 기본 프레임 수. recording.env의
+# 보정(scripts/piper/recording/smooth_start_frames.py)할 기본 프레임 수. recording.env의
 # SMOOTH_START_FRAMES로 덮어쓸 수 있고, 0/false/off면 자동 보정을 끈다.
 SMOOTH_START_FRAMES_DEFAULT = 100
-SMOOTH_SCRIPT_PATH = REPO_ROOT / "scripts" / "tools" / "smooth_start_frames.py"
+SMOOTH_SCRIPT_PATH = REPO_ROOT / "scripts" / "piper" / "recording" / "smooth_start_frames.py"
 
 # Infer 프리셋이 piper_infer_runner.py에 넘기는 실물 전송 확인 문구.
 # runner 쪽 상수(piper_infer_runner.REAL_ROBOT_CONFIRM)와 같은 값이어야 하며,
@@ -82,7 +83,6 @@ SMOOTH_SCRIPT_PATH = REPO_ROOT / "scripts" / "tools" / "smooth_start_frames.py"
 INFER_REAL_ROBOT_CONFIRM = "I_UNDERSTAND_REAL_ROBOT"
 # MIT(임피던스) 제어용 별도 확인 문구. piper_infer_runner.MIT_CONFIRM과 같아야 한다.
 INFER_MIT_CONFIRM = "I_UNDERSTAND_TORQUE_CONTROL"
-
 
 def load_recording_env(path: pathlib.Path = RECORDING_ENV_PATH) -> dict[str, str]:
     """configs/recording.env를 KEY=VALUE 딕셔너리로 파싱. 파일이 없거나
@@ -178,6 +178,23 @@ def discover_datasets(scan_root: pathlib.Path) -> list[pathlib.Path]:
     if not scan_root.exists():
         return []
     return sorted(p.parent.parent for p in scan_root.rglob("meta/info.json"))
+
+
+def _short_dataset_labels(rel_labels: list[str]) -> list[str]:
+    """records/ 기준 전체 상대경로(예: "0727/erase_the_circle/erase_the_circle_
+    0726-162803") 대신 "세션 / 폴더명"만 보여줌 — 도형별 하위폴더는 leaf 폴더명에
+    타임스탬프가 이미 있어 대부분 생략 가능. ttk.Combobox 드롭다운 폭은 Tk가 열 때마다
+    콤보박스 자신의 픽셀 폭에 맞춰 강제로 다시 그려서(PlacePopdown), 위젯 width를
+    안 늘리고 목록 위젯만 넓히는 우회는 실제로는 적용되지 않았음 — 그래서 라벨 자체를
+    줄이는 쪽으로 해결한다. 축약 결과가 겹치는 항목(세션은 다른데 leaf가 같은 경우,
+    508개 중 1개)만 원래 전체 경로로 표시해 dataset을 잃지 않게 한다."""
+    def _short(rel: str) -> str:
+        parts = rel.split("/")
+        return f"{parts[0]} / {parts[-1]}" if len(parts) > 1 else parts[-1]
+
+    short_labels = [_short(r) for r in rel_labels]
+    dup_counts = Counter(short_labels)
+    return [short if dup_counts[short] == 1 else rel for rel, short in zip(rel_labels, short_labels)]
 
 
 def discover_policies(train_root: pathlib.Path | None = None) -> list[tuple[str, str]]:
@@ -356,7 +373,7 @@ def init_can_interface(iface: str, target_name: str, bitrate: int) -> tuple[bool
 
 
 def bring_can_down(iface: str) -> tuple[bool, str]:
-    """비상정지용 — piper_session.py의 step_can_down과 동일하게 CAN 인터페이스를 즉시 내림."""
+    """비상정지용 — follower/leader CAN 인터페이스를 즉시 내림."""
     rc, _, err = _run_cmd(["ip", "link", "set", iface, "down"], sudo=True)
     if rc != 0:
         return False, f"Failed to bring down {iface}: {err}"
@@ -462,12 +479,12 @@ class PiperMonitorUI:
         self.script_proc: subprocess.Popen | None = None
         # 이번 Launch가 Record면 그 dataset root를 담아둠(종료 후 초반 프레임 보정용). Record가 아니면 None.
         self._record_dataset_root: str | None = None
-        # GUI의 "RViz Start" 버튼으로 띄운 RViz 프로세스. 이게 살아있어야 Dataset Browser의
-        # Play 버튼이 piper_replay_player.py 대신 piper_replay_player_rviz.py(RViz 동기화 재생)를 씀 —
-        # 터미널에서 직접 띄운 RViz는 감지 대상이 아님(이 프로세스 핸들 기준으로만 판정).
+        # GUI의 "RViz Start" 버튼으로 띄운 RViz 프로세스. 이게 살아있으면 Dataset Browser의
+        # 공통 replay player에 --rviz를 붙여 동기화 재생한다. 터미널에서 직접 띄운 RViz는
+        # 이 프로세스 핸들 기준으로 감지하지 않는다.
         self.rviz_proc: subprocess.Popen | None = None
         # last_launch.log를 실시간으로 tail하는 터미널 창 — "Log Terminal" 토글 버튼으로
-        # on/off (RViz와 동일 패턴). GUI 시작 시 자동으로 한 번 켜짐(__init__ 끝부분 참고).
+        # on/off (RViz와 동일 패턴). GUI 시작 시 자동으로 켜지 않고 수동으로만 켬.
         self.log_terminal_proc: subprocess.Popen | None = None
         self.leader_mon: CANMonitor | None = None
         self.follower_mon: CANMonitor | None = None
@@ -497,10 +514,10 @@ class PiperMonitorUI:
         if geo:
             self.root.geometry(geo)
 
+        self._build_scroll_container()
+
         self._build_ui()
         self.root.update_idletasks()
-
-        self._start_log_terminal()
 
         self._update_ui()
 
@@ -511,15 +528,58 @@ class PiperMonitorUI:
         mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(RECORDING_ENV_PATH.stat().st_mtime))
         return f"recording.env: {RECORDING_ENV_PATH} (수정됨 {mtime}, {len(self.recording_env)}개 값 로드)"
 
+    # ------------------------------------------------------------ Scroll container
+    def _build_scroll_container(self):
+        """창 전체 콘텐츠를 세로 스크롤 가능한 캔버스 안에 넣는다. 시스템 기본
+        폰트가 커지면 저장된 창 크기(_load_geometry)보다 콘텐츠가 길어져 Joint
+        Positions/Follower Arm Status 같은 아래쪽 섹션이 화면 밖으로 밀려나
+        안 보이는 문제가 있었음 — 폰트 크기와 무관하게 마우스 휠로 내려서 볼 수
+        있게 스크롤로 해결. 이후 _build_ui()의 모든 섹션은 self.root 대신
+        self.scroll_frame을 부모로 쓴다."""
+        self.root.rowconfigure(0, weight=1)
+        self.root.columnconfigure(0, weight=1)
+
+        outer_canvas = tk.Canvas(self.root, highlightthickness=0)
+        outer_canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=outer_canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        outer_canvas.configure(yscrollcommand=scrollbar.set)
+
+        self.scroll_frame = ttk.Frame(outer_canvas)
+        scroll_window = outer_canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
+
+        def _on_frame_configure(_event):
+            outer_canvas.configure(scrollregion=outer_canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            # 내부 프레임 너비를 캔버스 너비에 맞춰 가로 스크롤 없이 세로만 스크롤되게 함.
+            outer_canvas.itemconfigure(scroll_window, width=event.width)
+
+        self.scroll_frame.bind("<Configure>", _on_frame_configure)
+        outer_canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            if event.num == 4:
+                outer_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                outer_canvas.yview_scroll(1, "units")
+            else:
+                outer_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        # 리눅스는 Button-4/5(휠 스크롤을 버튼 이벤트로 전달), Windows/Mac은 MouseWheel.
+        outer_canvas.bind_all("<Button-4>", _on_mousewheel)
+        outer_canvas.bind_all("<Button-5>", _on_mousewheel)
+        outer_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
     # ------------------------------------------------------------ Build UI
     def _build_ui(self):
-        self.root.columnconfigure(0, weight=1)
+        self.scroll_frame.columnconfigure(0, weight=1)
 
         # -- recording.env 상태 (로드된 경로/수정 시각 — 어떤 env 기준으로 값이
         # 채워졌는지 한눈에 보이게, 특히 여러 recording.env를 오가며 실험할 때 헷갈림 방지)
         self.env_status_var = tk.StringVar(value=self._describe_recording_env())
         ttk.Label(
-            self.root, textvariable=self.env_status_var, anchor="w",
+            self.scroll_frame, textvariable=self.env_status_var, anchor="w",
             font=("", 9), foreground="#888888",
         ).grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 0))
 
@@ -527,7 +587,7 @@ class PiperMonitorUI:
         self._build_can_frame()
 
         # -- Script Launcher
-        script_frame = ttk.LabelFrame(self.root, text="Script Launcher", padding=8)
+        script_frame = ttk.LabelFrame(self.scroll_frame, text="Script Launcher", padding=8)
         script_frame.grid(row=2, column=0, sticky="ew", padx=8, pady=4)
         script_frame.columnconfigure(1, weight=1)
 
@@ -915,7 +975,7 @@ class PiperMonitorUI:
         self._build_history_frame()
 
         # -- Monitor Controls
-        mon_ctrl = ttk.LabelFrame(self.root, text="CAN Monitor", padding=8)
+        mon_ctrl = ttk.LabelFrame(self.scroll_frame, text="CAN Monitor", padding=8)
         mon_ctrl.grid(row=5, column=0, sticky="ew", padx=8, pady=4)
 
         self.btn_mon_start = ttk.Button(mon_ctrl, text="Start Monitor", command=self._on_mon_start)
@@ -930,9 +990,9 @@ class PiperMonitorUI:
         ttk.Label(mon_ctrl, textvariable=self.mon_hz_var, anchor="e").pack(side="right", padx=8)
 
         # -- Joint Monitor
-        joint_frame = ttk.LabelFrame(self.root, text="Joint Positions (raw)", padding=8)
+        joint_frame = ttk.LabelFrame(self.scroll_frame, text="Joint Positions (raw)", padding=8)
         joint_frame.grid(row=6, column=0, sticky="nsew", padx=8, pady=4)
-        self.root.rowconfigure(6, weight=1)
+        self.scroll_frame.rowconfigure(6, weight=1)
         joint_frame.columnconfigure(2, weight=1)
         joint_frame.columnconfigure(5, weight=1)
 
@@ -968,7 +1028,7 @@ class PiperMonitorUI:
             self.follower_bars[name] = fb
 
         # -- Arm Status
-        status_frame = ttk.LabelFrame(self.root, text="Follower Arm Status", padding=8)
+        status_frame = ttk.LabelFrame(self.scroll_frame, text="Follower Arm Status", padding=8)
         status_frame.grid(row=7, column=0, sticky="ew", padx=8, pady=4)
         status_frame.columnconfigure(0, weight=1)
 
@@ -979,13 +1039,13 @@ class PiperMonitorUI:
 
         # -- Bottom status
         self.bottom_var = tk.StringVar(value="Ready")
-        ttk.Label(self.root, textvariable=self.bottom_var, relief="sunken", anchor="w", padding=4).grid(
+        ttk.Label(self.scroll_frame, textvariable=self.bottom_var, relief="sunken", anchor="w", padding=4).grid(
             row=99, column=0, sticky="ew", padx=8, pady=(4, 8)
         )
 
     # ---------------------------------------------------------- CAN Setup
     def _build_can_frame(self):
-        can_frame = ttk.LabelFrame(self.root, text="CAN Setup", padding=8)
+        can_frame = ttk.LabelFrame(self.scroll_frame, text="CAN Setup", padding=8)
         can_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(8, 4))
 
         btn_row = ttk.Frame(can_frame)
@@ -996,7 +1056,7 @@ class PiperMonitorUI:
         ttk.Label(btn_row, textvariable=self.can_status_var).pack(side="left", padx=12)
 
         # 비상정지 — 항상 오른쪽에 보이게 둠. Script Launcher의 Leader/Follower 포트
-        # 입력값을 그대로 씀 (piper_session.py --step can_down과 동일한 동작).
+        # 입력값을 그대로 씀.
         self.btn_estop = tk.Button(
             btn_row, text="E-STOP", command=self._on_estop,
             bg="#c0392b", fg="white", activebackground="#e74c3c", activeforeground="white",
@@ -1012,7 +1072,7 @@ class PiperMonitorUI:
         ttk.Button(btn_row, text="Slave Torque OFF", command=self._on_slave_torque_off).pack(side="right", padx=4)
         ttk.Button(btn_row, text="Camera Reset", command=self._on_camera_reset).pack(side="right", padx=4)
 
-        # RViz — piper_session.py --step rviz와 동일한 launch 커맨드를 이 GUI 프로세스의
+        # RViz launch 커맨드를 이 GUI 프로세스의
         # 자식으로 띄움/내림. 순수 on/off 상태라 Launch/Kill이나 Torque ON/OFF와 달리
         # 토글 버튼 하나로 충분함. 이 핸들이 살아있는지가 Dataset Browser Play 버튼의
         # RViz 동기화 재생 여부를 결정함(_on_play_episode 참고).
@@ -1135,7 +1195,7 @@ class PiperMonitorUI:
             self._stop_rviz()
 
     def _start_rviz(self):
-        """piper_session.py --step rviz와 동일한 launch 커맨드(source ROS2 humble +
+        """RViz launch 커맨드(source ROS2 humble +
         ros2_ws overlay, ros2 launch agx_arm_description display_piper.launch.py)를
         이 GUI의 자식 프로세스로 띄움. ROS_DISTRO_NAME/ROS_SETUP_PATH/ROS2_WS는
         recording.env로 덮어쓸 수 있음."""
@@ -1168,7 +1228,7 @@ class PiperMonitorUI:
 
         try:
             # shell=True는 리눅스에서 /bin/sh(dash)로 실행되는데 source는 bash 전용
-            # 빌트인이라 dash엔 없음 — bash를 명시적으로 지정해야 함(piper_session.py와 동일).
+            # 빌트인이라 dash엔 없음 — bash를 명시적으로 지정해야 함.
             self.rviz_proc = subprocess.Popen(
                 ["bash", "-c", cmd], env=env,
                 **(dict(creationflags=subprocess.CREATE_NEW_PROCESS_GROUP) if sys.platform == "win32" else dict(preexec_fn=os.setsid)),
@@ -1195,7 +1255,7 @@ class PiperMonitorUI:
         """records/ 밑의 기존 dataset/episode를 탐색해서 Dataset/Episode 콤보박스로
         선택하게 함. 여기서 고른 값(self.replay_dataset_root_var/replay_episode_var)은
         추후 Replay 프리셋이 그대로 씀."""
-        frame = ttk.LabelFrame(self.root, text="Dataset Browser", padding=8)
+        frame = ttk.LabelFrame(self.scroll_frame, text="Dataset Browser", padding=8)
         frame.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
 
         ttk.Button(frame, text="Refresh", command=self._on_dataset_browser_refresh).pack(side="left", padx=4)
@@ -1219,8 +1279,8 @@ class PiperMonitorUI:
         self.play_button.pack(side="left", padx=(8, 2))
 
         # RGB/Depth 카메라가 둘 다 녹화된 dataset을 재생할 때, 창에 4개(RGB 2 + Depth 2)가
-        # 한꺼번에 쌓이면 답답하니 Both/RGB only/Depth only로 필터링 — piper_replay_player.py/
-        # piper_replay_player_rviz.py에 --view로 그대로 전달됨(_on_play_episode 참고).
+        # 한꺼번에 쌓이면 답답하니 Both/RGB only/Depth only로 필터링 — 공통 replay player에
+        # --view로 그대로 전달됨(_on_play_episode 참고).
         ttk.Label(frame, text="View:").pack(side="left", padx=(12, 4))
         self.replay_view_var = tk.StringVar(value="both")
         self.view_combo = ttk.Combobox(
@@ -1247,18 +1307,22 @@ class PiperMonitorUI:
         scan_root = dataset_scan_root(self.recording_env)
         datasets = discover_datasets(scan_root)
 
-        self._dataset_paths = {}
-        labels = []
+        rel_labels = []
         for d in datasets:
             try:
-                label = str(d.relative_to(scan_root))
+                rel_labels.append(str(d.relative_to(scan_root)))
             except ValueError:
-                label = str(d)
-            self._dataset_paths[label] = d
-            labels.append(label)
+                rel_labels.append(str(d))
+        labels = _short_dataset_labels(rel_labels)
+        self._dataset_paths = dict(zip(labels, datasets))
 
         self.dataset_combo["values"] = labels
+        # 라벨을 줄였어도(중앙값 38자) 소수의 rollout 라벨은 여전히 90자를 넘어가서,
+        # 콤보박스 폭을 현재 목록의 최장 라벨에 맞춰 매번 다시 계산 — Tk가 드롭다운을
+        # 열 때 콤보박스 자신의 픽셀 폭에 맞춰 목록 폭을 강제로 다시 그리기 때문에
+        # (PlacePopdown), 위젯 폭 자체를 늘리는 것만이 실제로 드롭다운에 반영된다.
         if labels:
+            self.dataset_combo.configure(width=min(max(len(max(labels, key=len)) + 2, 30), 70))
             self.dataset_status_var.set(f"{len(labels)}개 dataset 발견 ({scan_root})")
             if self.dataset_label_var.get() not in labels:
                 self.dataset_label_var.set(labels[0])
@@ -1286,11 +1350,8 @@ class PiperMonitorUI:
         self.replay_episode_var.set(episodes[0] if episodes else "")
 
     def _on_play_episode(self):
-        """RViz Start로 띄운 RViz가 살아있으면 piper_replay_player_rviz.py(RViz 동기화
-        재생 + 자체 영상/패널 창)를, 없으면 기존 piper_replay_player.py(영상/패널
-        창만, ROS2 불필요)를 띄움 — 두 스크립트 다 화면 구성이 동일한 스타일이라
-        RViz 유무로 창이 하나 더 늘지 않고 자연스럽게 바뀜.
-        View 콤보박스(both/rgb/depth)는 두 스크립트 다 --view로 그대로 전달함."""
+        """공통 replay player를 띄운다. RViz가 떠 있으면 --rviz로 같은 프레임의
+        Piper action을 /joint_states에 publish하고, 아니면 ROS2 없이 영상/패널만 연다."""
         dataset_root = self.replay_dataset_root_var.get().strip()
         episode = self.replay_episode_var.get().strip()
         view = self.replay_view_var.get().strip() or "both"
@@ -1301,22 +1362,15 @@ class PiperMonitorUI:
             return
 
         rviz_running = self.rviz_proc is not None and self.rviz_proc.poll() is None
+        script_path = REPO_ROOT / "scripts" / "piper" / "validation" / "piper_replay_player.py"
+        cmd_list = [
+            sys.executable, str(script_path),
+            "--dataset-root", dataset_root,
+            "--episode", episode,
+            "--view", view,
+        ]
         if rviz_running:
-            script_path = REPO_ROOT / "scripts" / "tools" / "piper_replay_player_rviz.py"
-            cmd_list = [
-                sys.executable, str(script_path),
-                "--dataset_root", dataset_root,
-                "--episode", episode,
-                "--view", view,
-            ]
-        else:
-            script_path = REPO_ROOT / "scripts" / "tools" / "piper_replay_player.py"
-            cmd_list = [
-                sys.executable, str(script_path),
-                "--dataset-root", dataset_root,
-                "--episode", episode,
-                "--view", view,
-            ]
+            cmd_list.append("--rviz")
 
         # 윈도우에서는 CREATE_NEW_PROCESS_GROUP을, 다른 OS에서는 preexec_fn을 사용합니다.
         kwargs = {
@@ -1338,7 +1392,7 @@ class PiperMonitorUI:
     def _build_history_frame(self):
         """Dataset Browser와 같은 scan_root를 기준으로, 지금까지 녹화된
         dataset들을 task/episode/frame/시각 요약 표로 보여줌."""
-        frame = ttk.LabelFrame(self.root, text="Recording History", padding=8)
+        frame = ttk.LabelFrame(self.scroll_frame, text="Recording History", padding=8)
         frame.grid(row=4, column=0, sticky="ew", padx=8, pady=4)
 
         ttk.Button(frame, text="Refresh", command=self._on_history_refresh).pack(anchor="w", pady=(0, 4))
@@ -1655,7 +1709,7 @@ class PiperMonitorUI:
         episode_time_s = self.episode_time_var.get().strip() or "60"
         reset_time_s = self.reset_time_var.get().strip() or "60"
         resume = env.get("RESUME") or "false"
-        dataset_repo_id_base = env.get("DATASET_REPO_ID") or "local/piper_write_light"
+        dataset_repo_id_base = env.get("DATASET_REPO_ID") or "local/piper"
         dataset_root_base = env.get("DATASET_ROOT") or f"records/{dataset_repo_id_base}"
 
         task_slug = _task_slug(task)
@@ -1719,7 +1773,7 @@ class PiperMonitorUI:
         return " ".join(args)
 
     def _build_record_one_command(self) -> str:
-        """scripts/tools/piper_record_one.py로 에피소드 딱 1개만 녹화.
+        """scripts/piper/recording/piper_record_one.py로 에피소드 딱 1개만 녹화.
 
         lerobot-record와 인자는 100% 동일(같은 _dataset_args()/_camera_args() 등
         재사용) — 다른 건 "End Episode 핫키로 조기 종료하면 parking 생략, 타이머
@@ -1729,7 +1783,7 @@ class PiperMonitorUI:
         follower_port = self.follower_port_var.get().strip()
         leader_port = self.leader_port_var.get().strip()
         fps = self.fps_var.get().strip() or "30"
-        script_path = REPO_ROOT / "scripts" / "tools" / "piper_record_one.py"
+        script_path = REPO_ROOT / "scripts" / "piper" / "recording" / "piper_record_one.py"
 
         args = [
             sys.executable, str(script_path),
@@ -1820,7 +1874,7 @@ class PiperMonitorUI:
             self.policy_label_var.set("? 로컬 경로 아님 (HF repo id면 정상)")
 
     def _build_infer_command(self) -> str:
-        """scripts/tools/piper_infer_runner.py로 정책(SmolVLA 등) 추론 실행.
+        """scripts/piper/inference/piper_infer_runner.py로 정책(SmolVLA 등) 추론 실행.
 
         예전에는 lerobot-record --policy.path=... 를 그대로 띄웠지만, 그 경로는
         action chunk를 노출하지 않아 temporal ensemble을 걸 수 없었음. ensemble이
@@ -1839,7 +1893,7 @@ class PiperMonitorUI:
 
         실물 전송은 "실물 전송" 체크 + source=robot + 확인 문구가 모두 있어야
         열림 — 체크만으로는 안 열리게 runner가 한 번 더 막음."""
-        script_path = REPO_ROOT / "scripts" / "tools" / "piper_infer_runner.py"
+        script_path = REPO_ROOT / "scripts" / "piper" / "inference" / "piper_infer_runner.py"
         policy_path = self.policy_path_var.get().strip()
         dataset_root = self.replay_dataset_root_var.get().strip()
         episode = self.replay_episode_var.get().strip() or "0"
@@ -1904,7 +1958,15 @@ class PiperMonitorUI:
         follower_port = self.follower_port_var.get().strip()
         dataset_root = self.replay_dataset_root_var.get().strip()
         episode = self.replay_episode_var.get().strip()
-        repo_id = self.dataset_label_var.get().strip() or (self.recording_env.get("DATASET_REPO_ID") or "local/piper_write_light")
+        # dataset_label_var는 Dataset Browser 콤보박스에 보이는 축약 표시용 텍스트라
+        # 공백/"/"가 섞여 있어 repo_id로 못 씀(_short_dataset_labels 참고) — scan_root
+        # 기준 전체 상대경로를 다시 계산해서 원래 동작(폴더 구조 그대로 반영한 repo_id)을 유지.
+        scan_root = dataset_scan_root(self.recording_env)
+        try:
+            repo_id = str(pathlib.Path(dataset_root).relative_to(scan_root)) if dataset_root else ""
+        except ValueError:
+            repo_id = ""
+        repo_id = repo_id or (self.recording_env.get("DATASET_REPO_ID") or "local/piper")
         fps = self.recording_env.get("FPS") or "30"
 
         args = [
@@ -1927,7 +1989,7 @@ class PiperMonitorUI:
         """Dataset Browser에서 고른 dataset/episode를 piper_replay_player.py로 재생.
         하드웨어 연결 없이 동작하는 순수 데이터 뷰어입니다.
         """
-        script_path = REPO_ROOT / "scripts" / "tools" / "piper_replay_player.py"
+        script_path = REPO_ROOT / "scripts" / "piper" / "validation" / "piper_replay_player.py"
         dataset_root = self.replay_dataset_root_var.get().strip()
         episode = self.replay_episode_var.get().strip()
 
@@ -1947,11 +2009,11 @@ class PiperMonitorUI:
 
     def _build_infer_preview_command(self) -> str:
         """Dataset Browser에서 고른 dataset/episode의 카메라 프레임을 정책(Policy Path)에
-        순서대로 먹여서 예측 action을 뽑고, scripts/tools/piper_infer_preview.py로
+        순서대로 먹여서 예측 action을 뽑고, scripts/piper/inference/piper_infer_preview.py로
         RViz에 재생 (실제 로봇에 명령 안 보냄, open-loop 미리보기).
         Infer 프리셋과 달리 하드웨어 연결이 전혀 필요 없음 — 정책 로딩과 추론만 함.
         RViz + robot_state_publisher는 Replay와 마찬가지로 별도 터미널에서 미리 떠 있어야 함."""
-        script_path = REPO_ROOT / "scripts" / "tools" / "piper_infer_preview.py"
+        script_path = REPO_ROOT / "scripts" / "piper" / "inference" / "piper_infer_preview.py"
         dataset_root = self.replay_dataset_root_var.get().strip()
         episode = self.replay_episode_var.get().strip()
         policy_path = self.policy_path_var.get().strip()

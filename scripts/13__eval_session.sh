@@ -7,7 +7,7 @@
 #
 # 사용 전 확인:
 #   1) 하드웨어 없이 UI 점검  : DRY_RUN='<데이터셋>/erase_the_*' bash scripts/13__eval_session.sh
-#   2) 현장 카메라 확인       : python scripts/tools/ink_metric.py <에피소드> --dump-roi /tmp/roi.png
+#   2) 현장 카메라 확인       : python scripts/tasks/erase_shape/lib/ink_metric.py <에피소드> --dump-roi /tmp/roi.png
 #   3) 실제 세션              : 아래 변수를 채우고 실행
 #
 # 환경변수:
@@ -16,9 +16,11 @@
 #   EVAL_TARGET      circle / rectangle / triangle (생략 시 폴더명에서 추론)
 #   EVAL_TRIALS      목표 시행 수 (표시용)
 #   EVAL_CUTOFF      에피소드 컷오프 초 (기본 60)
-#   EVAL_ALIGN_CMD   시도 확인 직후 띄울 정렬 확인 명령 (도형·지우개 위치 점검).
-#                    창을 닫을 때까지 [시작]이 잠긴다.
-#   EVAL_OUT_DIR     결과 폴더 (기본 outputs/eval/<오늘>)
+#   EVAL_ALIGN_CMD   [정렬 도구 켜기] 버튼으로 띄울 명령 직접 지정 (escape hatch).
+#                    필수 아님 — 안 주면 GUI가 EVAL_TARGET/EVAL_BOARD 등으로
+#                    block_alignment_tool.py --shape-zones 315를 자동 구성해서 쓴다.
+#                    켜져 있는 동안 [시작]이 잠긴다.
+#   EVAL_OUT_DIR     결과 폴더 (기본 outputs/evaluation/erase_shape/<오늘>_<model>_<condition>)
 #   EVAL_WATCH_DIR   롤아웃이 새 에피소드를 만드는 폴더
 #   EVAL_ROLLOUT_CMD 롤아웃 1회를 도는 명령
 #   EVAL_BOARD       "x y w h" — 카메라를 옮겼으면 반드시 지정
@@ -37,7 +39,20 @@ source "${SCRIPT_DIR}/lib/run_common.sh"
 load_recording_env
 activate_conda_env
 
-TOOL="${EVAL_SESSION_SCRIPT_DIR}/tools/erase_eval_ui.py"
+# conda ugrp 환경의 기본 Tk는 Xft/fontconfig 없이 빌드되어 한글 글리프가 있는
+# 글꼴이 아예 없다 — erase_eval_ui.py의 한글 라벨이 □로 나온다. teleop_ui.py와
+# 동일하게(scripts/0__launch_gui.sh, docs/operations.md §7) 시스템 Tcl/Tk(Xft 있음,
+# Noto Sans CJK KR 인식)를 이 GUI 프로세스에만 LD_PRELOAD로 얹는다. Python·프로젝트
+# 패키지는 여전히 ugrp 환경 것을 쓴다.
+SYSTEM_TK_PRELOAD="/lib/x86_64-linux-gnu/libtcl8.6.so /lib/x86_64-linux-gnu/libtk8.6.so"
+if [[ -r /lib/x86_64-linux-gnu/libtcl8.6.so && -r /lib/x86_64-linux-gnu/libtk8.6.so ]]; then
+  echo "[INFO] 시스템 Tk 사용 — Noto 한글 글꼴 렌더링 적용"
+  export LD_PRELOAD="${SYSTEM_TK_PRELOAD}${LD_PRELOAD:+ ${LD_PRELOAD}}"
+else
+  echo "[WARN] 시스템 Tcl/Tk를 찾지 못해 conda Tk로 실행합니다 — 한글 가독성이 낮을 수 있음" >&2
+fi
+
+TOOL="${EVAL_SESSION_SCRIPT_DIR}/tasks/erase_shape/evaluation/erase_eval_ui.py"
 OUT_DIR="${EVAL_OUT_DIR:-}"
 
 args=()
@@ -65,6 +80,6 @@ fi
 
 echo "[RUN] 롤아웃: ${EVAL_ROLLOUT_CMD}"
 echo "[RUN] 감시 폴더: ${EVAL_WATCH_DIR}"
-echo "[RUN] 결과: ${OUT_DIR:-evaluation/<MMDD>_<model>_<condition>}"
+echo "[RUN] 결과: ${OUT_DIR:-outputs/evaluation/erase_shape/<MMDD>_<model>_<condition>}"
 run_or_print python "${TOOL}" "${args[@]}" \
   --rollout-cmd "${EVAL_ROLLOUT_CMD}" --watch-dir "${EVAL_WATCH_DIR}"

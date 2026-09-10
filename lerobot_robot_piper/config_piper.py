@@ -126,7 +126,7 @@ class PiperFollowerConfig(RobotConfig):
     # ⚠ 토크 제어다. kp가 낮으면 팔이 중력에 무너지고 높으면 진동한다.
     # max_relative_target(위치 명령 클램프)과 effort 컷오프는 위치 제어를 전제로
     # 만들어진 것이라 여기서는 의미가 달라진다. 기본 꺼짐 — 켜기 전에
-    # scripts/tools/piper_mit_probe.py로 관절 하나씩 확인할 것.
+    # scripts/piper/hardware/piper_mit_probe.py로 관절 하나씩 확인할 것.
     use_mit_control: bool = False
     mit_kp: float = 10.0   # SDK 참고값 — 전 관절 공통 기본값
     mit_kd: float = 0.8    # SDK 참고값

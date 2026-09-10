@@ -106,7 +106,7 @@ class PiperMotorsBus(MotorsBus):
     ) -> None:
         # park과 disable_torque를 분리 — follower는 항상 parking 자세로는 가되
         # torque 자동 해제 여부만 선택하고 싶은 경우(DISABLE_TORQUE_ON_DISCONNECT=false
-        # + scripts/tools/safe_release_torque.py 조합)를 지원하기 위함.
+        # + scripts/piper/hardware/safe_release_torque.py 조합)를 지원하기 위함.
         # park을 명시하지 않으면 기존 동작과 동일하게 disable_torque 값을 따름.
         if park is None:
             park = disable_torque
@@ -552,7 +552,7 @@ class PiperMotorsBus(MotorsBus):
         ⚠ 위험: 이건 토크 제어다. kp가 낮으면 팔이 중력에 무너지고 높으면
         진동한다. max_relative_target(위치 명령 클램프)과 effort 컷오프는 위치
         제어를 전제로 만들어진 것이라 여기서는 의미가 달라진다. 반드시 낮은
-        게인에서 관절 하나씩 확인할 것 — scripts/tools/piper_mit_probe.py 참고.
+        게인에서 관절 하나씩 확인할 것 — scripts/piper/hardware/piper_mit_probe.py 참고.
 
         그리퍼는 MIT 대상이 아니다(별개 노드) — 기존 GripperCtrl을 그대로 쓴다.
         """

@@ -31,8 +31,8 @@
 | `scripts/5__record.sh`, `9__run_client.sh` | 위 인자 배선 |
 | `lerobot_robot_piper/config_piper.py` | `use_effort` 기본값 `False` → **`True`** |
 | `lerobot_robot_piper/teleop_ui.py` | "Record Effort" 체크박스가 Command를 갱신하도록 수정 |
-| `scripts/tools/smooth_start_frames.py` | `.pos` 컬럼만 보간 (effort/vel 보존) |
-| `scripts/tools/check_effort.py` | **신규** — 검증 스크립트 |
+| `scripts/piper/recording/smooth_start_frames.py` | `.pos` 컬럼만 보간 (effort/vel 보존) |
+| `scripts/piper/validation/check_effort.py` | **신규** — 검증 스크립트 |
 
 ---
 
@@ -164,7 +164,7 @@ GUI에서:
 **Recording History** 패널에서 방금 만들어진 데이터셋 경로를 확인한 뒤:
 
 ```bash
-python scripts/tools/check_effort.py <데이터셋경로>
+python scripts/piper/validation/check_effort.py <데이터셋경로>
 ```
 
 ### ✅ 통과 기준

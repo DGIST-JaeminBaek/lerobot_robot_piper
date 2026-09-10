@@ -1,3 +1,0 @@
-episode,model,condition,trial,target,valid,scored_by,note,success,score,task_progress,stage_approach,stage_contact,stage_start,stage_complete,stage_selective,erased_target,erased_distractor,selective_erase,ink_init,ink_final,t_contact_s,t50_s,t90_s,auc_progress,duration_s,grasp_s,release_s,termination,failure_mode,stall_events,recovered,recovery_rate,ended_stalled,occluded_frac,shapes_found,n_frames,path
-예시_성공,smolvla,async,1,rectangle,True,manual,,True,10,100,1,1,1,1,1,1.0,0.0,,,,,,,,24,,,release,,,,,,,,,
-예시_실패,smolvla,async,2,rectangle,True,manual,자국 일부 남음,False,5,50,1,1,1,0,1,0.5,0.0,,,,,,,,60,,,cutoff,incomplete_erase,,,,,,,,

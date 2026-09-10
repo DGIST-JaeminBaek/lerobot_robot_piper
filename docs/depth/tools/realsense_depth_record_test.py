@@ -7,7 +7,7 @@ RealSense z16 -> quantize -> PNG -> HEVC gray12le lossless -> decode -> pixel co
 
 Example:
     conda activate ugrp
-    python scripts/tools/realsense_depth_record_test.py --seconds 5
+    python scripts/piper/camera/realsense_depth_record_test.py --seconds 5
 """
 
 from __future__ import annotations

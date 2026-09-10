@@ -52,7 +52,7 @@ Policy가 예측한 action
 
 ### Rollout 생성
 
-`scripts/tools/piper_offline_chunk_rollout.py`
+`scripts/piper/inference/piper_offline_chunk_rollout.py`
 
 - LeRobotDataset에서 지정 episode를 로드한다.
 - Dataset과 함께 저장된 statistics로 policy pre/postprocessor를 구성한다.
@@ -66,7 +66,7 @@ Piper, CAN 및 `robot.send_action()`은 사용하지 않는다.
 
 ### RViz 재생
 
-`scripts/tools/piper_offline_rollout_rviz.py`
+`scripts/piper/inference/piper_offline_rollout_rviz.py`
 
 - 저장된 NPZ에서 예측 또는 dataset 정답 action을 읽는다.
 - 정규화된 Piper action을 URDF joint 단위로 변환한다.
@@ -78,7 +78,7 @@ Piper, CAN 및 `robot.send_action()`은 사용하지 않는다.
 학습에 사용한 512×512 데이터셋과 15,000-step 체크포인트의 예:
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 python scripts/tools/piper_offline_chunk_rollout.py \
+CUDA_VISIBLE_DEVICES=1 python scripts/piper/inference/piper_offline_chunk_rollout.py \
   --dataset-root records/0727/erase_the_shape_512 \
   --episode 0 \
   --policy-path outputs/train/smolvla_erase_shape_512/checkpoints/015000/pretrained_model \
@@ -166,7 +166,7 @@ chunk 경계에서 눈에 띄는 불연속이 있으므로 이 결과만으로 �
 예측 궤적:
 
 ```bash
-python scripts/tools/piper_offline_rollout_rviz.py \
+python scripts/piper/inference/piper_offline_rollout_rviz.py \
   --rollout outputs/offline_rollout/erase_the_shape_512_ep0000_015000/rollout_actions.npz \
   --trajectory predicted \
   --fps 30
@@ -175,7 +175,7 @@ python scripts/tools/piper_offline_rollout_rviz.py \
 Dataset 정답 궤적:
 
 ```bash
-python scripts/tools/piper_offline_rollout_rviz.py \
+python scripts/piper/inference/piper_offline_rollout_rviz.py \
   --rollout outputs/offline_rollout/erase_the_shape_512_ep0000_015000/rollout_actions.npz \
   --trajectory expert \
   --fps 30
@@ -186,7 +186,7 @@ python scripts/tools/piper_offline_rollout_rviz.py \
 
 ## 8. 전체 episode 첫 chunk FK 분석
 
-`scripts/tools/piper_first_chunk_fk_analysis.py`는 60개 episode의 첫 observation을
+`scripts/tasks/erase_shape/analysis/first_chunk_fk_analysis.py`는 60개 episode의 첫 observation을
 각각 입력해 첫 50-action chunk를 생성하고 Piper SDK `CalFK`로 end-effector
 궤적을 계산한다.
 
@@ -212,7 +212,7 @@ Mean inference time: 0.1159초
 재현 명령:
 
 ```bash
-python scripts/tools/piper_first_chunk_fk_analysis.py \
+python scripts/tasks/erase_shape/analysis/first_chunk_fk_analysis.py \
   --dataset-root records/0727/erase_the_shape_512 \
   --policy-path outputs/train/smolvla_erase_shape_512/checkpoints/030000/pretrained_model \
   --task "erase the shape" \
@@ -256,7 +256,7 @@ outputs/first_chunk_fk/erase_the_shape_512_030000/
 
 ## 9. 인간 승인형 Dataset/RViz preview
 
-`scripts/tools/piper_human_approved_inference.py`의 안전 기본 모드로 dataset
+`scripts/piper/inference/piper_human_approved_inference.py`의 안전 기본 모드로 dataset
 observation을 입력하고, 생성된 chunk와 policy 입력 TOP/WRIST 이미지를 표시한 뒤
 터미널에서 승인하는 흐름을 확인했다.
 

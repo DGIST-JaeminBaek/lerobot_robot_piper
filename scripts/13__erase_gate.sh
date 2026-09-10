@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 지우기 종료 게이트 실행 (+ 선택적 HIL 개입).
 #
-# 설계·검증 절차는 docs/erase_run_design.md. 이 스크립트는 §7.2의 4~7단계를
+# 설계·검증 절차는 docs/tasks/erase_shape/runtime/erase_run_design.md. 이 스크립트는 §7.2의 4~7단계를
 # 환경변수 하나로 고르게 만든 것이다.
 #
 #   STAGE=dry    인자·경로만 검증. 로봇에 명령 안 보냄 (기본값)
@@ -13,12 +13,13 @@
 #
 #   CONDITION=gate STAGE=gate TARGET=triangle bash scripts/13__erase_gate.sh
 #   ...20회 반복 (매번 사람이 도형을 새로 그린다 — 자동 리셋 불가)
-#   python scripts/tools/erase_stats.py \
+#   python erase_stats.py \
 #       --condition baseline:runs/baseline/*.json \
 #       --condition gate:runs/gate/*.json --plot
 #
-# ★ 실물 안전: 첫 실행은 반드시 STAGE=dry로 확인하고, ATTEMPTS=1로 시작한다.
-#   Ctrl+C를 누르면 러너가 parking을 끝낸 뒤에 토크를 푼다(3f6d1ad).
+# ★ 실물 안전: 첫 실행은 반드시 STAGE=dry로 확인한다. 재시도 없이 시도 1회로
+#   고정돼 있다(erase_run.py). Ctrl+C를 누르면 러너가 parking을 끝낸 뒤에 토크를
+#   푼다(3f6d1ad).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,7 +74,6 @@ ERASE_TASK="${ERASE_TASK:-pick up the eraser and erase the shape}"
 TARGET="${TARGET:-triangle}"
 
 STAGE="${STAGE:-dry}"
-ATTEMPTS="${ATTEMPTS:-1}"
 # 정책에게 주는 스텝 예산. 개입 스텝은 여기서 빠지므로(러너가 제외) 사람이
 # 오래 조작해도 정책 시간이 줄지 않는다.
 MAX_STEPS="${MAX_STEPS:-940}"
@@ -121,7 +121,6 @@ ARGS=(
   --dataset_root "${DATASET}"
   --task "${ERASE_TASK}"
   --target "${TARGET}"
-  --max-attempts "${ATTEMPTS}"
   --max-steps "${MAX_STEPS}"
   --mode "${MODE}"
   --aggregate-fn "${AGGREGATE}"
@@ -157,7 +156,7 @@ echo "  모델   : ${MODEL:-topwrist135}"
 echo "  정책   : ${POLICY}"
 echo "  데이터 : ${DATASET}"
 echo "  task   : ${ERASE_TASK}"
-echo "  target : ${TARGET}   시도 상한: ${ATTEMPTS}   aggregate: ${AGGREGATE}"
+echo "  target : ${TARGET}   aggregate: ${AGGREGATE}"
 if [[ "${MODE}" == demo && "${RECORD}" != manual ]]; then
   echo "  mode   : ${MODE}   (기록 안 함 — 개입 궤적을 담으려면 RECORD=manual 또는 MODE=augment)"
 else
@@ -168,4 +167,4 @@ echo "  산출물 : ${HIL_DIR}/<시각>/  (log.json, *.steps.npz, 판정 프레�
 echo "  녹화   : ${RECORD}$([ "${RECORD}" = manual ] && echo '   (패널 버튼으로 구간 선택)')"
 echo
 
-exec python scripts/tools/erase_run.py "${ARGS[@]}"
+exec python scripts/tasks/erase_shape/runtime/erase_run.py "${ARGS[@]}"

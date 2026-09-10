@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 녹화 QC + 자를 구간 확인 GUI (scripts/tools/qc_studio.py) 실행.
+# 녹화 QC + 자를 구간 확인 GUI (scripts/tasks/erase_shape/qc/qc_studio.py) 실행.
 # 로봇/CAN과 무관한 후처리 도구라 CAN 초기화나 관절 체크는 하지 않음 —
 # conda 환경만 잡아주는 얇은 래퍼임.
 #
@@ -45,4 +45,4 @@ echo "[OK] python = $(command -v python)"
 
 echo
 echo "=== [2/2] QC Studio 실행 ==="
-exec python "${REPO_DIR}/scripts/tools/qc_studio.py" "$@"
+exec python "${REPO_DIR}/scripts/tasks/erase_shape/qc/qc_studio.py" "$@"

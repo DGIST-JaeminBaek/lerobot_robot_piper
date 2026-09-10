@@ -59,7 +59,7 @@ sudo ip link set can1 up
 레포의 도구 스크립트로 수동 초기화할 수도 있습니다.
 
 ```bash
-bash scripts/tools/setup_can.sh
+bash scripts/piper/hardware/setup_can.sh
 ```
 
 실험 흐름에서는 `configs/recording.env` 값을 기준으로 아래 스크립트를 사용하는 것을 권장합니다.
@@ -72,8 +72,8 @@ bash scripts/1__init_can.sh
 
 | Arm | Interface 예시 |
 |---|---|
-| Leader arm | `can_leader1` 또는 `can1` |
-| Follower arm | `can_follower1` 또는 `can0` |
+| Leader arm | `can_leader` 또는 `can1` |
+| Follower arm | `can_follower` 또는 `can0` |
 
 통합 GUI(`piper-teleop`)의 CAN Setup 패널(Detect/Init All)로 포트를 식별하고 이름을 고정할 수 있습니다.
 
@@ -137,9 +137,9 @@ WRIST_CAM=243322071626
 RealSense serial과 화면 방향 확인:
 
 ```bash
-python3 scripts/tools/realsense_view.py --list
-python3 scripts/tools/realsense_view.py --serial 327122074262
-python3 scripts/tools/realsense_view.py --serial 243322071626
+python3 scripts/piper/camera/realsense_view.py --list
+python3 scripts/piper/camera/realsense_view.py --serial 327122074262
+python3 scripts/piper/camera/realsense_view.py --serial 243322071626
 ```
 
 확인한 카메라 값을 env 파일에 반영하려면:
@@ -202,7 +202,7 @@ bash scripts/5__record.sh
 녹화 후 dataset 확인:
 
 ```bash
-python3 scripts/tools/wego_dataset_check.py \
+python3 scripts/piper/validation/dataset_structure_check.py \
   --dataset-repo-id local/piper_write_light \
   --dataset-root records/local/piper_write_light \
   --episode 0

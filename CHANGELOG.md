@@ -3,6 +3,56 @@
 날짜순 기록입니다. "지금 코드가 왜 이런 모양인지"에 대한 주제별 설명은
 [`docs/change.md`](docs/change.md)(WEGO 원본 대비)를 참고하세요.
 
+## 2026-08-19
+
+### scripts 구조를 범용 Piper와 도형 지우기 task로 분리
+
+이전 `scripts/tools/`에 섞여 있던 도구를 사용 범위 기준으로 재배치했습니다.
+
+- 범용 도구는 `scripts/piper/{camera,hardware,inference,recording,validation}/`에 둡니다.
+  카메라 확인, CAN·관절 점검, 추론·재생, 녹화, 데이터셋 구조 검증처럼 다른 task에도
+  적용되는 기능이 대상입니다.
+- 도형 지우기 전용 도구는
+  `scripts/tasks/erase_shape/{analysis,augmentation,dataset,evaluation,lib,qc,runtime}/`에
+  둡니다. 보드·잉크·목표 도형·지우개·HIL 종료 게이트 같은 task 가정을 포함한 코드는
+  Piper 공용 범주로 올리지 않습니다.
+- 각 범주에 한국어 `README.md`를 추가해 역할, 주요 CLI, 상하위 호출 관계를 확인할 수
+  있게 했습니다. 경로 이동에 맞춰 bash 호출·import·테스트도 갱신했습니다.
+
+### 추론·재생·검증 공통 경로 정리
+
+- policy 로딩, camera crop, observation 생성, action chunk 처리를
+  `scripts/piper/inference/inference_runtime.py`로 공통화했습니다. 실시간 runner는
+  큐·chunk·smoothing을, 인간 승인형은 승인 경계를 각각 소유하되 공통 LeRobot API와
+  observation 경로를 사용합니다.
+- RViz joint-state publish는 `rviz_joint_state.py` 한 곳으로 모았습니다. dataset preview,
+  human-approved inference, runner, replay가 같은 정규화·단위 변환을 사용합니다.
+- 중복되던 RViz 전용 replay player는 통합했고, 실물 재생 시작 자세 정렬은
+  `align_replay_start.py`에 독립 기능으로 남겼습니다. Teleop UI에 자동 통합되지는 않았습니다.
+- 세션성 도구는 `piper_session.py`를 없애고 관절 확인은
+  `hardware/joint_check.py`, 데이터셋 구조 확인은 `validation/dataset_structure_check.py`로
+  역할을 분명히 했습니다.
+
+### 도형 지우기 데이터·분석·증강 정리
+
+- 잉크 측정은 `tasks/erase_shape/lib/ink_metric.py`, dataset 원본 경로 해석은
+  `dataset/source_resolver.py`로 모아 analysis·evaluation·QC 간 중복을 줄였습니다.
+  동명 dataset 후보가 여러 개면 임의 선택하지 않고 오류로 막습니다.
+- `ugrp_share_20260817`의 화이트보드 방해 도형 합성 패키지를
+  `tasks/erase_shape/augmentation/`으로 편입했습니다. 단일/배치 합성기, 후보 추출·검수
+  도구, board ROI, 검수 완료 RGBA 도형 315개를 함께 옮겼습니다.
+  이미 `analysis/`에 같은 코드가 있던 RealSense region monitor는 중복 보관하지 않았습니다.
+- `augmentation/README.md`와 `docs/`에 safe mask, 반대편 배치, 후보 에셋 교체·검수
+  절차를 남겼습니다.
+
+### 작업 안내와 임시 산출물 원칙 갱신
+
+- `CLAUDE.md`를 환경 분리, 실물 안전, 데이터 보존, 현재 폴더 구조만 담은 짧은
+  에이전트 안내로 축약했습니다. 과거 실험 상태와 `tmp` 백업을 관례적으로 남기라는
+  오래된 규칙은 제거했습니다.
+- 일회성 preview·실험 로그·과거 코드 스냅샷은 `tmp/` 또는 `outputs/`에 두고, 필요한
+  이력은 Git, 매니페스트, 재현 가능한 설정과 문서에 남기는 것을 기준으로 합니다.
+
 ## 2026-08-04
 
 ### 추론 경로 통합 + 롤아웃 dataset 기록
@@ -224,10 +274,9 @@ MIT + 속도 피드포워드(`vff=1.0`) 조합, `park_lower` 정지 동작.
 
 - `piper_human_approved_inference.py`에 `--repeat-last-frame` 추가 — dataset source에서
   episode 끝에 도달해도 마지막 frame을 계속 observation으로 재사용합니다(RViz 반복 확인용).
-- `piper_session.py`의 conda env를 `piper-gui-refactor` → `ugrp`,
   dataset 경로를 현재 레포 위치로 수정.
 - `.gitignore`: `명령어.txt` → `메모장.txt`.
-- 학습 로그 추가: `docs/training/logs/` (smolvla erase_shape_512 30000 steps —
+- 학습 로그 추가: `docs/tasks/erase_shape/training/logs/` (smolvla erase_shape_512 30000 steps —
   loss curve, metrics csv, tmux 로그).
 
 ### 검증 상태

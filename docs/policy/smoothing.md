@@ -16,7 +16,7 @@ action을 한꺼번에 뱉습니다. 실행 방식에 따라 두 가지 흔들�
 
 ## 세 겹의 대책
 
-`scripts/tools/action_smoothing.py`가 아래 셋을 순서대로 적용합니다. 셋 다 끄면 원본
+`scripts/piper/inference/action_smoothing.py`가 아래 셋을 순서대로 적용합니다. 셋 다 끄면 원본
 action이 그대로 나오므로 baseline 비교가 가능합니다.
 
 | 단계 | 무엇을 고치나 | 파라미터 |
@@ -146,7 +146,7 @@ MIT를 켜기 전에 `scripts/12__mit_probe.sh`로 관절 하나씩 확인하세
 
 ## 어디에 들어가 있나
 
-제어 루프는 `scripts/tools/piper_infer_runner.py` 한 곳에 있고, GUI·teleop_ui의
+제어 루프는 `scripts/piper/inference/piper_infer_runner.py` 한 곳에 있고, GUI·teleop_ui의
 `Infer` 프리셋·CLI가 전부 그걸 씁니다. 어느 경로로 돌리든 같은 smoothing과 같은
 안전 게이트가 걸립니다.
 
@@ -236,12 +236,12 @@ ros2 launch agx_arm_description display_piper.launch.py
 켜지고, 모든 명령은 `PiperFollower.send_action()`을 지나가므로
 `max_relative_target`과 effort 안전 컷오프가 그대로 적용됩니다.
 
-### 2. CLI — `scripts/tools/piper_infer_runner.py`
+### 2. CLI — `scripts/piper/inference/piper_infer_runner.py`
 
 GUI 없이 같은 루프를 돕니다. teleop_ui의 `Infer` 프리셋이 조립하는 커맨드도 이겁니다.
 
 ```bash
-python scripts/tools/piper_infer_runner.py \
+python scripts/piper/inference/piper_infer_runner.py \
     --mode augment \
     --dataset-root records/0727/erase_the_shape_512 \
     --policy-path outputs/train/smolvla_erase_shape_512/checkpoints/030000/pretrained_model \
@@ -252,13 +252,13 @@ python scripts/tools/piper_infer_runner.py \
 `--no-ensemble` 등). 실물 전송은 `--source robot --apply-to-robot
 --real-robot-confirm I_UNDERSTAND_REAL_ROBOT` 셋을 모두 줘야 열립니다.
 
-### 3. 파라미터 스윕 — `scripts/tools/piper_smoothing_sweep.py`
+### 3. 파라미터 스윕 — `scripts/piper/inference/piper_smoothing_sweep.py`
 
 하드웨어 없이 `m` 값을 정할 때 씁니다. GUI와 같은 실행 코드를 쓰되 RViz/로봇 없이
 dataset observation만 사용합니다.
 
 ```bash
-python scripts/tools/piper_smoothing_sweep.py \
+python scripts/piper/inference/piper_smoothing_sweep.py \
     --policy-path outputs/train/smolvla_erase_shape_512/checkpoints/030000/pretrained_model \
     --dataset-root records/0727/erase_the_shape_512 \
     --steps 40 --m-values 0.01 0.1 0.3 1.0
@@ -270,7 +270,7 @@ CUDA 컨텍스트가 깨지면서 죽기 때문입니다.
 ### 4. 단위 테스트
 
 ```bash
-python -m pytest scripts/tools/test_action_smoothing.py scripts/tools/test_infer_runner_mock.py scripts/tools/test_action_ema_mock.py
+python -m pytest scripts/tests/piper/inference/test_action_smoothing.py scripts/tests/piper/inference/test_infer_runner_mock.py scripts/tests/piper/safety/test_action_ema_mock.py
 ```
 
 각각 smoothing 수식, runner의 모드/기록 로직, `send_action` EMA를 하드웨어 없이
@@ -342,7 +342,8 @@ Algorithm 1 11행의 `f(A_t, Ã_{t+1})`을 이식했다. lerobot
 아니라 우리가 ACT에서 임의로 가져다 쓴 방식이었다. 실제로 재현·비교하려는 대상이
 SmolVLA 논문 자체의 async inference 방법이므로, 논문 Algorithm 1이 규정한 방식
 (threshold `g` 트리거 + aggregate 함수 `f`)을 기본 동작으로 맞췄다. 이전 기본값
-경로(TemporalEnsemble)는 `action_smoothing_prev.py` / `piper_infer_runner_prev.py`
+경로(TemporalEnsemble)는 `scripts/archive/action_smoothing_prev.py` /
+`scripts/archive/piper_infer_runner_prev.py`
 에 그대로 남아있고, `--aggregate-fn temporal_ensemble --trigger-mode fixed`로도
 언제든 재현 가능하다.
 
@@ -359,7 +360,8 @@ SmolVLA 논문 자체의 async inference 방법이므로, 논문 Algorithm 1이 
 
 ### 백업
 
-병합 전 원본은 `piper_infer_runner_prev.py` / `action_smoothing_prev.py`로
+병합 전 원본은 `scripts/archive/piper_infer_runner_prev.py` /
+`scripts/archive/action_smoothing_prev.py`로
 남겨뒀다 (git 히스토리에도 있지만 작업 트리에 바로 대조본을 둔 것).
 
 ## 참고: LoRA-SP 저장소에서 확인한 것

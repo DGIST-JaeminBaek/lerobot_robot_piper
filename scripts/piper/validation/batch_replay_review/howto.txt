@@ -1,0 +1,1 @@
+./run_batch_review.sh --groups 레코드 그룹 --real-robot --real-robot-confirm I_UNDERSTAND_REAL_ROBOT --resume --skip-verdicts OK,SUSPECT,BAD

@@ -8,8 +8,8 @@ source "${SCRIPT_DIR}/lib/run_common.sh"
 load_recording_env
 
 BITRATE="${BITRATE:-1000000}"
-LEADER_PORT="${LEADER_PORT:-can_leader1}"
-FOLLOWER_PORT="${FOLLOWER_PORT:-can_follower1}"
+LEADER_PORT="${LEADER_PORT:-can_leader}"
+FOLLOWER_PORT="${FOLLOWER_PORT:-can_follower}"
 LEADER_USB_BUS="${LEADER_USB_BUS:-}"
 FOLLOWER_USB_BUS="${FOLLOWER_USB_BUS:-}"
 IGNORE_CHECK="${IGNORE_CHECK:-false}"

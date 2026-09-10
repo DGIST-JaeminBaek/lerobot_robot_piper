@@ -324,7 +324,7 @@ teleop raw 값을 저장하고 있었다. 이제 보정된 값이 저장된다.
 - `config_piper.py`의 `depth_min_m` / `depth_max_m` / `depth_scale` / `depth_raw_dir`
 - `DEPTH_RAW_DIR` raw `.npy` 사이드카 — **완전히 무의미해짐.** 본 경로가 이미
   near-lossless인데 1.11 GB/분을 따로 쓸 이유가 없다
-- `scripts/tools/test_depth_mock.py` — 삭제 (컬러맵 경로 전용 테스트였음)
+- 컬러맵 경로 전용 테스트는 삭제됨
 
 결과적으로 **upstream 대비 우리 브랜치의 코드 차이는 effort/안전 컷오프뿐이다.**
 

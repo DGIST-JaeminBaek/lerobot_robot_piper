@@ -1,0 +1,957 @@
+{
+  "format_version": 1,
+  "target_task": "pick up the eraser and erase the shape",
+  "range_semantics": "start_frame is inclusive; end_frame is exclusive",
+  "instructions": [
+    "0802_joint4_corrected(56) + 0804_joint4_corrected(26) + 0805(29) + 0813 저녁 세션(records/local/*0813*, 18:xx~21:xx, 24) = 135 episode.",
+    "0813 오전 세션(records/0813/, 12:xx)과 0813 outlier는 제외.",
+    "frame 범위는 configs/erase_shape_315_manifest.json의 QC 리뷰 결과를 그대로 재사용(재검토 안 함)."
+  ],
+  "episodes": [
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-130542",
+      "total_frames": 758,
+      "enabled": true,
+      "start_frame": 80,
+      "end_frame": 626
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-130825",
+      "total_frames": 770,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 624
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-130939",
+      "total_frames": 734,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 550
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-131058",
+      "total_frames": 713,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 566
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-131216",
+      "total_frames": 680,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 532
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-131420",
+      "total_frames": 655,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 516
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-132022",
+      "total_frames": 694,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 550
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-132211",
+      "total_frames": 777,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 617
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-132330",
+      "total_frames": 796,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 660
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-132443",
+      "total_frames": 733,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 584
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-132838",
+      "total_frames": 787,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 623
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-132954",
+      "total_frames": 815,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 654
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-133231",
+      "total_frames": 855,
+      "enabled": true,
+      "start_frame": 130,
+      "end_frame": 702
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-133354",
+      "total_frames": 739,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 569
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-133505",
+      "total_frames": 852,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 697
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-133624",
+      "total_frames": 721,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 587
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-134056",
+      "total_frames": 729,
+      "enabled": true,
+      "start_frame": 100,
+      "end_frame": 572
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-134312",
+      "total_frames": 730,
+      "enabled": true,
+      "start_frame": 110,
+      "end_frame": 615
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-134917",
+      "total_frames": 817,
+      "enabled": true,
+      "start_frame": 80,
+      "end_frame": 672
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-135033",
+      "total_frames": 683,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 538
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-135317",
+      "total_frames": 654,
+      "enabled": true,
+      "start_frame": 100,
+      "end_frame": 516
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-135438",
+      "total_frames": 836,
+      "enabled": true,
+      "start_frame": 110,
+      "end_frame": 667
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-135558",
+      "total_frames": 798,
+      "enabled": true,
+      "start_frame": 100,
+      "end_frame": 671
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-135800",
+      "total_frames": 756,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 628
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-135912",
+      "total_frames": 827,
+      "enabled": true,
+      "start_frame": 100,
+      "end_frame": 631
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-140037",
+      "total_frames": 728,
+      "enabled": true,
+      "start_frame": 80,
+      "end_frame": 597
+    },
+    {
+      "source_dataset": "records/0802/erase_the_circle_0802-145406",
+      "total_frames": 650,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 458
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-140242",
+      "total_frames": 749,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 602
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-140354",
+      "total_frames": 726,
+      "enabled": true,
+      "start_frame": 80,
+      "end_frame": 586
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-140502",
+      "total_frames": 744,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 591
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-140614",
+      "total_frames": 717,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 596
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-140722",
+      "total_frames": 671,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 554
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-140827",
+      "total_frames": 693,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 542
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-140935",
+      "total_frames": 664,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 536
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-141044",
+      "total_frames": 711,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 565
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-141851",
+      "total_frames": 824,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 686
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-142006",
+      "total_frames": 747,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 612
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-142116",
+      "total_frames": 714,
+      "enabled": true,
+      "start_frame": 80,
+      "end_frame": 596
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-142225",
+      "total_frames": 767,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 669
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-142338",
+      "total_frames": 728,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 614
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-142550",
+      "total_frames": 816,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 616
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-142707",
+      "total_frames": 723,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 594
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-142815",
+      "total_frames": 912,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 783
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-143049",
+      "total_frames": 843,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 694
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-143457",
+      "total_frames": 654,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 540
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-143602",
+      "total_frames": 658,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 494
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-143708",
+      "total_frames": 687,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 541
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-143815",
+      "total_frames": 768,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 625
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-143926",
+      "total_frames": 751,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 513
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-144141",
+      "total_frames": 732,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 607
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-144300",
+      "total_frames": 690,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 584
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-144407",
+      "total_frames": 718,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 592
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-144514",
+      "total_frames": 778,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 659
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-144629",
+      "total_frames": 773,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 651
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-144740",
+      "total_frames": 770,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 632
+    },
+    {
+      "source_dataset": "records/0802/erase_the_triangle_0802-144858",
+      "total_frames": 733,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 611
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-180439",
+      "total_frames": 775,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 656
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-180555",
+      "total_frames": 782,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 663
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-180705",
+      "total_frames": 785,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 634
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-180817",
+      "total_frames": 756,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 636
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-180929",
+      "total_frames": 715,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 568
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-181039",
+      "total_frames": 866,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 752
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-181153",
+      "total_frames": 728,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 580
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-181404",
+      "total_frames": 945,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 794
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-181522",
+      "total_frames": 890,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 736
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-181742",
+      "total_frames": 716,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 570
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-181848",
+      "total_frames": 705,
+      "enabled": true,
+      "start_frame": 40,
+      "end_frame": 563
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-181955",
+      "total_frames": 805,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 626
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-182109",
+      "total_frames": 768,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 619
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-182219",
+      "total_frames": 613,
+      "enabled": true,
+      "start_frame": 30,
+      "end_frame": 438
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-182321",
+      "total_frames": 663,
+      "enabled": true,
+      "start_frame": 20,
+      "end_frame": 521
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-182432",
+      "total_frames": 668,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 512
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-182535",
+      "total_frames": 628,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 495
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-182742",
+      "total_frames": 707,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 569
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-182849",
+      "total_frames": 661,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 529
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-182952",
+      "total_frames": 717,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 598
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-183207",
+      "total_frames": 800,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 666
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-183421",
+      "total_frames": 862,
+      "enabled": true,
+      "start_frame": 80,
+      "end_frame": 726
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-183535",
+      "total_frames": 777,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 640
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-183646",
+      "total_frames": 660,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 526
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-183848",
+      "total_frames": 739,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 632
+    },
+    {
+      "source_dataset": "records/0804/erase_the_rectangle_0804-183957",
+      "total_frames": 673,
+      "enabled": true,
+      "start_frame": 110,
+      "end_frame": 528
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-183247",
+      "total_frames": 833,
+      "enabled": true,
+      "start_frame": 150,
+      "end_frame": 655
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-183402",
+      "total_frames": 796,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 644
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-183515",
+      "total_frames": 757,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 617
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-183623",
+      "total_frames": 853,
+      "enabled": true,
+      "start_frame": 40,
+      "end_frame": 715
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-183739",
+      "total_frames": 926,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 741
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-184029",
+      "total_frames": 697,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 538
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-184141",
+      "total_frames": 690,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 519
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-184247",
+      "total_frames": 795,
+      "enabled": true,
+      "start_frame": 40,
+      "end_frame": 614
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-184359",
+      "total_frames": 773,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 634
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-184700",
+      "total_frames": 836,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 666
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-184814",
+      "total_frames": 704,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 563
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-184920",
+      "total_frames": 676,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 518
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-185025",
+      "total_frames": 716,
+      "enabled": true,
+      "start_frame": 40,
+      "end_frame": 576
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-185133",
+      "total_frames": 667,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 521
+    },
+    {
+      "source_dataset": "records/0805/erase_the_circle_0805-185457",
+      "total_frames": 797,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 673
+    },
+    {
+      "source_dataset": "records/0805/erase_the_triangle_0805-181350",
+      "total_frames": 674,
+      "enabled": true,
+      "start_frame": 100,
+      "end_frame": 510
+    },
+    {
+      "source_dataset": "records/0805/erase_the_triangle_0805-181507",
+      "total_frames": 589,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 480
+    },
+    {
+      "source_dataset": "records/0805/erase_the_triangle_0805-181611",
+      "total_frames": 760,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 584
+    },
+    {
+      "source_dataset": "records/0805/erase_the_triangle_0805-181720",
+      "total_frames": 661,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 516
+    },
+    {
+      "source_dataset": "records/0805/erase_the_triangle_0805-181826",
+      "total_frames": 556,
+      "enabled": true,
+      "start_frame": 40,
+      "end_frame": 424
+    },
+    {
+      "source_dataset": "records/0805/erase_the_triangle_0805-181925",
+      "total_frames": 589,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 450
+    },
+    {
+      "source_dataset": "records/0805/erase_the_triangle_0805-182031",
+      "total_frames": 586,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 404
+    },
+    {
+      "source_dataset": "records/0805/erase_the_triangle_0805-182226",
+      "total_frames": 603,
+      "enabled": true,
+      "start_frame": 80,
+      "end_frame": 465
+    },
+    {
+      "source_dataset": "records/0805/erase_the_triangle_0805-182327",
+      "total_frames": 725,
+      "enabled": true,
+      "start_frame": 100,
+      "end_frame": 576
+    },
+    {
+      "source_dataset": "records/0805/erase_the_triangle_0805-182433",
+      "total_frames": 682,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 503
+    },
+    {
+      "source_dataset": "records/0805/erase_the_triangle_0805-182811",
+      "total_frames": 637,
+      "enabled": true,
+      "start_frame": 40,
+      "end_frame": 515
+    },
+    {
+      "source_dataset": "records/0805/erase_the_triangle_0805-182918",
+      "total_frames": 633,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 512
+    },
+    {
+      "source_dataset": "records/0805/erase_the_triangle_0805-183021",
+      "total_frames": 720,
+      "enabled": true,
+      "start_frame": 120,
+      "end_frame": 599
+    },
+    {
+      "source_dataset": "records/0805/erase_the_triangle_0805-183131",
+      "total_frames": 819,
+      "enabled": true,
+      "start_frame": 110,
+      "end_frame": 674
+    },
+    {
+      "source_dataset": "records/local/erase_the_circle_0813-212950",
+      "total_frames": 993,
+      "enabled": true,
+      "start_frame": 130,
+      "end_frame": 843
+    },
+    {
+      "source_dataset": "records/local/erase_the_circle_0813-213111",
+      "total_frames": 807,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 645
+    },
+    {
+      "source_dataset": "records/local/erase_the_circle_0813-213220",
+      "total_frames": 792,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 655
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-182555",
+      "total_frames": 738,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 598
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-182823",
+      "total_frames": 728,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 593
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-183401",
+      "total_frames": 775,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 610
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-183628",
+      "total_frames": 712,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 584
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-184018",
+      "total_frames": 650,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 499
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-184121",
+      "total_frames": 822,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 679
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-184309",
+      "total_frames": 672,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 527
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-184458",
+      "total_frames": 782,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 606
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-184626",
+      "total_frames": 724,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 523
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-184733",
+      "total_frames": 845,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 656
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-185137",
+      "total_frames": 764,
+      "enabled": true,
+      "start_frame": 70,
+      "end_frame": 631
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-185258",
+      "total_frames": 793,
+      "enabled": true,
+      "start_frame": 100,
+      "end_frame": 652
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-185409",
+      "total_frames": 830,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 697
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-185522",
+      "total_frames": 808,
+      "enabled": true,
+      "start_frame": 100,
+      "end_frame": 688
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-185632",
+      "total_frames": 706,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 587
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-214244",
+      "total_frames": 771,
+      "enabled": true,
+      "start_frame": 60,
+      "end_frame": 628
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-214351",
+      "total_frames": 809,
+      "enabled": true,
+      "start_frame": 110,
+      "end_frame": 702
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-214715",
+      "total_frames": 746,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 647
+    },
+    {
+      "source_dataset": "records/local/erase_the_rectangle_0813-214822",
+      "total_frames": 913,
+      "enabled": true,
+      "start_frame": 110,
+      "end_frame": 799
+    },
+    {
+      "source_dataset": "records/local/erase_the_triangle_0813-213328",
+      "total_frames": 910,
+      "enabled": true,
+      "start_frame": 50,
+      "end_frame": 762
+    },
+    {
+      "source_dataset": "records/local/erase_the_triangle_0813-213932",
+      "total_frames": 727,
+      "enabled": true,
+      "start_frame": 90,
+      "end_frame": 588
+    }
+  ]
+}

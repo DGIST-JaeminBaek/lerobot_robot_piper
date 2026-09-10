@@ -217,7 +217,7 @@ chunk와 승인 상태를 모두 폐기하고 실행기를 종료해야 하며, 
 ### 인간 승인 실행기
 
 ```text
-scripts/tools/piper_human_approved_inference.py
+scripts/piper/inference/piper_human_approved_inference.py
 ```
 
 구현된 기능:
@@ -242,7 +242,7 @@ Policy action은 follower 절대 position target이므로 실물 실행 config�
 ### Mock 검증
 
 ```text
-scripts/tools/test_human_approved_inference_mock.py
+scripts/tests/piper/inference/test_human_approved_inference_mock.py
 ```
 
 검증한 항목:
@@ -325,7 +325,7 @@ Dataset/RViz-only 실행 예:
 source /opt/ros/humble/setup.bash
 conda activate ugrp
 
-python scripts/tools/piper_human_approved_inference.py \
+python scripts/piper/inference/piper_human_approved_inference.py \
   --dataset-root records/0727/erase_the_shape_512 \
   --episode 0 \
   --policy-path outputs/train/smolvla_erase_shape_512/checkpoints/030000/pretrained_model \
@@ -358,7 +358,7 @@ HUMAN_APPROVED_PREVIEW_ACTIONS=1 \
 HUMAN_APPROVED_EXECUTE_ACTIONS=1 \
 HUMAN_APPROVED_MAX_CHUNKS=1 \
 MAX_RELATIVE_TARGET=1.0 \
-python scripts/tools/piper_human_approved_inference.py
+python scripts/piper/inference/piper_human_approved_inference.py
 ```
 
 1-action의 live crop, RViz 자세, 실제 이동 방향과 종료 동작을 확인한 뒤에만

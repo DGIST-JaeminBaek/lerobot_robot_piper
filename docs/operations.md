@@ -54,8 +54,8 @@ bash scripts/2__find_camera.sh
 RealSense serial과 화면을 직접 확인하려면:
 
 ```bash
-python3 scripts/tools/realsense_view.py --list
-python3 scripts/tools/realsense_view.py --serial 327122074262
+python3 scripts/piper/camera/realsense_view.py --list
+python3 scripts/piper/camera/realsense_view.py --serial 327122074262
 ```
 
 카메라 값을 env 파일에 저장하려면:
@@ -110,7 +110,7 @@ DRY_RUN=true bash scripts/7__train.sh
 녹화 후 feature와 episode parquet를 확인하는 명령입니다.
 
 ```bash
-python3 scripts/tools/wego_dataset_check.py \
+python3 scripts/piper/validation/dataset_structure_check.py \
   --dataset-repo-id local/piper_write_light \
   --dataset-root records/local/piper_write_light \
   --episode 0
@@ -133,4 +133,20 @@ python3 scripts/tools/wego_dataset_check.py \
 | `scripts/8__run_server.sh` | async policy server |
 | `scripts/9__run_client.sh` | async robot client |
 | `scripts/lib/run_common.sh` | 번호형 스크립트 공통 함수 |
-| `scripts/tools/` | 수동 진단/점검 도구 |
+| `scripts/piper/` | task와 무관하게 재사용하는 추론·녹화·검증·하드웨어·카메라 도구 |
+| `scripts/tasks/erase_shape/` | 도형 지우기 전용 실행·평가·데이터셋·QC·분석 도구 |
+
+## 7. Teleop UI 한글 글꼴
+
+`ugrp` conda 환경의 기본 Tk는 Xft/fontconfig 없이 빌드되어 한글이 저해상도 X11
+비트맵 글리프로 표시될 수 있다. `scripts/0__launch_gui.sh`는 시스템 Tcl/Tk를 GUI
+프로세스에만 preload하여, 설치된 `Noto Sans CJK KR`로 Teleop UI를 렌더링한다.
+
+따라서 GUI는 항상 아래 런처로 실행한다.
+
+```bash
+bash scripts/0__launch_gui.sh
+```
+
+시스템의 `/lib/x86_64-linux-gnu/libtcl8.6.so` 또는 `libtk8.6.so`가 없으면 런처는
+경고를 출력하고 기존 conda Tk로 실행한다. 이 fallback에서는 한글 가독성이 낮을 수 있다.

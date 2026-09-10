@@ -14,5 +14,5 @@ activate_conda_env
 if command -v lerobot-find-cameras >/dev/null 2>&1; then
   run_or_print lerobot-find-cameras "$@"
 else
-  run_or_print python "${REPO_DIR}/scripts/tools/camera_check.py" "$@"
+  run_or_print python "${REPO_DIR}/scripts/piper/camera/camera_check.py" "$@"
 fi

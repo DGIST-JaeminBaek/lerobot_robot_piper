@@ -7,7 +7,7 @@
 ### 기반 구조
 - [x] 단일 Piper leader/follower 구조를 LeRobot plugin 타입(`piper_leader`, `piper_follower`)으로 정리
 - [x] 실행 진입점을 `configs/recording.env`, 번호형 스크립트(`scripts/0__launch_gui.sh`~`9__run_client.sh`), `scripts/lib/run_common.sh`로 통일
-- [x] 진단/보조 도구를 `scripts/tools/`로 정리하고, 주요 스크립트에 `DRY_RUN=true` 확인 경로 유지
+- [x] 진단/보조 도구를 재사용 범위에 따라 `scripts/piper/`와 `scripts/tasks/`로 정리하고, 주요 스크립트에 `DRY_RUN=true` 확인 경로 유지
 - [x] 현재 검증 기준을 Python 3.10 + LeRobot v0.4.4로 정리
 
 ### GUI / 통합 콘솔 (`teleop_ui.py`)
@@ -33,7 +33,7 @@
 - [x] `PiperFollower.get_observation()`/`PiperLeader.get_action()` key와 plugin 등록 이름(`piper_follower`, `piper_leader`) 확인
 - [x] `lerobot-record`가 저장하는 `action`을 실제 follower에 보낸 offset 적용 후 목표값으로 수정
 - [x] "End Episode (Save)" 버튼으로 현재 에피소드 저장 및 다음 에피소드 진행 확인
-- [x] `scripts/tools/wego_dataset_check.py` 기준 action/state/camera feature 확인
+- [x] `scripts/piper/validation/dataset_structure_check.py` 기준 action/state/camera feature 확인
 - [x] 기록 action replay와 `max_delta_per_step` 안전검사 확인
 
 ## 다음 검증

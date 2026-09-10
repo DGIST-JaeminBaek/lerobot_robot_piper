@@ -329,7 +329,7 @@ depth 사용 카메라 수)로 늘려서 실제로 다 같이 병렬로 돌게 �
 곱해져서 카메라 2대면 20초 이상 걸렸다. 예전에 병렬 연결을 시도했다가 실제
 하드웨어에서 "read failed"/타임아웃이 나서 순차로 되돌렸었는데, 그 원인이
 USB 대역폭 경합이 아니라 당시 CPU 쿨링 문제였을 가능성이 제기돼
-`scripts/tools/camera_parallel_connect_test.py`(로봇 없이 카메라만 테스트)로
+`scripts/piper/camera/camera_parallel_connect_test.py`(로봇 없이 카메라만 테스트)로
 재검증 — 3회 연속 성공(~10.3~10.4s, 카메라 1대 warmup_s와 거의 동일해서 실제로
 겹쳐서 도는 것도 확인됨), depth 프레임도 정상이라 병렬 연결로 되돌렸다.
 
@@ -398,7 +398,7 @@ bash scripts/5__record.sh
 conda activate ugrp
 cd /home/ugrp43/UGRP/lerobot_robot_piper
 
-python scripts/tools/realsense_depth_record_test.py \
+python scripts/piper/camera/realsense_depth_record_test.py \
   --seconds 5 \
   --depth-only \
   --preview
@@ -449,15 +449,14 @@ else:
 
 ## 12. Replay에서 RGB/Depth 보기
 
-`piper_replay_player.py`(RViz 없이)와 `piper_replay_player_rviz.py`(RViz 동기화
-재생) 둘 다 `info.json`의 `dtype=video`인 feature를 전부 자동으로 찾아서 화면에
+`piper_replay_player.py`는 `info.json`의 `dtype=video`인 feature를 전부 자동으로 찾아서 화면에
 쌓는다. depth 녹화 이후로는 카메라마다 RGB + Depth 두 스트림이 함께 잡혀서
 창에 4개가 한꺼번에 쌓이게 됐고, depth 스트림도 다른 일반 플레이어처럼
 `bgr24`로 그대로 디코딩되면 12-bit 양자화 code를 색상 픽셀인 것처럼 잘못
 표시했다.
 
-두 스크립트 모두 `--view {both,rgb,depth}` 옵션을 추가했다(기본 `both` = 기존
-동작 그대로). `rgb`/`depth`를 주면 `info.json`의 `is_depth_map` 메타데이터로
+`--view {both,rgb,depth}` 옵션의 기본값은 기존과 같은 `both`다. `rgb`/`depth`를 주면
+`info.json`의 `is_depth_map` 메타데이터로
 스트림을 필터링하고, depth 스트림은 `gray12le` code를 그대로 디코딩한 뒤
 `dequantize_depth()`로 mm 값을 복원해서 `docs/depth/tools/depth_video_viewer.py`와
 동일한 방식(고정 범위 100–3000mm, `COLORMAP_TURBO`, invalid(≤100mm)는 검정)으로
@@ -470,9 +469,11 @@ depth)를 추가해서, `--video-key`를 직접 지정하지 않아도 GUI에서
 
 ```bash
 # RGB만
-python scripts/tools/piper_replay_player.py --dataset-root <root> --episode 0 --view rgb
+python scripts/piper/validation/piper_replay_player.py --dataset-root <root> --episode 0 --view rgb
 # Depth만
-python scripts/tools/piper_replay_player.py --dataset-root <root> --episode 0 --view depth
+python scripts/piper/validation/piper_replay_player.py --dataset-root <root> --episode 0 --view depth
+# RViz도 같은 player로 동기화
+python scripts/piper/validation/piper_replay_player.py --dataset-root <root> --episode 0 --rviz
 ```
 
 ## 13. Depth 영상 단독 보기 (동기화 재생 없이)
@@ -487,7 +488,7 @@ depth를 컬러맵으로 변환한다.
 [`tools/depth_video_viewer.py`](tools/depth_video_viewer.py)
 
 ```bash
-python scripts/tools/depth_video_viewer.py \
+python scripts/piper/camera/depth_video_viewer.py \
   records/local/realsense_depth_test_0724-122313 \
   --camera both
 ```
@@ -517,8 +518,8 @@ python scripts/tools/depth_video_viewer.py \
 
 - 에피소드 종료 후 CPU `libx265`로 영상을 일괄 인코딩한다.
 - VLC 등 일반 범용 비디오 플레이어에서는 depth MP4를 직접 열어도 12-bit
-  code가 raw grayscale로만 보인다(mm 컬러맵 없음). `piper_replay_player.py`/
-  `piper_replay_player_rviz.py`(`--view depth`)와 `depth_video_viewer.py`,
+  code가 raw grayscale로만 보인다(mm 컬러맵 없음). `piper_replay_player.py --view depth`와
+  `depth_video_viewer.py`,
   녹화 중 rerun 미리보기는 컬러맵을 적용해서 정상적으로 보여준다(10, 11, 12번
   항목 참고).
 - NVIDIA NVENC는 현재 환경에서 `gray12le` 단일채널 12-bit 입력을 지원하지

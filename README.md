@@ -8,7 +8,7 @@
 
 - **Leader-Follower Teleoperation**: leader 팔의 움직임을 follower 팔에 실시간 반영
 - **Dataset Recording**: joint position과 camera frame을 LeRobotDataset으로 기록
-- **녹화 초반 프레임 자동 보정**: 매 녹화마다 각 에피소드의 초반 N(기본 100) 프레임을 parking 자세에서 시작하도록 `scripts/tools/smooth_start_frames.py`로 선형 보간 보정(`configs/recording.env`의 `SMOOTH_START_FRAMES`로 조절/비활성화). 모든 에피소드가 동일한 시작 자세에서 출발하므로 VLA 학습용 데이터의 시작 상태가 일관돼짐
+- **녹화 초반 프레임 자동 보정**: 매 녹화마다 각 에피소드의 초반 N(기본 100) 프레임을 parking 자세에서 시작하도록 `scripts/piper/recording/smooth_start_frames.py`로 선형 보간 보정(`configs/recording.env`의 `SMOOTH_START_FRAMES`로 조절/비활성화). 모든 에피소드가 동일한 시작 자세에서 출발하므로 VLA 학습용 데이터의 시작 상태가 일관돼짐
 - **CAN Bus Communication**: `piper_sdk`, `wego_piper` 기반 하드웨어 제어
 - **Safety Limits**: `max_relative_target`으로 timestep별 joint 이동량 제한
 - **Camera Integration**: OpenCV/Intel RealSense 카메라를 follower observation으로 기록
@@ -92,7 +92,7 @@ DRY_RUN=true bash scripts/5__record.sh
 |---|---|
 | `scripts/0__launch_gui.sh` | Teleop과 Dataset 뷰어가 통합된 메인 GUI 실행 |
 | `scripts/1__init_can.sh` | CAN 인터페이스 bitrate 설정 및 선택적 USB bus 기반 rename |
-| `scripts/2__find_camera.sh` | LeRobot 카메라 탐색 또는 `scripts/tools/camera_check.py` 실행 |
+| `scripts/2__find_camera.sh` | LeRobot 카메라 탐색 또는 `scripts/piper/camera/camera_check.py` 실행 |
 | `scripts/3__set_camera.sh` | `configs/recording.env`의 `TOP_CAM`/`WRIST_CAM` 갱신 |
 | `scripts/4__teleoperate.sh` | `piper_follower`/`piper_leader` 텔레옵 점검 |
 | `scripts/5__record.sh` | 카메라 포함 LeRobot dataset 녹화 |
@@ -107,19 +107,19 @@ DRY_RUN=true bash scripts/5__record.sh
 
 | 파일 | 역할 |
 |---|---|
-| `scripts/tools/setup_can.sh` | 수동 CAN 초기화 도구 |
-| `scripts/tools/camera_check.py` | OpenCV 카메라 index grid viewer |
-| `scripts/tools/realsense_view.py` | RealSense serial 확인 및 RGB stream 미리보기 |
-| `scripts/tools/wego_dataset_check.py` | 녹화된 LeRobotDataset feature/action/state 점검 (현재 `0__launch_gui.sh`의 뷰어에 통합됨) |
-| `scripts/tools/safe_release_torque.py` | joint1~6을 0으로 이동 후, 사람이 팔을 잡은 상태에서 수동으로 torque 해제 (`DISABLE_TORQUE_ON_DISCONNECT=false`와 짝) |
+| `scripts/piper/hardware/setup_can.sh` | 수동 CAN 초기화 도구 |
+| `scripts/piper/camera/camera_check.py` | OpenCV 카메라 index grid viewer |
+| `scripts/piper/camera/realsense_view.py` | RealSense serial 확인 및 RGB stream 미리보기 |
+| `scripts/piper/validation/dataset_structure_check.py` | 녹화된 LeRobotDataset metadata·feature/action/state·episode 구조 점검 |
+| `scripts/piper/hardware/safe_release_torque.py` | joint1~6을 0으로 이동 후, 사람이 팔을 잡은 상태에서 수동으로 torque 해제 (`DISABLE_TORQUE_ON_DISCONNECT=false`와 짝) |
 
 예시:
 
 ```bash
-python3 scripts/tools/realsense_view.py --list
-python3 scripts/tools/realsense_view.py --serial 327122074262
-python3 scripts/tools/wego_dataset_check.py --dataset-repo-id local/piper_write_light --episode 0
-python3 scripts/tools/safe_release_torque.py --port can_follower
+python3 scripts/piper/camera/realsense_view.py --list
+python3 scripts/piper/camera/realsense_view.py --serial 327122074262
+python3 scripts/piper/validation/dataset_structure_check.py --dataset-repo-id local/piper_write_light --episode 0
+python3 scripts/piper/hardware/safe_release_torque.py --port can_follower
 ```
 
 ## 하드웨어 설정
@@ -137,10 +137,10 @@ sudo ip link set can0 up
 
 | Arm | Interface 예시 |
 |---|---|
-| Follower robot | `can0` 또는 `can_follower1` |
-| Leader teleoperator | `can1` 또는 `can_leader1` |
+| Follower robot | `can0` 또는 `can_follower` |
+| Leader teleoperator | `can1` 또는 `can_leader` |
 
-통합 GUI(`piper-teleop`)의 CAN Setup 패널(Detect/Init All)로 CAN 포트를 감지하고, `ctrl_mode`를 읽어 leader/follower 역할을 자동 판별한 뒤 `can_leader1`, `can_follower1` 같은 고정 이름으로 설정할 수 있습니다.
+통합 GUI(`piper-teleop`)의 CAN Setup 패널(Detect/Init All)로 CAN 포트를 감지하고, `ctrl_mode`를 읽어 leader/follower 역할을 자동 판별한 뒤 `can_leader`, `can_follower` 같은 고정 이름으로 설정할 수 있습니다.
 
 ## GUI 도구
 
@@ -270,7 +270,7 @@ Parking pose의 normalized 값은 `0, -100, 100, 0, 0, -13.04, 0`입니다 (`mot
 | [docs/policy/README.md](docs/policy/README.md) | Policy 문서 진입점과 동기/비동기 action chunk 실행 원리 |
 | [docs/policy/offline_chunk_rollout.md](docs/policy/offline_chunk_rollout.md) | 학습 데이터 observation을 이용한 비실물 예측 궤적 검증 |
 | [docs/policy/human_approved_policy_execution.md](docs/policy/human_approved_policy_execution.md) | Action chunk의 구간별 RViz 확인·인간 승인·실물 실행 구현과 검증 상태 |
-| [docs/training/smolvla_finetuning.md](docs/training/smolvla_finetuning.md) | `erase the shape` SmolVLA 학습 설정과 30,000-step 완료 결과 |
+| [docs/tasks/erase_shape/README.md](docs/tasks/erase_shape/README.md) | 도형 지우기 과제의 QC·학습·평가·실행 설계 문서 |
 | [docs/roadmap.md](docs/roadmap.md) | 남은 작업 |
 | [docs/change.md](docs/change.md) | WEGO 원본 대비 변경 사항 |
 | [docs/depth/README.md](docs/depth/README.md) | RealSense depth 녹화 백포트 상세 설명 |

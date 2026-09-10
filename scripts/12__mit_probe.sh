@@ -27,5 +27,5 @@ load_recording_env
 # ModuleNotFoundError로 죽는다.
 activate_conda_env
 
-run_or_print python "${PROBE_SCRIPT_DIR}/tools/piper_mit_probe.py" \
+run_or_print python "${PROBE_SCRIPT_DIR}/piper/hardware/piper_mit_probe.py" \
   --confirm I_UNDERSTAND_TORQUE_CONTROL "$@"
